@@ -186,10 +186,11 @@ class ContrastAccumulator:
     ) -> list[tuple[int, int, float]]:
         """Ranked (layer, expert, pos_saliency − neg_saliency) pairs."""
         pairs = self._folded_pairs(label, stage)
-        rows = [
-            (layer, expert, pairs[(layer, expert)][pos.value] - pairs[(layer, expert)][neg.value])
-            for layer, expert in self._pairs_for(label, stage)
-        ]
+        rows: list[tuple[int, int, float]] = []
+        for layer, expert in self._pairs_for(label, stage):
+            cell = pairs.get((layer, expert), {})
+            delta = cell.get(pos.value, 0.0) - cell.get(neg.value, 0.0)
+            rows.append((layer, expert, delta))
         rows.sort(key=lambda r: r[2], reverse=True)
         return rows[:topk]
 

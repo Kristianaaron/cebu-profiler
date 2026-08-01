@@ -13,6 +13,7 @@ from model_atlas.atlas.runtime import build_mini_moe
 from model_atlas.census.census import build_manifest
 from model_atlas.checkpoint.source_manifest import load_manifest
 from model_atlas.checkpoint.structural_graph import build_structural_graph
+from model_atlas.dashboard import write_dashboard
 from model_atlas.planning.memory_planner import GIB, assess
 from model_atlas.registry.architectures import get_registry
 
@@ -46,6 +47,16 @@ def doctor() -> None:
     print("OK" if ok else "FAIL")
     if not ok:
         raise typer.Exit(1)
+
+
+@app.command()
+def dashboard(
+    out: str = typer.Option("atlas_dashboard.html", "--out", help="output HTML path"),
+    seed: int = typer.Option(0, "--seed"),
+) -> None:
+    """Render the Atlas Lab interactive dashboard from measured data."""
+    path = write_dashboard(out, seed=seed)
+    print(f"wrote interactive dashboard: {path}")
 
 
 @app.command("list-architectures")

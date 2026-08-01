@@ -120,7 +120,7 @@ def build_candidate(
         layer_protected = {e for (lay, e) in protected if lay == layer}
         if strategy == "coalition":
             kept = sorted(layer_protected)
-            if len(kept) < model.arch.moe.top_k:
+            if len(kept) < keep_budget_per_layer:
                 kept = _select_by_value(
                     model, inputs.saliency, layer, keep_budget_per_layer, set(kept)
                 )
