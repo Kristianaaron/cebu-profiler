@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import platform
+from pathlib import Path
 
 import typer
 
 from model_atlas import __version__
 from model_atlas.census.census import build_manifest
+from model_atlas.checkpoint.source_manifest import load_manifest
+from model_atlas.checkpoint.structural_graph import build_structural_graph
 from model_atlas.planning.memory_planner import GIB, assess
 from model_atlas.registry.architectures import get_registry
 
@@ -54,6 +57,35 @@ def list_architectures() -> None:
             f"  layers={spec.num_text_layers} experts={spec.moe.num_routed_experts} "
             f"top_k={spec.moe.top_k} latent={spec.moe.latent_dim} hidden={spec.hidden_dim}"
         )
+
+
+@app.command()
+def inspect(
+    checkpoint_dir: str,
+    write_graph: bool = typer.Option(
+        False,
+        "--write-graph",
+        help="Write checkpoint_manifest.json + structural_model_graph.json into the checkpoint dir",
+    ),
+) -> None:
+    """Census a real checkpoint directory (headers only) into a structural graph."""
+    manifest = load_manifest(checkpoint_dir)
+    graph = build_structural_graph(manifest)
+    print(f"checkpoint: {checkpoint_dir}")
+    print(f"  shards: {len(manifest.shards)}")
+    print(f"  tensors: {manifest.tensor_count}")
+    print(f"  total bytes: {manifest.total_bytes}")
+    print(f"  coverage: {graph.coverage:.3f}")
+    print(f"  valid: {graph.valid}")
+    for u in graph.unclassified:
+        print(f"  UNCLASSIFIED: {u}")
+    if write_graph and graph.valid:
+        root = Path(checkpoint_dir)
+        (root / "checkpoint_manifest.json").write_text(manifest.model_dump_json(indent=2))
+        (root / "structural_model_graph.json").write_text(graph.model_dump_json(indent=2))
+        print("  wrote checkpoint_manifest.json + structural_model_graph.json")
+    if not graph.valid:
+        raise typer.Exit(1)
 
 
 @app.command()
