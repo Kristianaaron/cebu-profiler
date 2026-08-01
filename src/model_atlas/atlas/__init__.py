@@ -1,4 +1,4 @@
-"""Atlas analysis subsystem: output contract + synthetic REAP runtime."""
+"""Atlas analysis subsystem: contracts + synthetic analysis runtime."""
 
 from model_atlas.atlas.coalition import (
     CoalitionMap,
@@ -33,6 +33,18 @@ from model_atlas.atlas.output_layout import (
     build_run_manifest,
     expected_run_files,
     validate_evidence_present,
+)
+from model_atlas.atlas.pathways import (
+    ChannelSensitivity,
+    DivergenceResult,
+    PathRecord,
+    PathSignature,
+    PathStats,
+    capability_paths,
+    channel_sensitivity,
+    path_stats,
+    route_path,
+    success_failure_divergence,
 )
 from model_atlas.atlas.reap import (
     CalibrationSample,
@@ -92,4 +104,14 @@ __all__ = [
     "build_mini_moe",
     "forward",
     "representation_profile",
+    "ChannelSensitivity",
+    "DivergenceResult",
+    "PathRecord",
+    "PathStats",
+    "PathSignature",
+    "capability_paths",
+    "channel_sensitivity",
+    "path_stats",
+    "route_path",
+    "success_failure_divergence",
 ]
