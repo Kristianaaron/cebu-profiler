@@ -86,6 +86,16 @@ class SaliencyAccumulator:
         c = self._count[key]
         return self._freq[key] / c if c else 0.0
 
+    def total_value(self, layer: int, expert: int) -> float:
+        """Mean measured saliency of an expert across all cells (kept experts)."""
+        tot = 0.0
+        n = 0
+        for (l2, e2, _lab, _stg), s in self._sum.items():
+            if l2 == layer and e2 == expert:
+                tot += s
+                n += self._count[(l2, e2, _lab, _stg)]
+        return tot / n if n else 0.0
+
     def rank(
         self,
         label: CapabilityLabel,
