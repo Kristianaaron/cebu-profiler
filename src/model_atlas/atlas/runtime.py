@@ -185,6 +185,7 @@ def _forward_layer(
     layer_idx: int,
     hidden: list[list[float]],
     top_k: int,
+    route_override: dict[tuple[int, int], list[int]] | None = None,
 ) -> tuple[LayerTrace, list[list[float]]]:
     T = len(hidden)
     logits: list[list[float]] = []
@@ -198,6 +199,7 @@ def _forward_layer(
     moe_norm: list[float] = []
     output_norm: list[float] = []
     out: list[list[float]] = []
+    override = route_override or {}
 
     for t in range(T):
         h = hidden[t]
@@ -206,7 +208,13 @@ def _forward_layer(
         i_norm = _l2_norm(h)
         logits_l = _matvec(layer_weights.router, ln)  # [n_exp]
         p = _softmax_full(logits_l)
-        sel, sel_p = _softmax_topk(logits_l, top_k)
+        if (layer_idx, t) in override:
+            # counterfactual: force a specific equal-compute expert set; keep the
+            # frozen router's gate values over that set (no router retraining)
+            sel = list(override[(layer_idx, t)])
+            sel_p = _softmax_full([logits_l[e] for e in sel])
+        else:
+            sel, sel_p = _softmax_topk(logits_l, top_k)
 
         norm_e: list[float] = []
         weighted: list[float] = []
@@ -253,15 +261,24 @@ def _forward_layer(
     return trace, out
 
 
-def forward(model: MiniMoE, tokens: list[int], top_k: int | None = None) -> ForwardResult:
-    """Streaming forward across layers; returns per-layer traces + final output."""
+def forward(
+    model: MiniMoE,
+    tokens: list[int],
+    top_k: int | None = None,
+    route_override: dict[tuple[int, int], list[int]] | None = None,
+) -> ForwardResult:
+    """Streaming forward across layers; returns per-layer traces + final output.
+
+    `route_override` forces specific expert sets at (layer, token) for
+    counterfactual routing. None elsewhere means the frozen router is used.
+    """
     if top_k is None:
         top_k = model.arch.moe.top_k
     emb = model.embed
     hidden = [list(emb[t]) for t in tokens]
     traces: list[LayerTrace] = []
     for idx, layer_w in enumerate(model.layers):
-        trace, hidden = _forward_layer(model, layer_w, idx, hidden, top_k)
+        trace, hidden = _forward_layer(model, layer_w, idx, hidden, top_k, route_override)
         traces.append(trace)
     final = hidden[-1]  # last token hidden state
     logits = _matvec(model.lm_head, final)  # [vocab]
