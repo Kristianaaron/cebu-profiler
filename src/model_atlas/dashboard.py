@@ -31,6 +31,20 @@ SEED = 0
 ARCH = get_registry().get("k3-mini")
 
 
+# Lucide icon inner-SVG (viewBox 0 0 24 24) for each side-nav tab.
+_LUCIDE = "fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\""
+_ICONS: dict[str, str] = {
+    "summary": '<rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>',
+    "capability": '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
+    "contrast": '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
+    "coalition": '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>',
+    "path": '<circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/>',
+    "compression": '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
+    "candidate": '<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
+    "heldout": '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1 1 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
+}
+
+
 def _capability_rows(model: MiniMoE, saliency: SaliencyAccumulator) -> list[dict[str, Any]]:
     rows = []
     for label in list(CapabilityLabel)[:12]:
@@ -177,7 +191,7 @@ def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
     }
 
 
-_TAB_TEMPLATE = """<div class="tab" data-tab="{id}">{title}</div>"""
+_TAB_TEMPLATE = """<div class="tab" data-tab="{id}"><svg viewBox="0 0 24 24" width="15" height="15" {_LUCIDE} style="flex:0 0 auto">{icon}</svg><span>{title}</span></div>"""
 
 
 def render_dashboard(data: dict[str, Any]) -> str:
@@ -193,7 +207,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
         {"id": "candidate", "title": "Derivatives"},
         {"id": "heldout", "title": "Held-out"},
     ]
-    tab_html = "".join(_TAB_TEMPLATE.format(id=t["id"], title=t["title"]) for t in tabs)
+    tab_html = "".join(_TAB_TEMPLATE.format(id=t["id"], title=t["title"], icon=_ICONS.get(t["id"], ""), _LUCIDE=_LUCIDE) for t in tabs)
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -206,7 +220,8 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .sub{{color:#8a94a6;font-size:12px;margin-top:4px}}
  .layout{{display:flex;min-height:100vh}}
  nav.side{{width:200px;flex:0 0 200px;display:flex;flex-direction:column;gap:2px;background:#161a22;border-right:1px solid #262c38;padding:14px 10px;position:sticky;top:0;height:100vh;overflow-y:auto;box-sizing:border-box}}
- nav.side .tab{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;padding:8px 10px;cursor:pointer;color:#aab3c0;border-radius:6px}}
+ nav.side .tab{{display:flex;align-items:center;gap:9px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;padding:8px 10px;cursor:pointer;color:#aab3c0;border-radius:6px}}
+ nav.side .tab svg{{flex:0 0 auto}}
  nav.side .tab:hover{{background:#1d2430}}
  nav.side .tab.active{{color:#7cc0ff;background:#1d2430}}
  main.main{{flex:1;padding:22px 26px}}
