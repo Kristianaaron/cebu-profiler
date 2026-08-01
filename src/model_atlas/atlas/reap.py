@@ -190,7 +190,7 @@ class ContrastAccumulator:
         stage: TrajectoryStage | None = None,
     ) -> list[tuple[int, int]]:
         """(layer, expert) pairs routed at least once in any of `states`."""
-        stgs = set(stage.value) if stage else {s.value for s in self._stages()}
+        stgs = {stage.value} if stage else self._stages()
         out: set[tuple[int, int]] = set()
         for (layer, expert, lbl, stg, suc), c in self._routed.items():
             if lbl == label.value and stg in stgs and SuccessState(suc) in states and c > 0:
