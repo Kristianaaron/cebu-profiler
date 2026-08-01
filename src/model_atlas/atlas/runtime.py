@@ -190,6 +190,7 @@ def _forward_layer(
     hidden: list[list[float]],
     top_k: int,
     route_override: dict[tuple[int, int], list[int]] | None = None,
+    excluded: dict[int, frozenset[int]] | None = None,
 ) -> tuple[LayerTrace, list[list[float]]]:
     T = len(hidden)
     logits: list[list[float]] = []
@@ -205,6 +206,10 @@ def _forward_layer(
     combined_out: list[list[float]] = []
     out: list[list[float]] = []
     override = route_override or {}
+    excluded_set = excluded.get(layer_idx, frozenset()) if excluded else frozenset()
+    allowed = [e for e in range(model.n_exp) if e not in excluded_set]
+    if not allowed:
+        raise ValueError(f"ablation excluded all experts at layer {layer_idx}")
 
     for t in range(T):
         h = hidden[t]
@@ -212,14 +217,21 @@ def _forward_layer(
         ln = [(v * w) for v, w in zip(h, layer_weights.ln_w, strict=True)]
         i_norm = _l2_norm(h)
         logits_l = _matvec(layer_weights.router, ln)  # [n_exp]
-        p = _softmax_full(logits_l)
+        sub = [logits_l[e] for e in allowed]
         if (layer_idx, t) in override:
             # counterfactual: force a specific equal-compute expert set; keep the
             # frozen router's gate values over that set (no router retraining)
             sel = list(override[(layer_idx, t)])
             sel_p = _softmax_full([logits_l[e] for e in sel])
+            p = _softmax_full(logits_l)
         else:
-            sel, sel_p = _softmax_topk(logits_l, top_k)
+            # route among `allowed` (all experts normally, minus `excluded` on ablation)
+            sel_idx, sel_p = _softmax_topk(sub, top_k)
+            sel = [allowed[i] for i in sel_idx]
+            sub_p = _softmax_full(sub)
+            p = [0.0] * model.n_exp
+            for idx, e in enumerate(allowed):
+                p[e] = sub_p[idx]
 
         norm_e: list[float] = []
         weighted: list[float] = []
@@ -239,7 +251,7 @@ def _forward_layer(
         out.append(nt)
         combined_out.append(combined)
 
-        H = -sum(pi * math.log(pi) for pi in p)
+        H = -sum(pi * math.log(pi) for pi in p if pi > 0.0)
         entropy.append(H)
         logits.append(logits_l)
         input_norm.append(i_norm)
@@ -273,11 +285,14 @@ def forward(
     tokens: list[int],
     top_k: int | None = None,
     route_override: dict[tuple[int, int], list[int]] | None = None,
+    excluded: dict[int, frozenset[int]] | None = None,
 ) -> ForwardResult:
     """Streaming forward across layers; returns per-layer traces + final output.
 
     `route_override` forces specific expert sets at (layer, token) for
-    counterfactual routing. None elsewhere means the frozen router is used.
+    counterfactual routing. `excluded` removes experts from routing at a layer
+    (ablation), renormalizing the router over the rest. Both are frozen-model
+    interventions.
     """
     if top_k is None:
         top_k = model.arch.moe.top_k
@@ -285,7 +300,7 @@ def forward(
     hidden = [list(emb[t]) for t in tokens]
     traces: list[LayerTrace] = []
     for idx, layer_w in enumerate(model.layers):
-        trace, hidden = _forward_layer(model, layer_w, idx, hidden, top_k, route_override)
+        trace, hidden = _forward_layer(model, layer_w, idx, hidden, top_k, route_override, excluded)
         traces.append(trace)
     final = hidden[-1]  # last token hidden state
     logits = _matvec(model.lm_head, final)  # [vocab]

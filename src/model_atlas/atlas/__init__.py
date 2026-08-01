@@ -1,5 +1,14 @@
 """Atlas analysis subsystem: output contract + synthetic REAP runtime."""
 
+from model_atlas.atlas.coalition import (
+    CoalitionMap,
+    PairAnalysis,
+    coactivation_map,
+    minimum_destructive_set,
+    pairwise_causal,
+    single_effect,
+    synergic_pairs,
+)
 from model_atlas.atlas.counterfactual import (
     AlternativeRoute,
     RouteRegretResult,
@@ -51,6 +60,13 @@ __all__ = [
     "final_utility",
     "logit_kl",
     "sample_topk_subsets",
+    "CoalitionMap",
+    "PairAnalysis",
+    "coactivation_map",
+    "minimum_destructive_set",
+    "pairwise_causal",
+    "single_effect",
+    "synergic_pairs",
     "Feature",
     "FeatureDictionary",
     "VocabProjection",
