@@ -204,10 +204,13 @@ def render_dashboard(data: dict[str, Any]) -> str:
  header{{padding:18px 24px;background:#161a22;border-bottom:1px solid #262c38}}
  h1{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;letter-spacing:-0.01em;font-size:18px;margin:0}}
  .sub{{color:#8a94a6;font-size:12px;margin-top:4px}}
- .tabs{{display:flex;gap:2px;background:#161a22;padding:0 12px;flex-wrap:wrap}}
- .tab{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;padding:10px 16px;cursor:pointer;color:#aab3c0;border-bottom:2px solid transparent}}
- .tab.active{{color:#7cc0ff;border-bottom-color:#7cc0ff}}
- main{{padding:20px 24px}} .panel{{display:none}} .panel.active{{display:block}}
+ .layout{{display:flex;min-height:100vh}}
+ nav.side{{width:200px;flex:0 0 200px;display:flex;flex-direction:column;gap:2px;background:#161a22;border-right:1px solid #262c38;padding:14px 10px;position:sticky;top:0;height:100vh;overflow-y:auto;box-sizing:border-box}}
+ nav.side .tab{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;padding:8px 10px;cursor:pointer;color:#aab3c0;border-radius:6px}}
+ nav.side .tab:hover{{background:#1d2430}}
+ nav.side .tab.active{{color:#7cc0ff;background:#1d2430}}
+ main.main{{flex:1;padding:22px 26px}}
+ .panel{{display:none}} .panel.active{{display:block}}
  table{{border-collapse:collapse;width:100%;font-size:13px;margin-top:8px}}
  th,td{{text-align:left;padding:6px 10px;border-bottom:1px solid #222937}}
  th{{color:#8a94a6;font-weight:600}}
@@ -215,10 +218,11 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .green{{color:#6fe3a1}} .amber{{color:#ffcf6b}} .red{{color:#ff7b7b}}
  .note{{color:#8a94a6;font-size:12px}}
 </style></head><body>
+<div class="layout">
+<nav class="side">{tab_html}</nav>
 <header><h1>Atlas Lab — model-atlas</h1>
 <div class="sub">{data["meta"]["arch"]} · {data["meta"]["layers"]} layers · {data["meta"]["experts"]} experts · top-{data["meta"]["top_k"]} · seed {data["meta"]["seed"]} — synthetic miniature MoE; all values measured by the F3–F13 runtime. Throughput/latency are estimates.</div></header>
-<div class="tabs">{tab_html}</div>
-<main>
+<main class="main">
  <div class="panel" id="panel-summary">
    <p>End-to-end parent→derivative Atlas over a genuine synthetic mini-MoE. Everything below is computed by the same measured code paths as the test suite (98 tests green). See the <em>capability</em>, <em>success−failure</em>, <em>coalitions</em>, <em>paths</em>, <em>compression</em>, <em>derivatives</em> and <em>held-out</em> tabs.</p>
  </div>
@@ -230,6 +234,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  <div class="panel" id="panel-candidate"><p class="note">Derivative candidates: kept experts/layer, resident bytes per node, go/no-go fit, held-out retention.</p><table id="t-candidate"></table></div>
  <div class="panel" id="panel-heldout"><p class="note">Per-capability held-out retention (derivative vs source), measured.</p><table id="t-heldout"></table></div>
 </main>
+</div>
 <script>
  const DATA = {payload};
  function el(t, rows){{ if(!rows||!rows.length){{return "<tr><td class='note'>no data</td></tr>";}}
