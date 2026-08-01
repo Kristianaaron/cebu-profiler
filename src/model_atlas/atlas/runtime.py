@@ -145,6 +145,7 @@ class LayerTrace:
     input_norm: list[float]  # [T] representation stats (v2 §11)
     moe_norm: list[float]  # [T]
     output_norm: list[float]  # [T]
+    combined: list[list[float]]  # [T, hidden] MoE-output vector per token (v2 §11)
 
 
 @dataclass
@@ -152,6 +153,9 @@ class ForwardResult:
     traces: list[LayerTrace]
     final_hidden: list[float]
     logits: list[float]  # [vocab]
+    final_hidden_states: list[list[float]] = field(
+        default_factory=list
+    )  # per-token hidden (v2 §11)
     deviations_used: int = 0  # count of per-expert computations (none fabricated)
 
 
@@ -198,6 +202,7 @@ def _forward_layer(
     input_norm: list[float] = []
     moe_norm: list[float] = []
     output_norm: list[float] = []
+    combined_out: list[list[float]] = []
     out: list[list[float]] = []
     override = route_override or {}
 
@@ -232,6 +237,7 @@ def _forward_layer(
         # residual add
         nt = _vec_add(h, combined)
         out.append(nt)
+        combined_out.append(combined)
 
         H = -sum(pi * math.log(pi) for pi in p)
         entropy.append(H)
@@ -257,6 +263,7 @@ def _forward_layer(
         input_norm=input_norm,
         moe_norm=moe_norm,
         output_norm=output_norm,
+        combined=combined_out,
     )
     return trace, out
 
@@ -282,4 +289,9 @@ def forward(
         traces.append(trace)
     final = hidden[-1]  # last token hidden state
     logits = _matvec(model.lm_head, final)  # [vocab]
-    return ForwardResult(traces=traces, final_hidden=final, logits=logits)
+    return ForwardResult(
+        traces=traces,
+        final_hidden=final,
+        logits=logits,
+        final_hidden_states=hidden,  # per-token after all layers
+    )

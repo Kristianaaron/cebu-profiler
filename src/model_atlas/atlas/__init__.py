@@ -8,6 +8,17 @@ from model_atlas.atlas.counterfactual import (
     logit_kl,
     sample_topk_subsets,
 )
+from model_atlas.atlas.features import (
+    Feature,
+    FeatureDictionary,
+    VocabProjection,
+    directional_projection,
+    expert_direction,
+    learn_features,
+    project_vocabulary,
+    promoted_suppressed,
+    residual_direction,
+)
 from model_atlas.atlas.output_layout import (
     ATLAS_RUN_FILES,
     build_run_manifest,
@@ -40,6 +51,15 @@ __all__ = [
     "final_utility",
     "logit_kl",
     "sample_topk_subsets",
+    "Feature",
+    "FeatureDictionary",
+    "VocabProjection",
+    "directional_projection",
+    "expert_direction",
+    "learn_features",
+    "project_vocabulary",
+    "promoted_suppressed",
+    "residual_direction",
     "build_run_manifest",
     "expected_run_files",
     "validate_evidence_present",
