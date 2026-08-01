@@ -142,6 +142,9 @@ class LayerTrace:
     expert_norm: list[list[float]]  # [T, n_exp]
     router_weighted: list[list[float]]  # [T, n_exp]
     entropy: list[float]  # [T]
+    input_norm: list[float]  # [T] representation stats (v2 §11)
+    moe_norm: list[float]  # [T]
+    output_norm: list[float]  # [T]
 
 
 @dataclass
@@ -150,6 +153,30 @@ class ForwardResult:
     final_hidden: list[float]
     logits: list[float]  # [vocab]
     deviations_used: int = 0  # count of per-expert computations (none fabricated)
+
+
+def representation_profile(
+    model: MiniMoE, tokens: list[int], top_k: int | None = None
+) -> list[dict[str, float]]:
+    """Per-layer statistics-only representation profile (v2 §11 storage granularity).
+
+    Stores means of input/moe/output norms and routing entropy per layer — no
+    full tensors. Deterministic for the same model + tokens.
+    """
+    result = forward(model, tokens, top_k=top_k)
+    profile: list[dict[str, float]] = []
+    for trace in result.traces:
+        t = len(trace.input_norm)
+        profile.append(
+            {
+                "layer": float(trace.layer),
+                "input_norm_mean": sum(trace.input_norm) / t if t else 0.0,
+                "moe_norm_mean": sum(trace.moe_norm) / t if t else 0.0,
+                "output_norm_mean": sum(trace.output_norm) / t if t else 0.0,
+                "entropy_mean": sum(trace.entropy) / t if t else 0.0,
+            }
+        )
+    return profile
 
 
 def _forward_layer(
@@ -167,12 +194,16 @@ def _forward_layer(
     expert_norm: list[list[float]] = []
     router_weighted: list[list[float]] = []
     entropy: list[float] = []
+    input_norm: list[float] = []
+    moe_norm: list[float] = []
+    output_norm: list[float] = []
     out: list[list[float]] = []
 
     for t in range(T):
         h = hidden[t]
         # (simplified) pre-MoE normalization in place of full attention stack
         ln = [(v * w) for v, w in zip(h, layer_weights.ln_w, strict=True)]
+        i_norm = _l2_norm(h)
         logits_l = _matvec(layer_weights.router, ln)  # [n_exp]
         p = _softmax_full(logits_l)
         sel, sel_p = _softmax_topk(logits_l, top_k)
@@ -197,6 +228,9 @@ def _forward_layer(
         H = -sum(pi * math.log(pi) for pi in p)
         entropy.append(H)
         logits.append(logits_l)
+        input_norm.append(i_norm)
+        moe_norm.append(_l2_norm(combined))
+        output_norm.append(_l2_norm(nt))
         probs_all.append(p)
         topk_ids.append(sel)
         topk_probs.append(sel_p)
@@ -212,6 +246,9 @@ def _forward_layer(
         expert_norm=expert_norm,
         router_weighted=router_weighted,
         entropy=entropy,
+        input_norm=input_norm,
+        moe_norm=moe_norm,
+        output_norm=output_norm,
     )
     return trace, out
 
