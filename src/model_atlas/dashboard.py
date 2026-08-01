@@ -199,11 +199,13 @@ def render_dashboard(data: dict[str, Any]) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Atlas Lab — model-atlas</title>
 <style>
- body{{font-family:ui-monospace,Menlo,Consolas,monospace;margin:0;background:#0f1115;color:#d5dbe3}}
+ @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+ body{{font-family:'Inter',ui-sans-serif,system-ui,sans-serif;margin:0;background:#0f1115;color:#d5dbe3}}
  header{{padding:18px 24px;background:#161a22;border-bottom:1px solid #262c38}}
- h1{{font-size:18px;margin:0}} .sub{{color:#8a94a6;font-size:12px;margin-top:4px}}
+ h1{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;letter-spacing:-0.01em;font-size:18px;margin:0}}
+ .sub{{color:#8a94a6;font-size:12px;margin-top:4px}}
  .tabs{{display:flex;gap:2px;background:#161a22;padding:0 12px;flex-wrap:wrap}}
- .tab{{padding:10px 16px;cursor:pointer;color:#aab3c0;border-bottom:2px solid transparent}}
+ .tab{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;padding:10px 16px;cursor:pointer;color:#aab3c0;border-bottom:2px solid transparent}}
  .tab.active{{color:#7cc0ff;border-bottom-color:#7cc0ff}}
  main{{padding:20px 24px}} .panel{{display:none}} .panel.active{{display:block}}
  table{{border-collapse:collapse;width:100%;font-size:13px;margin-top:8px}}
