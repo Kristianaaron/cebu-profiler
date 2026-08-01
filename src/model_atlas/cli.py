@@ -8,6 +8,8 @@ from pathlib import Path
 import typer
 
 from model_atlas import __version__
+from model_atlas.atlas.reap import make_synthetic_corpus, run_calibration
+from model_atlas.atlas.runtime import build_mini_moe
 from model_atlas.census.census import build_manifest
 from model_atlas.checkpoint.source_manifest import load_manifest
 from model_atlas.checkpoint.structural_graph import build_structural_graph
@@ -86,6 +88,37 @@ def inspect(
         print("  wrote checkpoint_manifest.json + structural_model_graph.json")
     if not graph.valid:
         raise typer.Exit(1)
+
+
+@app.command()
+def calibrate(
+    arch: str = typer.Option("k3-mini", "--arch"),
+    seed: int = typer.Option(0, "--seed"),
+    samples: int = typer.Option(16, "--samples"),
+    seq_len: int = typer.Option(8, "--seq-len"),
+    topk: int = typer.Option(4, "--topk"),
+) -> None:
+    """Run a streamed REAP calibration over a synthetic mini-MoE."""
+    spec = get_registry().get(arch)
+    if spec.needs_source_measurement:
+        print(f"{arch}: no measured tensors; use a synthetic architecture like k3-mini")
+        raise typer.Exit(1)
+    model = build_mini_moe(spec, seed=seed)
+    corpus, labels, _ = make_synthetic_corpus(
+        n_samples=samples,
+        seq_len=seq_len,
+        vocab=spec.vocabulary_size or 1000,
+        seed=seed,
+    )
+    acc = run_calibration(model, corpus, top_k=topk)
+    print(
+        f"calibrated {arch} over {samples} samples "
+        f"(layers={spec.num_text_layers}, experts={spec.moe.num_routed_experts}, top_k={topk})"
+    )
+    for label in labels[:6]:
+        ranked = acc.rank(label, topk=5)
+        top = ", ".join(f"L{lay}E{exp}={score:.5f}" for lay, exp, score in ranked[:5])
+        print(f"  {label.value}: {top}")
 
 
 @app.command()
