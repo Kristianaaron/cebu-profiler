@@ -1,0 +1,18 @@
+# runtime / generated registries (never committed)
+/atlas_runs/
+/models/
+/reports/
+/experiments/
+/calibration/
+/traces/
+
+# python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
