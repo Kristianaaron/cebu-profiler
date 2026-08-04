@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0 — 2026-08-04
+
+Atlas export bridge (cross-repo manifest contract v1) —
+
+- `atlas/export.py`: `export_run()` runs the real REAP pipeline (mini-MoE →
+  eval-lab calibration corpus → saliency → candidate plans → optional
+  derivative) and **writes** the canonical `atlas_runs/<id>/` artifacts
+  (`run_manifest.json`, `layer_saliency.json`, `plans.json`, `derivative.json`),
+  realizing the declared `output_layout.ATLAS_RUN_FILES` contract.
+- CLI: `model-atlas export --eval-lab-root <path> --out <root> [--build]`.
+- Source expert identity preserved end-to-end in keep-map + derivative maps.
+- Tests: 5 new; 110 total; ruff + mypy strict clean.
+
 ## 0.1.0 — 2026-08-01
 
 Initial scaffold (blueprint §21 first commit, model-agnostic):

@@ -8,6 +8,7 @@ from pathlib import Path
 import typer
 
 from model_atlas import __version__
+from model_atlas.atlas.export import export_run
 from model_atlas.atlas.reap import make_synthetic_corpus, run_calibration
 from model_atlas.atlas.runtime import build_mini_moe
 from model_atlas.census.census import build_manifest
@@ -47,6 +48,32 @@ def doctor() -> None:
     print("OK" if ok else "FAIL")
     if not ok:
         raise typer.Exit(1)
+
+
+@app.command()
+def export(
+    eval_lab_root: str = typer.Option(
+        ..., "--eval-lab-root", help="eval-lab repo root with tasks/ tree"
+    ),
+    out: str = typer.Option(
+        "atlas_runs", "--out", help="output root that receives atlas_runs/<run_id>/"
+    ),
+    build: bool = typer.Option(False, "--build", help="also build + register a derivative"),
+    arch: str = typer.Option("k3-mini", "--arch"),
+    seed: int = typer.Option(0, "--seed"),
+    keep_per_layer: int = typer.Option(4, "--keep-per-layer"),
+) -> None:
+    """Export an atlas run dir over an eval-lab task corpus (atlas-bridge)."""
+    result = export_run(
+        out,
+        eval_lab_root=eval_lab_root,
+        arch_name=arch,
+        seed=seed,
+        keep_per_layer=keep_per_layer,
+        build=build,
+    )
+    print(f"wrote atlas run: {result['run_dir']}")
+    print(f"  plans: {', '.join(result['plan_names'])}")
 
 
 @app.command()
