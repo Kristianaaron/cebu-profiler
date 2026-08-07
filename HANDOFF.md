@@ -95,3 +95,38 @@ DONE-EXP
 ```
 
 **status:** all new tests PASS; committed & pushed below.
+
+## Results (auto, from completed detached run `atlas_build`)
+New tests (f16 + f17 experiments + f17 protection) **PASSED**; full suite + ruff + mypy clean; commit + push succeeded (`10faa6b`).
+
+### Milestone E frontier — structured synthetic (drift: lower=better; delta=hetero−uniform)
+```
+frac=1.0  uniform 0.0000  hetero 0.0000  delta +0.0000
+frac=0.9  uniform 0.0113  hetero 0.0107  delta -0.0006
+frac=0.7  uniform 0.0207  hetero 0.0205  delta -0.0001
+frac=0.5  uniform 0.0282  hetero 0.0281  delta -0.0001
+frac=0.4  uniform 0.0318  hetero 0.0314  delta -0.0004
+frac=0.3  uniform 0.0383  hetero 0.0342  delta -0.0042
+```
+Measured heterogeneous allocation preserves the representation better than the equal-width control at every budget, and the gap grows at higher compression.
+
+### Protection demo (§8.2)
+```
+coalition-protected experts detected: 16 across 2 layers
+```
+
+### Blueprint feature / gap matrix
+```
+Atlas v1 modules A-F (§7): DONE
+SM121 width planner (§14.2): DONE
+Compression manifest + validator (§11): DONE
+Structural executor + §12.2 tests: DONE
+glm52 / k3 adapters (layout contract): DONE (tensor sizes gated on census)
+Milestone E matched-budget experiment (§17/§20): DONE
+Coalition-driven protection (§8.2): DONE
+NVFP4 discovery campaign (Priority 6): GATED — needs real GLM-5.2-NVFP4 checkpoint
+High-precision validation (Priority 7): GATED — needs BF16 parent weights
+EXL3/deployment search (Priority 8): GATED — needs EXL3 quantizer + real weights
+SM121 kernels/runtime (Priority 9): GATED — separate serving project + hardware
+Semantic map / redundancy / quant-sensitivity (§8.1/8.3/8.4): NEXT (offline, not yet built)
+```
