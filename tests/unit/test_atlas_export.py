@@ -28,11 +28,36 @@ def test_export_writes_parseable_run_files(tmp_path):
         str(tmp_path / "out"), eval_lab_root=str(tmp_path / "eval_lab"), seed=1, keep_per_layer=3
     )
     run_dir = Path(result["run_dir"])
-    for fname in ["run_manifest.json", "layer_saliency.json", "plans.json"]:
+    fnames = [
+        "run_manifest.json",
+        "layer_saliency.json",
+        "plans.json",
+        "compression_manifest.json",
+    ]
+    for fname in fnames:
         assert (run_dir / fname).exists(), fname
         assert isinstance(_read_json(run_dir / fname), (list, dict))
-    n_extra = len(list(run_dir.iterdir())) - 3
-    assert n_extra == 0  # no build -> exactly the three base files
+    n_extra = len(list(run_dir.iterdir())) - 4
+    assert n_extra == 0  # no build -> exactly the four base files
+
+
+def test_export_writes_valid_compression_manifest(tmp_path):
+    _write_fixture_corpus(tmp_path)
+    result = export_run(
+        str(tmp_path / "out"), eval_lab_root=str(tmp_path / "eval_lab"), seed=1, keep_per_layer=3
+    )
+    run_dir = Path(result["run_dir"])
+    cm = _read_json(run_dir / "compression_manifest.json")
+    assert cm["model"] == "k3-mini"
+    assert cm["source_checkpoint"]
+    assert cm["allowed_widths"]
+    manifest = _read_json(run_dir / "run_manifest.json")
+    assert "compression_manifest.json" in manifest["evidence_present"]
+    for lp in cm["layers"].values():
+        for plan in lp["experts"].values():
+            assert plan["target_width"] <= plan["original_width"]
+            assert len(plan["keep_channels"]) == plan["target_width"]
+            assert plan["target_width"] in cm["allowed_widths"]
 
 
 def test_export_layer_saliency_and_keep_map(tmp_path):

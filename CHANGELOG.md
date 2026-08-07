@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.1 — 2026-08-07
+
+Wire the compression milestone into the export bridge —
+
+- `atlas/export.py`: `export_run()` now also emits `compression_manifest.json`
+  (trace → TENP → stability → causal → Taylor → SM121 width planner) over the
+  same eval-lab calibration corpus.
+- `output_layout.py`: `compression_manifest.json` added to the §27 canonical
+  `ATLAS_RUN_FILES` set and guaranteed at the enhanced/causal evidence levels.
+- Tests: export + output-layout coverage for the new artifact; 127 total.
+
 ## 0.3.0 — 2026-08-07
 
 First end-to-end Atlas compression milestone (GLM-5.2 neuron/EXL3 blueprint §7–12, §25) —

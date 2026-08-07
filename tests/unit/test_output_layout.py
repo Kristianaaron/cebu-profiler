@@ -25,6 +25,12 @@ def test_causal_level_adds_files():
     assert "multi_component_causal_results.parquet" in files
 
 
+def test_compression_manifest_guaranteed_at_enhanced_not_basic():
+    assert "compression_manifest.json" not in expected_run_files(EvidenceLevel.BASIC_SALIENCY)
+    assert "compression_manifest.json" in expected_run_files(EvidenceLevel.ENHANCED_ATLAS)
+    assert "compression_manifest.json" in expected_run_files(EvidenceLevel.CAUSAL_ATLAS)
+
+
 def test_validate_catches_missing_and_unknown():
     run = AtlasRun(
         atlas_run_id="r1",

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from model_atlas.atlas.coalition import coactivation_map
+from model_atlas.atlas.compress import run_compression_pipeline
 from model_atlas.atlas.reap import SaliencyAccumulator, run_calibration
 from model_atlas.atlas.runtime import MiniMoE
 from model_atlas.builder import build_derivative, register_derivative
@@ -168,7 +169,12 @@ def export_run(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     started_at = datetime.now(UTC).isoformat()
-    evidence = ["run_manifest.json", "layer_saliency.json", "plans.json"]
+    evidence = [
+        "run_manifest.json",
+        "layer_saliency.json",
+        "plans.json",
+        "compression_manifest.json",
+    ]
 
     (run_dir / "layer_saliency.json").write_text(
         json.dumps(_saliency_rows(saliency), indent=2, sort_keys=True)
@@ -176,6 +182,15 @@ def export_run(
 
     plan_list = [_serialize_plan(p, p.name.rsplit("-", 1)[-1], keep_per_layer) for p in plans]
     (run_dir / "plans.json").write_text(json.dumps(plan_list, indent=2, sort_keys=True))
+
+    # §27 compression artifact: trace -> TENP -> stability -> causal -> Taylor
+    # -> SM121 width-bucket planner, over the same calibration corpus.
+    compression, _cv = run_compression_pipeline(
+        model, corpus, n_stability_runs=3
+    )
+    (run_dir / "compression_manifest.json").write_text(
+        compression.model_dump_json(indent=2)
+    )
 
     if build:
         result = build_derivative(model, plans[0])
