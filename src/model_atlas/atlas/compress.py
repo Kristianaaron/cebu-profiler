@@ -55,6 +55,7 @@ def run_compression_pipeline(
     coverage_target: float = _COVERAGE_TARGET,
     n_stability_runs: int = 3,
     source_checkpoint: str = "glm52-compression-v1",
+    protected: dict[tuple[int, int], set[int]] | None = None,
 ) -> tuple[CompressionManifest, ManifestValidation]:
     """Trace -> score -> plan -> manifest over the synthetic MiniMoE."""
     buckets = [b for b in (allowed_widths or SM121_WIDTH_BUCKETS) if b <= model.mid] or [
@@ -108,6 +109,7 @@ def run_compression_pipeline(
         full_width=full_width,
         allowed_widths=buckets,
         coverage_target=coverage_target,
+        protected=protected,
         atlas_version="0.1.0",
     )
     validation = validate_manifest(manifest)
