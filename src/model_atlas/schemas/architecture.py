@@ -37,6 +37,7 @@ class LayerKind(StrEnum):
     KDA = "kda"
     MLA = "mla"
     DENSE = "dense"
+    MOE = "moe"  # sparse routed-MoE layer (e.g. GLM-5.2 layers 3..77)
 
 
 class TensorRole(StrEnum):

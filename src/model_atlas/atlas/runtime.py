@@ -16,6 +16,7 @@ import math
 import random
 from dataclasses import dataclass, field
 
+from model_atlas.atlas.collector import ChannelStatsAccumulator
 from model_atlas.schemas.architecture import ArchitectureSpec
 
 
@@ -191,6 +192,7 @@ def _forward_layer(
     top_k: int,
     route_override: dict[tuple[int, int], list[int]] | None = None,
     excluded: dict[int, frozenset[int]] | None = None,
+    channel_stats: ChannelStatsAccumulator | None = None,
 ) -> tuple[LayerTrace, list[list[float]]]:
     T = len(hidden)
     logits: list[list[float]] = []
@@ -239,6 +241,8 @@ def _forward_layer(
         for e, we in enumerate(layer_weights.experts):
             gate = _silu_vec(_matvec(we["gate"], ln))
             up = _matvec(we["up"], ln)
+            if channel_stats is not None:
+                channel_stats.observe_expert(layer_idx, e, gate, up)
             expert_out = _matvec(we["down"], [g * u for g, u in zip(gate, up, strict=True)])
             nrm = _l2_norm(expert_out)
             norm_e.append(nrm)
@@ -286,6 +290,7 @@ def forward(
     top_k: int | None = None,
     route_override: dict[tuple[int, int], list[int]] | None = None,
     excluded: dict[int, frozenset[int]] | None = None,
+    channel_stats: ChannelStatsAccumulator | None = None,
 ) -> ForwardResult:
     """Streaming forward across layers; returns per-layer traces + final output.
 
@@ -300,7 +305,9 @@ def forward(
     hidden = [list(emb[t]) for t in tokens]
     traces: list[LayerTrace] = []
     for idx, layer_w in enumerate(model.layers):
-        trace, hidden = _forward_layer(model, layer_w, idx, hidden, top_k, route_override, excluded)
+        trace, hidden = _forward_layer(
+            model, layer_w, idx, hidden, top_k, route_override, excluded, channel_stats
+        )
         traces.append(trace)
     final = hidden[-1]  # last token hidden state
     logits = _matvec(model.lm_head, final)  # [vocab]

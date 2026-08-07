@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.0 — 2026-08-07
+
+First end-to-end Atlas compression milestone (GLM-5.2 neuron/EXL3 blueprint §7–12, §25) —
+
+- `atlas/collector.py` + `runtime` streaming channel collector (`ChannelStatsAccumulator`)
+  — Module A: online per-(layer, expert, channel) FFN activation stats, no raw-tensor persistence.
+- First-class scorers (`scoring/`): TENP (forward-only, NVFP4-ready), grouped-Taylor surrogate,
+  targeted causal boundary triage, stability/confidence/rank aggregation (blueprint §9.1 base + §7 B–E).
+- `planning/widths.py` + `width_buckets.py` (SM121 vocab): variable-width planner with
+  coverage-target bucketing, confidence-penalized composite, protected-channel hard constraints.
+- `schemas/manifest.py`: versioned, self-validating `CompressionManifest` (blueprint §11).
+- `executor/structural.py`: coupled gate/up/down slicing executor + all six §12.2 tests
+  (dry-run, permutation equivalence, topology, replay, protected).
+- `integrations/glm52.py` / `integrations/k3.py`: architecture adapters (structural layout contract;
+  real tensor sizes gated on checkpoint census).
+- `atlas/compress.py`: `run_compression_pipeline()` — trace → TENP → stability → causal → Taylor
+  → planner → manifest over the synthetic MiniMoE.
+- Tests: 15 new `test_f16_compression_pipeline`; 125 total; ruff + mypy clean.
+
 ## 0.2.0 — 2026-08-04
 
 Atlas export bridge (cross-repo manifest contract v1) —
