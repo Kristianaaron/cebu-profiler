@@ -48,7 +48,11 @@ def _numel(shape: list[int]) -> int:
 
 def _discover_shards(checkpoint_dir: str) -> list[str]:
     root = Path(checkpoint_dir)
-    return sorted(p.name for p in root.glob("*.safetensors") if not p.name.endswith(".index.json"))
+    return sorted(
+        p.name
+        for p in root.glob("*.safetensors")
+        if not p.name.endswith(".index.json") and not p.name.startswith("._")
+    )
 
 
 def load_manifest(checkpoint_dir: str) -> CheckpointManifest:
@@ -96,4 +100,8 @@ def load_manifest(checkpoint_dir: str) -> CheckpointManifest:
 def shard_hashes(checkpoint_dir: str) -> dict[str, str]:
     """sha256 of each safetensors shard (whole-file). Small for fixtures."""
     root = Path(checkpoint_dir)
-    return {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in root.glob("*.safetensors")}
+    return {
+        p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in root.glob("*.safetensors")
+        if not p.name.startswith("._")
+    }

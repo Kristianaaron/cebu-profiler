@@ -58,6 +58,6 @@ def glm52_spec() -> ArchitectureSpec:
             dense_dtype=DType.BF16,
         ),
         hidden_dim=HIDDEN,
-        vocabulary_size=None,  # requires measurement
+        vocabulary_size=154820,  # measured from NVFP4 checkpoint tokenizer.json (2026-08-07 census)
         tensor_params={},  # structural only; real sizes from census
     )

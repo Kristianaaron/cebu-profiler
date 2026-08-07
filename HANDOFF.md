@@ -130,3 +130,30 @@ EXL3/deployment search (Priority 8): GATED — needs EXL3 quantizer + real weigh
 SM121 kernels/runtime (Priority 9): GATED — separate serving project + hardware
 Semantic map / redundancy / quant-sensitivity (§8.1/8.3/8.4): NEXT (offline, not yet built)
 ```
+
+## Real checkpoint census — GLM-5.2-NVFP4 (2026-08-07)
+
+Source: `/media/glm52/models/nvidia/GLM-5.2-NVFP4` (mounted external 931G G-Drive).
+
+Header-only census through `load_manifest` → `build_structural_graph`:
+```
+tensors   : 232,385 across 47 shards (total 464.8 GB)
+coverage  : 1.000000   valid=True   unclassified=0
+nodes     : 19,772   edges: 39,539
+config    : hidden 6144, 78 layers, 256 routed experts, top-8, moe_intermediate 2048
+vocab     : 154,820 (tokenizer.json)  -> recorded in glm52 adapter
+```
+
+### Fixes this session (make the real-checkpoint census pass)
+- `checkpoint/source_manifest.py`: `_discover_shards` + `shard_hashes` now skip
+  macOS **AppleDouble `._*`** files. The GLM drive (Mac-exFAT) is littered with
+  `._model-*.safetensors`; reading one as safetensors yields a garbage header
+  length → `MemoryError`. (**tests:** `test_load_manifest_skips_appledouble_junk`)
+- `checkpoint/classifier.py`: map `eh_proj` (GLM-5.2 final external-hidden output
+  projection, `model.layers.78.eh_proj.weight`, BF16 6144→12288) to
+  `LM_HEAD` / global. (**test:** `test_classifier_glm52_eh_proj_is_head`)
+- `integrations/glm52.py`: `vocabulary_size=154820` (measured, no longer None).
+
+Note: the checkpoint carries a `model.layers.78.*` final shared-head block (gate +
+shared experts + `eh_proj`, **no routed experts**) beyond the 75 routed layers — the
+256-expert / 75-layer routed geometry is unchanged.

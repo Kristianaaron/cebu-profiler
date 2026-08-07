@@ -58,7 +58,7 @@ def classify_tensor(name: str) -> Classification:
     elif "embed" in low:
         role = TensorRole.EMBEDDING
         layer_index = None
-    elif "lm_head" in low or (low.endswith("output") and "norm" not in low):
+    elif "lm_head" in low or (low.endswith("output") and "norm" not in low) or "eh_proj" in low:
         role = TensorRole.LM_HEAD
         layer_index = None
     elif (

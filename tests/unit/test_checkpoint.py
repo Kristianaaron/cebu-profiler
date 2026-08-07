@@ -1,5 +1,7 @@
 """F2 checkpoint tests: manifest enumeration, classification, structural graph."""
 
+from pathlib import Path
+
 from model_atlas.checkpoint.classifier import classify_tensor
 from model_atlas.checkpoint.source_manifest import load_manifest, shard_hashes
 from model_atlas.checkpoint.structural_graph import build_structural_graph
@@ -62,3 +64,25 @@ def test_structural_graph_fails_closed_on_unclassified(tmp_path):
     assert graph.coverage < 1.0
     assert graph.valid is False
     assert UNCLASSIFIED_NAME in graph.unclassified
+
+
+def test_classifier_glm52_eh_proj_is_head():
+    # GLM-5.2's final external-hidden output projection belongs to the head,
+    # not a residual-layer role, and is a global tensor (no layer index).
+    c = classify_tensor("model.layers.78.eh_proj.weight")
+    assert c.role is TensorRole.LM_HEAD
+    assert not c.unclassified
+    assert c.layer_index is None
+
+
+def test_load_manifest_skips_appledouble_junk(tmp_path):
+    # Mac exFAT/NTFS source drives litter shard dirs with `._*` AppleDouble
+    # metadata files. Reading one as a safetensors header yields a garbage
+    # length -> MemoryError. Discovery must ignore them.
+    ckpt = make_synthetic_checkpoint(tmp_path / "ckpt")
+    junk = Path(ckpt) / "._model-00001-of-00047.safetensors"
+    junk.write_bytes(b"\xff" * 8 + b"definitely not a safetensors header")
+    manifest = load_manifest(ckpt)
+    assert manifest.tensor_count == CLASSIFIED_TENSOR_COUNT
+    assert len(manifest.shards) == 1
+    assert manifest.config  # config.json still read
