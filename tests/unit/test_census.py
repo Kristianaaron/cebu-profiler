@@ -1,7 +1,10 @@
 """Census + ownership tests: coverage, no unclassified, source identity."""
 
 from model_atlas.census.census import build_manifest
+from model_atlas.census.precision import PrecisionCensus, census_precision
 from model_atlas.census.tensor_ownership import PhysicalLocation, TensorRole
+from model_atlas.checkpoint.source_manifest import load_manifest
+from model_atlas.checkpoint.synthetic import make_synthetic_checkpoint
 from model_atlas.registry.architectures import get_registry
 
 MINI_EXPECTED_RECORDS = 34  # per layer: 7 single + 8 experts + 1 shared = 16; x2 = 32; +2 global
@@ -54,3 +57,20 @@ def test_k3_manifest_needs_measurement():
     manifest = build_manifest(spec)
     assert manifest.status == "needs_source_measurement"
     assert manifest.records == []
+
+
+def test_precision_census_reports_achieved_bpw(tmp_path):
+    ckpt = make_synthetic_checkpoint(tmp_path / "ckpt")
+    manifest = load_manifest(ckpt)
+    pc = census_precision(manifest)
+    assert isinstance(pc, PrecisionCensus)
+    assert pc.total_stored_bytes == manifest.total_bytes
+    assert pc.overall_bpw is not None and pc.overall_bpw > 0
+    experts = pc.role(TensorRole.EXPERTS)
+    assert experts is not None
+    # synthetic toggle fixture is F16 expert -> 16 bpw
+    assert abs(experts.achieved_bpw - 16.0) < 1e-6
+    # every role has a real dtype and positive byte count
+    for r in pc.by_role:
+        assert r.stored_bytes > 0
+        assert r.dominant_dtype is not None
