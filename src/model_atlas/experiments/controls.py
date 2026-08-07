@@ -130,6 +130,61 @@ def _all_keys(model: MiniMoE) -> list[tuple[int, int, int]]:
     ]
 
 
+def control_c_clone(
+    model: MiniMoE,
+    importance: dict[tuple[int, int, int], float],
+    budget: int,
+    layer_power: float = 1.0,
+) -> MiniMoE:
+    """Blueprint §17 Control C: TENP-only, depth-aware (trapezoidal) allocation.
+
+    Per-layer channel budgets grow with depth (``(layer+1)**layer_power``), split
+    equally across the layer's experts, and each expert keeps its top-TENP
+    channels within its share. No causal/semantic input, isolating the value of
+    pure depth-aware TENP allocation."""
+    ranked = _ranked(model, importance)
+    n_layers = len(model.layers)
+    n_exp = model.n_exp
+    depth = [(i + 1) ** layer_power for i in range(n_layers)]
+    total_w = sum(depth) * n_exp
+    budget = min(max(budget, n_layers * n_exp), n_layers * n_exp * model.mid)
+    orders: dict[tuple[int, int], list[int]] = {}
+    allocated = 0
+    for layer in range(n_layers):
+        share = int(budget * (depth[layer] * n_exp) / total_w)
+        base = share // n_exp
+        rem = share % n_exp
+        for e in range(n_exp):
+            slot = layer * n_exp + e
+            count = base + (1 if slot % n_exp < rem else 0)
+            # never fully prune an expert; cap at full width
+            count = min(model.mid, max(1, count))
+            if allocated + count > budget:
+                count = max(1, budget - allocated)
+            orders[(layer, e)] = ranked[slot][:count]
+            allocated += count
+    return build_clone(model, orders)
+
+
+def compare_controls(
+    model: MiniMoE,
+    calibration: list[CalibrationSample],
+    heldout: list[CalibrationSample],
+    budget: int,
+    layer_power: float = 1.0,
+) -> dict[str, FidelityReport]:
+    """Uniform (Control B), TENP-depth-aware (Control C), Atlas heterogeneous
+    (Experiment D) at an equal budget."""
+    importance = channel_importance(model, calibration)
+    return {
+        "uniform": measure_fidelity(model, uniform_clone(model, importance, budget), heldout),
+        "control_c": measure_fidelity(
+            model, control_c_clone(model, importance, budget, layer_power), heldout
+        ),
+        "hetero": measure_fidelity(model, hetero_clone(model, importance, budget), heldout),
+    }
+
+
 def matched_budget_compare(
     model: MiniMoE,
     calibration: list[CalibrationSample],

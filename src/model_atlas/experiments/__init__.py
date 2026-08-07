@@ -16,6 +16,8 @@ from __future__ import annotations
 from model_atlas.experiments.controls import (
     ExperimentOutcome,
     channel_importance,
+    compare_controls,
+    control_c_clone,
     hetero_clone,
     matched_budget_compare,
     uniform_clone,
@@ -30,6 +32,8 @@ __all__ = [
     "ParetoPoint",
     "build_structured_model",
     "channel_importance",
+    "compare_controls",
+    "control_c_clone",
     "hetero_clone",
     "matched_budget_compare",
     "measure_fidelity",

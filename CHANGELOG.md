@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.0 — 2026-08-07
+
+Complete the offline-buildable blueprint phase-2 modules (§8.1/8.3/8.4, §10, Priority 4#5, §17 Control C) —
+
+- `schemas/trace_records.py` + `atlas/traces.py`: normalized §10 trace records
+  (`RouterRecord` / `ExpertAggregate` / `ChannelAggregate`), all measured.
+- `scoring/semantic.py` (§8.1): capability-label → expert semantic associations
+  (protection/explanation signal) fed into the manifest as `scores.semantic`.
+- `scoring/redundancy.py` (§8.3): channel uniqueness from output-projection
+  correlation + `KEEP_VALUE = importance·causal·uniqueness·stability`.
+- `scoring/quant_sensitivity.py` (§8.4): per-expert quantization sensitivity →
+  per-expert `quant_recommendation.bpw` recommendation.
+- `planning/optimizer.py` (Priority 4#5): budget-constrained rate-distortion
+  allocation → `CompressionManifest`.
+- `experiments` (Control C, §17): depth-aware TENP-only arm + `compare_controls`
+  (uniform / control_c / hetero) at matched budgets.
+- Pipeline: `run_compression_pipeline` now enriches manifests with semantic /
+  uniqueness / kvalue scores and measured quant bpw; planner propagates them.
+- `ChannelScore` / `ExpertScores` extended (semantic, uniqueness, kvalue).
+- Tests: `test_f18_blueprint_phase2` (7); 143 total; ruff + mypy clean.
+
 ## 0.3.1 — 2026-08-07
 
 Wire the compression milestone into the export bridge —

@@ -49,6 +49,7 @@ def plan_expert(
     coverage_target: float,
     full_width: int,
     protected: dict[tuple[int, int], set[int]],
+    quant_bpw: dict[tuple[int, int], float] | None = None,
 ) -> dict[tuple[int, int], ExpertPlan]:
     """Plan one expert: choose target width + keep set from measured scores."""
     plans: dict[tuple[int, int], ExpertPlan] = {}
@@ -59,6 +60,7 @@ def plan_expert(
             key=lambda x: x[1],
             reverse=True,
         )
+        bpw = (quant_bpw or {}).get((layer, e), 3.25)
         total = sum(comp for _, comp, _ in ranked)
         if not ranked or total <= 0.0:
             # No measured evidence for this expert -> keep it at full width.
@@ -99,6 +101,9 @@ def plan_expert(
             taylor=_mean([r.taylor for r in kept if r.taylor is not None]),
             causal=_mean([r.causal for r in kept if r.causal is not None]),
             stability=_mean([r.stability for r in kept if r.stability is not None]),
+            semantic=_mean([r.semantic for r in kept if r.semantic is not None]),
+            uniqueness=_mean([r.uniqueness for r in kept if r.uniqueness is not None]),
+            kvalue=_mean([r.kvalue for r in kept if r.kvalue is not None]),
         )
         confidence = _mean([r.confidence for r in kept if r.confidence is not None]) or 1.0
         reasons = (
@@ -113,7 +118,7 @@ def plan_expert(
             confidence=max(0.0, min(1.0, confidence)),
             scores=scores,
             protected_reasons=reasons,
-            quant_recommendation=QuantRecommendation(format="exl3", bpw=3.25),
+            quant_recommendation=QuantRecommendation(format="exl3", bpw=bpw),
         )
     return plans
 
@@ -128,6 +133,7 @@ def build_manifest(
     allowed_widths: list[int] | None = None,
     coverage_target: float = 0.9,
     protected: dict[tuple[int, int], set[int]] | None = None,
+    quant_bpw: dict[tuple[int, int], float] | None = None,
     atlas_version: str = "0.0.0",
     deployment: str = "2x-dgx-spark-sm121",
 ) -> CompressionManifest:
@@ -143,7 +149,7 @@ def build_manifest(
         for layer in range(num_layers):
             rows_by_expert.setdefault((layer, e), [])
 
-    plans = plan_expert(rows_by_expert, buckets, coverage_target, full_width, prot)
+    plans = plan_expert(rows_by_expert, buckets, coverage_target, full_width, prot, quant_bpw)
     layers: dict[str, LayerPlan] = {}
     for layer in range(num_layers):
         lp = LayerPlan(experts={str(e): plans[(layer, e)] for e in range(num_experts)})

@@ -24,6 +24,12 @@ from model_atlas.schemas.manifest import (
 )
 from model_atlas.scoring.base import ChannelScore
 from model_atlas.scoring.causal import causal_scores
+from model_atlas.scoring.quant_sensitivity import (
+    expert_quant_sensitivity,
+    recommend_bpw,
+)
+from model_atlas.scoring.redundancy import channel_kvalue, channel_uniqueness
+from model_atlas.scoring.semantic import expert_semantic_score
 from model_atlas.scoring.stability import StabilityAggregator
 from model_atlas.scoring.taylor_grouped import score_grouped_surrogate
 from model_atlas.scoring.tenp import tenp_rank
@@ -80,6 +86,15 @@ def run_compression_pipeline(
         (r.layer, r.expert, r.channel): r for r in StabilityAggregator(run_maps).aggregate()
     }
 
+    # §8.1 semantic, §8.3 uniqueness / KEEP_VALUE, §8.4 quant-sensitivity views
+    uniqueness_map = channel_uniqueness(model)
+    st_vals = {
+        key: st.stability for key, st in stability_rows.items() if st.stability is not None
+    }
+    kvalue_map = channel_kvalue(mean_tenp, uniqueness_map, causal, st_vals)
+    sem_map = expert_semantic_score(model, samples)
+    quant_bpw = recommend_bpw(expert_quant_sensitivity(model))
+
     keys = set(mean_tenp) | set(causal) | set(taylor) | set(stability_rows)
     score_rows: list[ChannelScore] = []
     for key in sorted(keys):
@@ -96,6 +111,9 @@ def run_compression_pipeline(
                 stability=st.stability if st else None,
                 rank_stability=st.rank_stability if st else None,
                 confidence=st.confidence if st else None,
+                semantic=sem_map.get((layer, e), 0.0),
+                uniqueness=uniqueness_map.get(key),
+                kvalue=kvalue_map.get(key),
             )
         )
 
@@ -110,6 +128,7 @@ def run_compression_pipeline(
         allowed_widths=buckets,
         coverage_target=coverage_target,
         protected=protected,
+        quant_bpw=quant_bpw,
         atlas_version="0.1.0",
     )
     validation = validate_manifest(manifest)

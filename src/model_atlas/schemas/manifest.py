@@ -32,6 +32,9 @@ class ExpertScores(BaseModel):
     taylor: float | None = None
     causal: float | None = None
     stability: float | None = None
+    semantic: float | None = None  # §8.1
+    uniqueness: float | None = None  # §8.3
+    kvalue: float | None = None  # §8.3
 
 
 class ExpertPlan(BaseModel):

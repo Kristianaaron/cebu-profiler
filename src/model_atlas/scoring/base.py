@@ -59,6 +59,9 @@ class ChannelScore(BaseModel):
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     rank_stability: float | None = Field(default=None, ge=0.0, le=1.0)
     coverage: dict[str, int] = Field(default_factory=dict)
+    semantic: float | None = Field(default=None, ge=0.0)  # §8.1 label association strength
+    uniqueness: float | None = Field(default=None, ge=0.0, le=1.0)  # §8.3
+    kvalue: float | None = Field(default=None, ge=0.0)  # §8.3 KEEP_VALUE
 
 
 class ScoreTable(BaseModel):
