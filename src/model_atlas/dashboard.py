@@ -359,7 +359,7 @@ _CAP3D_JS = r"""
   var ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  var SX = 1.25, SY = 2.0, SZ = 1.7, HFE = 0.46;
+  var SX = 1.55, SY = 2.5, SZ = 2.2, HFE = 0.46;
   var zoom = 1.0, ry = 0.78, rx = 0.62, OX = 0, OY = 0;   // rotation + centre
   var hover = null, pin = null, focus = 0, selLayer = null;
   var layerOn = []; for (var _l0 = 0; _l0 < nl; _l0++) layerOn.push(true);
