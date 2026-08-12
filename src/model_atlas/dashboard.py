@@ -392,7 +392,10 @@ _CAP3D_JS = r"""
     }
     var nz = [];
     for (var f = 0; f < 6; f++) { var nr = rot3(FACES[f].n[0], FACES[f].n[1], FACES[f].n[2]); nz.push(nr[2]); }
-    return { v: v, pts: pts, nz: nz, depth: rc[2], sc: sc };
+    var dom = 0, nmx = -1;
+    for (var f = 0; f < 6; f++) if (nz[f] > nmx) { nmx = nz[f]; dom = f; }
+    var poly = FACES[dom].c.map(function (ci) { return pts[ci]; });
+    return { v: v, pts: pts, nz: nz, dom: dom, poly: poly, depth: rc[2], sc: sc };
   }
   function recompute() {
     cubes = [];
@@ -482,16 +485,32 @@ _CAP3D_JS = r"""
     ctx.fillText('experts (x) · layers (y) · labels (depth) · filter on the right', 6, H - 6);
   }
 
+  function inPoly(px, py, poly) {
+    var inside = false;
+    for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      var xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];
+      if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) inside = !inside;
+    }
+    return inside;
+  }
+  // Enlarge a face polygon ~12% about its centroid for a forgiving hit area.
+  function padPoly(poly) {
+    var cx = 0, cy = 0;
+    for (var i = 0; i < poly.length; i++) { cx += poly[i][0]; cy += poly[i][1]; }
+    cx /= poly.length; cy /= poly.length;
+    return poly.map(function (p) { return [cx + (p[0] - cx) * 1.12, cy + (p[1] - cy) * 1.12]; });
+  }
   function pick(e) {
     var r = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0 };
-    var bx = e.clientX - r.left, by = e.clientY - r.top, best = null, bd = 1e9;
+    var bx = e.clientX - r.left, by = e.clientY - r.top;
+    var best = null, bestNz = -1;
     for (var i = 0; i < cubes.length; i++) {
-      var ax = (cubes[i].pts[0][0] + cubes[i].pts[7][0]) / 2;
-      var ay = (cubes[i].pts[0][1] + cubes[i].pts[7][1]) / 2;
-      var dd = (ax - bx) * (ax - bx) + (ay - by) * (ay - by);
-      if (dd < bd) { bd = dd; best = cubes[i].v; }
+      if (inPoly(bx, by, padPoly(cubes[i].poly))) {
+        var nz = cubes[i].nz[cubes[i].dom];
+        if (nz > bestNz) { bestNz = nz; best = cubes[i].v; } // front-most cube on screen
+      }
     }
-    return bd < 529 ? best : null;
+    return best;
   }
 
   function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
@@ -549,10 +568,13 @@ _CAP3D_JS = r"""
   window.capAllLayers = function () { for (var l = 0; l < nl; l++) layerOn[l] = true; redraw(); };
 
   var dragging = false, moved = 0, lastX = 0, lastY = 0;
+  function cursor(p) {
+    if (cv.style) cv.style.cursor = dragging ? 'grabbing' : (p ? 'pointer' : 'grab');
+  }
   cv.addEventListener('pointerdown', function (e) {
     dragging = true; moved = 0; lastX = e.clientX; lastY = e.clientY;
     if (cv.setPointerCapture) cv.setPointerCapture(e.pointerId);
-    cv.classList.add('dragging');
+    cv.classList.add('dragging'); cursor(null);
   });
   cv.addEventListener('pointermove', function (e) {
     var p = pick(e);
@@ -561,16 +583,16 @@ _CAP3D_JS = r"""
       moved += Math.abs(dx) + Math.abs(dy);
       lastX = e.clientX; lastY = e.clientY;
       ry += dx * 0.01; rx += dy * 0.01; rx = Math.max(0.05, Math.min(1.4, rx));
-      hover = null; draw();
-    } else { hover = p; draw(); renderPanel(); }
+      hover = null; draw(); cursor(null);
+    } else { hover = p; draw(); renderPanel(); cursor(p); }
   });
   function up(e) {
     if (dragging) {
       dragging = false; cv.classList.remove('dragging');
       if (moved < 6) {
         pin = (hover && pin && pin.label === hover.label && pin.layer === hover.layer && pin.expert === hover.expert) ? null : hover;
-        renderPanel(); draw();
-      }
+        renderPanel(); draw(); cursor(hover);
+      } else cursor(null);
     }
   }
   cv.addEventListener('pointerup', up);

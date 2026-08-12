@@ -22,6 +22,10 @@ Capability tab: monochrome 3D voxel view + sticky detail panel, agent-friendly �
   (no muddiness); depth-fog dims far cubes and crisp edges keep layers separable.
 - **Layer filter** on the right panel: L0 / L1 / … / all chips to view each
   layer separately or together, and it filters both the canvas and the panel.
+- **Fixed hover targeting**: hit-testing is now point-in-polygon against each
+  cube's rendered front face (front-most wins), instead of the 3D centroid —
+  so hovering directly over a cube selects it. Cursor becomes a **pointer** over
+  a cube (grab/grabbing otherwise) and hover highlights the active layer slice.
 - Monochrome grayscale with **dense ordered dither + opacity-as-saliency**
   (hot = more opaque) on the dominant face; high-DPI/integer-snapped, no
   animation loop.
