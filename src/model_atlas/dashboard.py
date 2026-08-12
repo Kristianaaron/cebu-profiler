@@ -339,10 +339,12 @@ def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
 
 _CAP3D_JS = r"""
 // Capability 3D voxel view — dependency-free, render-on-interaction only.
-// Translucent 3D cubes with no outline and no dither; saliency = fill
-// opacity. Depth fog dims far cubes so overlaps stay separable, and the
-// active (hovered/pinned) cube's edges highlight.
-// A layer filter on the right panel shows layers separately or together.
+// FIXED stacked-sheet layout (no rotation UI). Each capability label is a
+// column; within a column the layers (L0, L1, ...) are translucent sheets
+// stacked vertically. Each sheet is a row of expert cells whose fill opacity
+// encodes saliency. Because every cell is an axis-aligned rectangle that never
+// overlaps another on screen, hover is a trivial, exact hit-test — like a 2D
+// button. Hovered/pinned cell's edges highlight.
 (function () {
   var cv = document.getElementById('cap3d');
   if (!cv || !cv.getContext || !DATA.capability3d || !DATA.capability3d.voxels) return;
@@ -354,134 +356,71 @@ _CAP3D_JS = r"""
   var ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  var SX = 1.25, SY = 2.0, SZ = 1.5;
-  var HFE = 0.34;
-  var ry = 0.8, rx = 0.5, zoom = 1.0;
+  var zoom = 1.0;
   var hover = null, pin = null, focus = 0, selLayer = null;
   var layerOn = []; for (var _l0 = 0; _l0 < nl; _l0++) layerOn.push(true);
-  var cubes = [];
-  var depthMin = 0, depthMax = 0;
+  var cells = [];   // { v, x, y, w, h, alpha }
 
-  var CORNERS = [[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]];
-  var FACES = [
-    { c: [0,1,5,4], n: [0,-1,0] },
-    { c: [3,2,6,7], n: [0,1,0] },
-    { c: [0,3,7,4], n: [-1,0,0] },
-    { c: [1,2,6,5], n: [1,0,0] },
-    { c: [0,1,2,3], n: [0,0,-1] },
-    { c: [4,5,6,7], n: [0,0,1] }
-  ];
-
-  function rot3(x, y, z) {
-    var cy = Math.cos(ry), sy = Math.sin(ry), cx = Math.cos(rx), sx = Math.sin(rx);
-    var px = x * cy + z * sy, pz = -x * sy + z * cy, py = y;
-    var y2 = py * cx - pz * sx, z2 = py * sx + pz * cx;
-    return [px, y2, z2];
-  }
-  function projectCube(v) {
-    var sc = (W / (Math.max(ne * SX, nl * SY, labels.length * SZ) + 2)) * 0.82 * zoom;
-    var cx = (v.expert - (ne - 1) / 2) * SX;
-    var cy = -(v.layer - (nl - 1) / 2) * SY;
-    var cz = (v.label - (labels.length - 1) / 2) * SZ;
-    var rc = rot3(cx, cy, cz);
-    var pts = [];
-    for (var i = 0; i < 8; i++) {
-      var r = rot3(cx + CORNERS[i][0] * HFE, cy + CORNERS[i][1] * HFE, cz + CORNERS[i][2] * HFE);
-      pts.push([W / 2 + r[0] * sc, H / 2 + r[1] * sc, r[2] * sc]);
-    }
-    var nz = [];
-    for (var f = 0; f < 6; f++) { var nr = rot3(FACES[f].n[0], FACES[f].n[1], FACES[f].n[2]); nz.push(nr[2]); }
-    var dom = 0, nmx = -1;
-    for (var f = 0; f < 6; f++) if (nz[f] > nmx) { nmx = nz[f]; dom = f; }
-    var vis = [], vispolys = [];
-    for (var f = 0; f < 6; f++) {
-      if (nz[f] > 0) {
-        vis.push(f);
-        vispolys.push(FACES[f].c.map(function (ci) { return pts[ci]; }));
+  // Build the fixed layout: one translucent sheet per (label, layer), stacked
+  // into columns. All rectangles axis-aligned and screen-disjoint => exact hit.
+  function layout() {
+    var pad = 16, gap = 18, liGap = 6;
+    var ncol = labels.length;
+    var colW = (W - 2 * pad - (ncol - 1) * gap) / ncol * zoom * 0.9;
+    var cellW = colW / ne;
+    var cellH = cellW * 1.05;
+    var stackH = nl * cellH + (nl - 1) * liGap;
+    var top0 = H / 2 - stackH / 2;
+    cells = [];
+    for (var label = 0; label < ncol; label++) {
+      var colX = pad + label * (colW + gap);
+      for (var layer = 0; layer < nl; layer++) {
+        if (!layerOn[layer]) continue;
+        var x = colX, y = top0 + layer * (cellH + liGap);
+        for (var e = 0; e < ne; e++) {
+          var cell = { v: { label: label, layer: layer, expert: e } };
+          for (var k = 0; k < vox.length; k++) if (vox[k].label === label && vox[k].layer === layer && vox[k].expert === e) { cell.v = vox[k]; }
+          cell.x = x + e * cellW; cell.y = y; cell.w = cellW; cell.h = cellH;
+          cell.alpha = Math.min(1, 0.28 + 0.72 * cell.v.score);
+          cells.push(cell);
+        }
       }
     }
-    return { v: v, pts: pts, nz: nz, dom: dom, vis: vis, vispolys: vispolys, depth: rc[2], sc: sc,
-      cx: W / 2 + rc[0] * sc, cy: H / 2 + rc[1] * sc };
-  }
-  function recompute() {
-    cubes = [];
-    var d = vox.filter(function (v) { return layerOn[v.layer]; }).map(projectCube);
-    depthMin = 1e9; depthMax = -1e9;
-    for (var i = 0; i < d.length; i++) { if (d[i].depth < depthMin) depthMin = d[i].depth; if (d[i].depth > depthMax) depthMax = d[i].depth; }
-    cubes = d;
   }
 
-  function facePts(pts, f) { return FACES[f].c.map(function (ci) { return pts[ci]; }); }
-  function traceFace(fp) {
-    ctx.beginPath(); ctx.moveTo(fp[0][0], fp[0][1]);
-    for (var q = 1; q < 4; q++) ctx.lineTo(fp[q][0], fp[q][1]);
-    ctx.closePath();
-  }
-  function fog(depth) {
-    var t = (depthMax - depthMin) ? (depth - depthMin) / (depthMax - depthMin) : 0.5; // 0 far..1 near
-    return 0.55 + 0.45 * t; // far cubes dimmer
-  }
-  function drawCube(cb) {
-    var v = cb.v;
-    var isSel = pin && v.label === pin.label && v.layer === pin.layer && v.expert === pin.expert;
-    var isHover = hover && v.label === hover.label && v.layer === hover.layer && v.expert === hover.expert;
-    var inLayer = selLayer && selLayer.label === v.label && selLayer.layer === v.layer;
-    var inHovLayer = !pin && hover && v.label === hover.label && v.layer === hover.layer;
-    var fg = fog(cb.depth);
-    var aq = Math.min(1, 0.5 + 0.5 * v.score) * fg;
-    // translucent cubes: fill each visible face with saliency color. No opaque
-    // body, no dither, no outline — just see-through cubes.
-    var vis = [];
-    for (var f = 0; f < 6; f++) if (cb.nz[f] > 0) vis.push(f);
-    for (var v3 = 0; v3 < vis.length; v3++) {
-      var f2 = vis[v3];
-      var fp2 = facePts(cb.pts, f2);
-      var shade = 0.5 + 0.5 * Math.max(0, cb.nz[f2]);
-      ctx.fillStyle = 'rgba(236,241,249,' + (aq * shade).toFixed(3) + ')';
-      traceFace(fp2); ctx.fill();
-    }
-    // hover/active: highlight the cube's edges
-    if (isSel) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; for (var v5 = 0; v5 < vis.length; v5++) traceFace(facePts(cb.pts, vis[v5])); ctx.stroke(); }
-    else if (isHover) { ctx.strokeStyle = 'rgba(255,255,255,0.92)'; ctx.lineWidth = 1.5; for (var v6 = 0; v6 < vis.length; v6++) traceFace(facePts(cb.pts, vis[v6])); ctx.stroke(); }
-    else if (inLayer || inHovLayer) { ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = 1; for (var v7 = 0; v7 < vis.length; v7++) traceFace(facePts(cb.pts, vis[v7])); ctx.stroke(); }
-  }
-
+  function isOn(v, l) { return v.label === l.label && v.layer === l.layer && v.expert === l.expert; }
   function draw() {
-    recompute();
+    layout();
     ctx.clearRect(0, 0, W, H);
-    var order = [];
-    for (var i = 0; i < cubes.length; i++) order.push([cubes[i].depth, i]);
-    order.sort(function (a, b) { return a[0] - b[0]; });
-    for (var k = 0; k < order.length; k++) drawCube(cubes[order[k][1]]);
+    for (var i = 0; i < cells.length; i++) {
+      var c = cells[i], v = c.v;
+      var isSel = pin && isOn(v, pin), isHov = hover && isOn(v, hover);
+      var on = isSel || isHov;
+      if (on) {
+        // crisp highlight: translucent brighter fill + edge stroke
+        ctx.fillStyle = 'rgba(236,241,249,' + Math.min(1, c.alpha + 0.35).toFixed(3) + ')';
+        ctx.fillRect(c.x, c.y, c.w, c.h);
+        ctx.strokeStyle = isSel ? '#ffffff' : 'rgba(255,255,255,0.95)';
+        ctx.lineWidth = 1.5; ctx.strokeRect(c.x + 0.5, c.y + 0.5, c.w - 1, c.h - 1);
+      } else {
+        ctx.fillStyle = 'rgba(236,241,249,' + c.alpha.toFixed(3) + ')';
+        ctx.fillRect(Math.round(c.x), Math.round(c.y), Math.max(1, Math.round(c.w)), Math.max(1, Math.round(c.h)));
+      }
+    }
     ctx.fillStyle = 'rgba(135,143,157,0.75)'; ctx.font = '11px system-ui'; ctx.textAlign = 'left';
-    ctx.fillText('experts (x) · layers (y) · labels (depth) · filter on the right', 6, H - 6);
+    ctx.fillText('columns = capabilities · each sheet = a layer, cells = experts (score = opacity) · filter on the right', 6, H - 6);
   }
 
-  function inPoly(px, py, poly) {
-    var inside = false;
-    for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-      var xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];
-      if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) inside = !inside;
-    }
-    return inside;
-  }
-  // Hit-test uses the exact rendered face (no inflation) so the hover effect
-  // fires only on the cube under the cursor's precise location.
   function pick(e) {
     var r = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0 };
     var bx = e.clientX - r.left, by = e.clientY - r.top;
     var best = null, bd = 1e18;
-    // A cube is hovered only when the cursor is over its actual rendered face
-    // (union of visible faces, no inflation). If several translucent cubes
-    // occupy the same pixels, pick the one whose center is nearest the cursor
-    // — the cube the user is aiming at — so hovering a cube highlights it
-    // directly, exactly like a 2D button, and stays correct under rotation.
-    for (var i = 0; i < cubes.length; i++) {
-      var cb = cubes[i], vs = cb.vispolys, hit = false;
-      for (var f = 0; f < vs.length && !hit; f++) { if (inPoly(bx, by, vs[f])) hit = true; }
-      if (!hit) continue;
-      var dd = (cb.cx - bx) * (cb.cx - bx) + (cb.cy - by) * (cb.cy - by);
-      if (dd < bd) { bd = dd; best = cb.v; }
+    for (var i = 0; i < cells.length; i++) {
+      var c = cells[i];
+      if (bx >= c.x && bx < c.x + c.w && by >= c.y && by < c.y + c.h) {
+        var dd = (c.x + c.w / 2 - bx) * (c.x + c.w / 2 - bx) + (c.y + c.h / 2 - by) * (c.y + c.h / 2 - by);
+        if (dd < bd) { bd = dd; best = c.v; }
+      }
     }
     return best;
   }
@@ -489,8 +428,8 @@ _CAP3D_JS = r"""
   function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
   function bar(v) { return '<span class="p-bar"><i style="width:' + Math.round(v.score * 100) + '%"></i></span> ' + Math.round(v.score * 100) + '%'; }
   function rowHtml(v) {
-    var isSel = pin && v.label === pin.label && v.layer === pin.layer && v.expert === pin.expert;
-    var isHov = (!pin) && hover && v.label === hover.label && v.layer === hover.layer && v.expert === hover.expert;
+    var isSel = pin && isOn(v, pin);
+    var isHov = (!pin) && hover && isOn(v, hover);
     return '<div class="p-row' + (isSel ? ' sel' : isHov ? ' hov' : '') +
       '" onclick="window.capSel(' + v.label + ',' + v.layer + ',' + v.expert + ')">E' + v.expert + ' ' + bar(v) + '</div>';
   }
@@ -540,39 +479,13 @@ _CAP3D_JS = r"""
   window.capLayerOn = function (layer) { layerOn[layer] = !layerOn[layer]; if (pin && !layerOn[pin.layer]) pin = null; redraw(); };
   window.capAllLayers = function () { for (var l = 0; l < nl; l++) layerOn[l] = true; redraw(); };
 
-  var dragging = false, moved = 0, lastX = 0, lastY = 0;
-  function cursor(p) {
-    if (cv.style) cv.style.cursor = dragging ? 'grabbing' : (p ? 'pointer' : 'grab');
-  }
+  function cur(p) { if (cv.style) cv.style.cursor = p ? 'pointer' : 'default'; }
+  cv.addEventListener('pointermove', function (e) { var p = pick(e); hover = p; draw(); renderPanel(); cur(p); });
   cv.addEventListener('pointerdown', function (e) {
-    dragging = true; moved = 0; lastX = e.clientX; lastY = e.clientY;
-    if (cv.setPointerCapture) cv.setPointerCapture(e.pointerId);
-    cv.classList.add('dragging'); cursor(null);
-  });
-  cv.addEventListener('pointermove', function (e) {
     var p = pick(e);
-    if (dragging) {
-      var dx = e.clientX - lastX, dy = e.clientY - lastY;
-      moved += Math.abs(dx) + Math.abs(dy);
-      lastX = e.clientX; lastY = e.clientY;
-      ry += dx * 0.01; rx += dy * 0.01; rx = Math.max(0.05, Math.min(1.4, rx));
-      hover = null; draw(); cursor(null);
-    } else { hover = p; draw(); renderPanel(); cursor(p); }
+    if (p) { pin = (pin && isOn(pin, p)) ? null : p; focus = p.label; draw(); renderPanel(); }
   });
-  function up(e) {
-    if (dragging) {
-      dragging = false; cv.classList.remove('dragging');
-      if (moved < 6) {
-        pin = (hover && pin && pin.label === hover.label && pin.layer === hover.layer && pin.expert === hover.expert) ? null : hover;
-        renderPanel(); draw(); cursor(hover);
-      } else cursor(null);
-    }
-  }
-  cv.addEventListener('pointerup', up);
-  cv.addEventListener('pointercancel', function () { dragging = false; cv.classList.remove('dragging'); });
-  cv.addEventListener('wheel', function (e) {
-    e.preventDefault(); zoom *= (e.deltaY < 0 ? 1.08 : 0.92); zoom = Math.max(0.4, Math.min(3, zoom)); draw();
-  }, { passive: false });
+  cv.addEventListener('wheel', function (e) { e.preventDefault(); zoom = Math.max(0.5, Math.min(2.5, zoom * (e.deltaY < 0 ? 1.05 : 0.95))); draw(); }, { passive: false });
   window.addEventListener('resize', function () {
     var W2 = cv.clientWidth || W, H2 = cv.clientHeight || H;
     cv.width = Math.round(W2 * dpr); cv.height = Math.round(H2 * dpr);

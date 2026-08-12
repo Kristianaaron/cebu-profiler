@@ -17,19 +17,16 @@ Capability tab: monochrome 3D voxel view + sticky detail panel, agent-friendly �
 - **True 3D cubes** (all 8 corners + visible faces projected) so rotating stays
   readable; layers spaced wider; hover/ease with a generous hit radius that
   highlights the whole layer slice.
-- **Translucent cubes** (no outline, no dither): each face is a see-through
-  grayscale fill whose opacity encodes saliency; depth-fog dims far cubes so
-  overlaps stay separable, and the **active (hovered/pinned) cube's edges**
-  highlight — no per-cube outlines otherwise.
+- **Stacked translucent sheets** (no rotation UI): each capability is a column,
+  each layer a translucent sheet of expert cells stacked in it; every cell is
+  an axis-aligned, screen-disjoint rectangle whose **opacity encodes saliency**.
+  Hover = exact per-cell rectangle hit-test (a real 2D button) — verified
+  192/192 in headless Chromium. Hovered/pinned cell's edges highlight.
 - **Layer filter** on the right panel: L0 / L1 / … / all chips to view each
   layer separately or together, and it filters both the canvas and the panel.
-- **Hover = cube under cursor**: hit-testing uses the exact rendered faces
-  (no inflation) of every translucent cube — a cube is hovered only when the
-  cursor is over its actual on-screen surface. When several translucent cubes
-  share the same pixels, pick the one whose **center is nearest the cursor**,
-  not the front-most — so hovering a cube highlights that cube, exactly like a
-  2D button and **correct under any rotation** (verified 192/192). Cursor
-  becomes a **pointer** over a cube (grab/grabbing otherwise).
+- **Hover = the cell under the cursor**: exact point-in-rectangle per cell
+  (rows grouped by layer sheets), no rotation ambiguity — hovering a cell
+  highlights it directly. Cursor becomes a **pointer** over a cell.
 - See-through grayscale cubes with **opacity-as-saliency** (hot = more opaque),
   no dither/outline; high-DPI/integer-snapped, no animation loop.
 - Agent-friendly: `<caption>` + `th scope="col"` on every table; a
