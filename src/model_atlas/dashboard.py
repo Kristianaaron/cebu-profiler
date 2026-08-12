@@ -394,8 +394,14 @@ _CAP3D_JS = r"""
     for (var f = 0; f < 6; f++) { var nr = rot3(FACES[f].n[0], FACES[f].n[1], FACES[f].n[2]); nz.push(nr[2]); }
     var dom = 0, nmx = -1;
     for (var f = 0; f < 6; f++) if (nz[f] > nmx) { nmx = nz[f]; dom = f; }
-    var poly = FACES[dom].c.map(function (ci) { return pts[ci]; });
-    return { v: v, pts: pts, nz: nz, dom: dom, poly: poly, depth: rc[2], sc: sc };
+    var vis = [], vispolys = [];
+    for (var f = 0; f < 6; f++) {
+      if (nz[f] > 0) {
+        vis.push(f);
+        vispolys.push(FACES[f].c.map(function (ci) { return pts[ci]; }));
+      }
+    }
+    return { v: v, pts: pts, nz: nz, dom: dom, vis: vis, vispolys: vispolys, depth: rc[2], sc: sc };
   }
   function recompute() {
     cubes = [];
@@ -503,11 +509,17 @@ _CAP3D_JS = r"""
   function pick(e) {
     var r = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0 };
     var bx = e.clientX - r.left, by = e.clientY - r.top;
-    var best = null, bestNz = -1;
+    var best = null, bestDepth = -1e9;
+    // A cube's on-screen surface IS the union of its visible faces, and its
+    // visible faces share no interior, so any point over a cube is inside
+    // exactly one of its visible faces. Test all of them; front-most = max depth.
     for (var i = 0; i < cubes.length; i++) {
-      if (inPoly(bx, by, padPoly(cubes[i].poly))) {
-        var nz = cubes[i].nz[cubes[i].dom];
-        if (nz > bestNz) { bestNz = nz; best = cubes[i].v; } // front-most cube on screen
+      var cb = cubes[i], vs = cb.vispolys;
+      for (var f = 0; f < vs.length; f++) {
+        if (inPoly(bx, by, padPoly(vs[f]))) {
+          if (cb.depth > bestDepth) { bestDepth = cb.depth; best = cb.v; }
+          break; // one face per cube is enough
+        }
       }
     }
     return best;
