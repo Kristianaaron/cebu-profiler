@@ -426,15 +426,14 @@ _CAP3D_JS = r"""
   function aa(v4) { return Math.max(0, Math.min(1, v4)).toFixed(3); }
   function draw() {
     layout();
-    ctx.fillStyle = '#0a0d13'; ctx.fillRect(0, 0, W, H);   // dark background retained
-    // one translucent sheet panel per (capability, layer) behind its cells
+    ctx.clearRect(0, 0, W, H);   // transparent canvas -> grid/vignette behind shows through
+    // faint translucent sheet wash per (capability, layer) — no connecting outline
     for (var g = 0; g < cells.length;) {
       var gl = cells[g].v.label, gy = cells[g].v.layer, g0 = g;
       while (g < cells.length && cells[g].v.label === gl && cells[g].v.layer === gy) g++;
       var f = cells[g0], l = cells[g - 1];
       var panel = [[f.top[0][0], f.top[0][1]], [l.top[1][0], l.top[1][1]], [l.top[2][0], l.top[2][1]], [f.top[3][0], f.top[3][1]]];
-      fillQuad(panel, 'rgba(140,165,210,' + aa(0.06 + 0.10 * f.v.score) + ')');
-      ctx.strokeStyle = 'rgba(140,165,210,0.20)'; ctx.lineWidth = 1; strokeQuad(panel);
+      fillQuad(panel, 'rgba(140,165,210,' + aa(0.05 + 0.08 * f.v.score) + ')');
     }
     // painter-sort cells back-to-front, then translucent cell panels (opacity=saliency)
     var order = cells.slice();
@@ -639,8 +638,13 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .navlink:hover{{color:#a8d6ff}}
  .stat{{display:inline-block;background:#1d2430;border:1px solid #2a3342;border-radius:6px;padding:10px 14px;margin:4px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
  .stat .k{{color:#8a94a6;font-size:11px;display:block}} .stat .v{{font-size:18px;color:#d5dbe3}}
- .cap3d-wrap{{position:relative;display:flex;gap:12px;align-items:flex-start;background:#05070a;border:1px solid #262c38;border-radius:8px;padding:10px}}
- canvas#cap3d{{flex:1;min-width:0;width:100%;aspect-ratio:680/420;height:auto;display:block;touch-action:none;cursor:default;border-radius:6px;background:#0a0d13}}
+ .cap3d-wrap{{position:relative;display:flex;gap:12px;align-items:flex-start;border:1px solid #262c38;border-radius:8px;padding:10px;
+   background:#07070a;
+   background-image:linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px);
+   background-size:48px 48px,48px 48px}}
+ .cap3d-canvas{{position:relative;flex:1;min-width:0}}
+ canvas#cap3d{{width:100%;aspect-ratio:680/420;height:auto;display:block;touch-action:none;cursor:default;border-radius:6px;background:transparent}}
+ .cap3d-vig{{position:absolute;inset:0;pointer-events:none;border-radius:6px;background:radial-gradient(ellipse 72% 68% at 50% 48%, transparent 42%, rgba(7,7,10,0.5) 74%, #07070a 100%)}}
  canvas#cap3d.dragging{{cursor:grabbing}}
  .cap3d-panel{{flex:0 0 300px;position:sticky;top:0;align-self:flex-start;background:#0a0c10;border-left:1px solid #262c38;padding-left:12px;max-height:420px;overflow:auto;font-size:12px;color:#cfd6e0}}
  .cap3d-panel .p-head{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12.5px;color:#e9edf3;margin:2px 0 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
@@ -673,9 +677,12 @@ def render_dashboard(data: dict[str, Any]) -> str:
  <div class="panel" id="panel-capability">
    <p class="note">3D voxel view: one voxel per scored <code>(layer, expert)</code> cell, capability labels run along the depth axis; colour = measured saliency (per-label normalised). <strong>Drag to rotate · scroll to zoom · hover for values.</strong> The tables below are the canonical, agent-readable form — no vision needed to read the data.</p>
    <div class="cap3d-wrap">
-     <canvas id="cap3d"
-       role="img"
-       aria-label="3D voxel saliency map: x-axis = expert, y-axis = layer, depth = capability label; voxel brightness (grayscale ordered dither) = measured saliency. Interact or read the panel and tables for exact values."></canvas>
+     <div class="cap3d-canvas">
+       <canvas id="cap3d"
+         role="img"
+         aria-label="3D voxel saliency map: x-axis = expert, y-axis = layer, depth = capability label; voxel brightness (grayscale ordered dither) = measured saliency. Interact or read the panel and tables for exact values."></canvas>
+       <div class="cap3d-vig"></div>
+     </div>
      <aside class="cap3d-panel" id="cap3d-panel" aria-live="polite">
        <p class="mut">Hover a voxel to inspect · click to pin · drag to rotate · scroll to zoom.</p>
      </aside>
