@@ -10,8 +10,10 @@ latency numbers are estimates and are labeled as such.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
+from model_atlas.atlas.hierarchy import build_hierarchy
 from model_atlas.atlas.pathways import path_stats
 from model_atlas.atlas.reap import (
     SaliencyAccumulator,
@@ -43,6 +45,8 @@ _ICONS: dict[str, str] = {
     "candidate": '<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
     "heldout": '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1 1 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
     "maps": '<polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21 3 6"/><polyline points="3 6 9 9 15 6 21 9"/><line x1="9" x2="9" y1="9" y2="18"/>',
+    "hierarchy": '<path d="M8 6h13M8 12h13M8 18h13"/><circle cx="4" cy="6" r="2"/><circle cx="4" cy="12" r="2"/><circle cx="4" cy="18" r="2"/>',
+    "reality": '<path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><circle cx="12" cy="12" r="6"/>',
 }
 
 
@@ -70,6 +74,72 @@ def _contrast_rows(model: MiniMoE, contrast: Any) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _real_bytes_payload() -> dict[str, Any]:
+    """Real-bytes derivative envelopes (§24/§25) for the Quantization & Fit view.
+
+    Uses the mounted GLM-5.2 NVFP4 census when present, else a synthetic caret,
+    so the section always renders. Retention fractions are estimates (a routing
+    census needs inference); the byte math is measured.
+    """
+    from model_atlas.planning.realbytes import GIB, account_manifest, plan_candidates
+
+    _REAL = "/media/glm52/models/nvidia/GLM-5.2-NVFP4"
+    out: dict[str, Any] = {"source": None, "measured_gib": 0.0, "candidates": []}
+    try:
+        if os.path.isfile(os.path.join(_REAL, "config.json")):
+            from model_atlas.checkpoint.source_manifest import load_manifest
+
+            acc = account_manifest(load_manifest(_REAL))
+            out["source"] = _REAL
+        else:  # synthetic caret so the section still renders offline
+            from model_atlas.checkpoint.source_manifest import CheckpointManifest
+
+            def _tensor(name: str, size_gib: float, bpw: float) -> Any:
+                from model_atlas.checkpoint.source_manifest import TensorEntry
+
+                size = int(size_gib * GIB)
+                numel = int(size * 8 / bpw)
+                return TensorEntry(
+                    name=name, dtype="bf16", shape=[numel], numel=numel,
+                    byte_size=size, shard="s", offset_start=0, offset_end=size,
+                )
+
+            tensors = [
+                _tensor(f"model.layers.0.experts.{e}.gate.weight", 20.0 / 4, 8.19)
+                for e in range(4)
+            ]
+            tensors += [
+                _tensor("model.layers.0.self_attn.q_proj.weight", 3.33, 16.0),
+                _tensor("model.embed_tokens.weight", 3.33, 16.0),
+                _tensor("model.lm_head.weight", 3.34, 16.0),
+            ]
+            cf = CheckpointManifest(
+                checkpoint_dir="(synthetic)",
+                tensors=tensors,
+                total_bytes=sum(t.byte_size for t in tensors),
+                tensor_count=len(tensors),
+            )
+            acc = account_manifest(cf)
+            out["source"] = "(synthetic caret)"
+        out["measured_gib"] = round(acc.total_bytes / GIB, 1)
+        out["candidates"] = [
+            {
+                "envelope": round(c.envelope_gb, 0),
+                "keep": c.keep_frac,
+                "precision": c.expert_precision,
+                "bpw": c.mean_expert_bpw,
+                "stored": round(c.stored_gib(), 1),
+                "resident_a": round(c.resident_a_gib(), 1),
+                "resident_b": round(c.resident_b_gib(), 1),
+                "risk": c.risk,
+            }
+            for c in plan_candidates(acc)
+        ]
+    except Exception as exc:  # never break the whole dashboard over the fit section
+        out["source"] = f"(unavailable: {type(exc).__name__})"
+    return out
 
 
 def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
@@ -188,6 +258,38 @@ def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
         "distillation_target": [e.model_dump() for e in maps.distillation_target.entries],
     }
 
+    # §9 six-level hierarchy (profile)
+    hm = build_hierarchy(model, corpus, top_k=2)
+    hierarchy_payload = {
+        "model_id": hm.model_id,
+        "counts": hm.counts(),
+        "levels": ["weights", "units", "experts", "coalitions", "pathways", "behaviour"],
+        "example": {},
+    }
+    # a concrete trace-down example: contributors to the first behaviour
+    from model_atlas.atlas.hierarchy import AtlasLevel
+
+    behs = hm.nodes_at(AtlasLevel.BEHAVIOUR)
+    if behs:
+        proj = hm.project_down(behs[0].key)
+        hierarchy_payload["example"] = {
+            "behaviour": behs[0].label,
+            "experts": len(proj.get("experts", [])),
+            "units": len(proj.get("units", [])),
+            "weights": len(proj.get("weights", [])),
+            "top_shared_unit_prevalence": (
+                proj["units"][0]["prevalence"] if proj.get("units") else None
+            ),
+        }
+
+    # real-bytes derivative envelopes (fit) — real GLM census when mounted
+    reality_payload = _real_bytes_payload()
+
+    ecosystem_payload = {
+        "eval_host": 8100,
+        "note": "Eval Harness = standalone benchmarking app, Atlas = profiling/fit platform",
+    }
+
     return {
         "meta": {
             "arch": ARCH.name,
@@ -204,6 +306,9 @@ def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
         "candidates": candidates,
         "heldout": heldout_rows or [],
         "maps": maps_payload,
+        "hierarchy": hierarchy_payload,
+        "reality": reality_payload,
+        "ecosystem": ecosystem_payload,
     }
 
 
@@ -213,18 +318,46 @@ _TAB_TEMPLATE = """<div class="tab" data-tab="{id}"><svg viewBox="0 0 24 24" wid
 def render_dashboard(data: dict[str, Any]) -> str:
     """Return a self-contained interactive HTML page embedding measured data."""
     payload = json.dumps(data).replace("</", "<\\/")
-    tabs = [
-        {"id": "summary", "title": "Summary"},
-        {"id": "capability", "title": "Capability"},
-        {"id": "contrast", "title": "Success\u2212Failure"},
-        {"id": "coalition", "title": "Coalitions"},
-        {"id": "path", "title": "Paths"},
-        {"id": "compression", "title": "Compression"},
-        {"id": "candidate", "title": "Derivatives"},
-        {"id": "heldout", "title": "Held-out"},
-        {"id": "maps", "title": "Planning Maps"},
+    nav: list[dict[str, Any]] = [
+        {
+            "section": "Overview",
+            "tabs": [{"id": "summary", "title": "Summary"}],
+        },
+        {
+            "section": "Profiling",
+            "tabs": [
+                {"id": "capability", "title": "Capability"},
+                {"id": "contrast", "title": "Success\u2212Failure"},
+                {"id": "coalition", "title": "Coalitions"},
+                {"id": "path", "title": "Paths"},
+                {"id": "hierarchy", "title": "Hierarchy"},
+                {"id": "maps", "title": "Planning Maps"},
+            ],
+        },
+        {
+            "section": "Quantization & Fit",
+            "tabs": [
+                {"id": "compression", "title": "Compression"},
+                {"id": "candidate", "title": "Derivatives"},
+                {"id": "heldout", "title": "Held-out"},
+                {"id": "reality", "title": "Real-bytes"},
+            ],
+        },
     ]
-    tab_html = "".join(_TAB_TEMPLATE.format(id=t["id"], title=t["title"], icon=_ICONS.get(t["id"], ""), _LUCIDE=_LUCIDE) for t in tabs)
+    nav_html = []
+    for group in nav:
+        nav_html.append(f"<div class='navsec'>{group['section']}</div>")
+        for t in group["tabs"]:
+            nav_html.append(
+                _TAB_TEMPLATE.format(
+                    id=t["id"], title=t["title"], icon=_ICONS.get(t["id"], ""), _LUCIDE=_LUCIDE
+                )
+            )
+    nav_html.append(
+        "<a class='navlink' href='http://${{location.hostname}}:8100/' target='_blank'>"
+        "Eval Harness &#8599;</a>"
+    )
+    tab_html = "".join(nav_html)
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -250,22 +383,31 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .green{{color:#6fe3a1}} .amber{{color:#ffcf6b}} .red{{color:#ff7b7b}}
  .note{{color:#8a94a6;font-size:12px}}
  .panel h3{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:13px;color:#aab3c0;margin:18px 0 6px}}
+ .navsec{{color:#5d6673;font-size:10.5px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;margin:14px 10px 4px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
+ .navlink{{display:block;margin:14px 10px 0;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;color:#7cc0ff;text-decoration:none;padding:6px 0;border-top:1px solid #262c38}}
+ .navlink:hover{{color:#a8d6ff}}
+ .stat{{display:inline-block;background:#1d2430;border:1px solid #2a3342;border-radius:6px;padding:10px 14px;margin:4px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
+ .stat .k{{color:#8a94a6;font-size:11px;display:block}} .stat .v{{font-size:18px;color:#d5dbe3}}
 </style></head><body>
 <div class="layout">
 <nav class="side">{tab_html}</nav>
-<header><h1>Atlas Lab — model-atlas</h1>
-<div class="sub">{data["meta"]["arch"]} · {data["meta"]["layers"]} layers · {data["meta"]["experts"]} experts · top-{data["meta"]["top_k"]} · seed {data["meta"]["seed"]} — synthetic miniature MoE; all values measured by the F3–F13 runtime. Throughput/latency are estimates.</div></header>
+<header><h1>Atlas Profile Platform — model-atlas</h1>
+<div class="sub">{data["meta"]["arch"]} · {data["meta"]["layers"]} layers · {data["meta"]["experts"]} experts · top-{data["meta"]["top_k"]} · seed {data["meta"]["seed"]} — synthetic miniature MoE; all values measured by the F3–F13 runtime. Two surfaces: <em>Profiling</em> (how the model routes &amp; what components carry) and <em>Quantization &amp; Fit</em> (how to shrink it + real-bytes envelopes).</div></header>
 <main class="main">
  <div class="panel" id="panel-summary">
-   <p>End-to-end parent→derivative Atlas over a genuine synthetic mini-MoE. Everything below is computed by the same measured code paths as the test suite (98 tests green). See the <em>capability</em>, <em>success−failure</em>, <em>coalitions</em>, <em>paths</em>, <em>compression</em>, <em>derivatives</em> and <em>held-out</em> tabs.</p>
+   <p>End-to-end parent→derivative Atlas over a genuine synthetic mini-MoE. Everything below is computed by the same measured code paths as the test suite. This is the <strong>Atlas Profile Platform</strong>: use <em>Profiling</em> to understand the model, <em>Quantization &amp; Fit</em> to shrink/score it, and the <strong>Eval Harness</strong> link (bottom of the nav) for independent benchmarking.</p>
  </div>
  <div class="panel" id="panel-capability"><p class="note">Top layer/expert by mean REAP saliency per capability label (measured).</p><table id="t-capability"></table></div>
  <div class="panel" id="panel-contrast"><p class="note">success − failure saliency per label (measured); positive = experts more salient on successes.</p><table id="t-contrast"></table></div>
  <div class="panel" id="panel-coalition"><p class="note">Co-routed expert pairs (count) at layer 0 (measured).</p><table id="t-coalition"></table></div>
  <div class="panel" id="panel-path"><p class="note">Most frequent cross-layer route signatures with success rate (measured).</p><table id="t-path"></table></div>
+ <div class="panel" id="panel-hierarchy"><p class="note">Six-level atlas hierarchy (v2 §9): L1 weights → L2 units → L3 experts → L4 coalitions → L5 pathways → L6 behaviour, traceable up and down. Per-level node counts are measured; the example shows how many lower-level components realise the first behaviour (and the peak shared-channel prevalence — how load-bearing).</p><div id="hier-stats"></div><table id="t-hierarchy"></table></div>
  <div class="panel" id="panel-compression"><p class="note">Per-expert compression response (int4 vs int8), reconstruction error + output drift (measured math).</p><table id="t-compression"></table></div>
  <div class="panel" id="panel-candidate"><p class="note">Derivative candidates: kept experts/layer, resident bytes per node, go/no-go fit, held-out retention.</p><table id="t-candidate"></table></div>
  <div class="panel" id="panel-heldout"><p class="note">Per-capability held-out retention (derivative vs source), measured.</p><table id="t-heldout"></table></div>
+ <div class="panel" id="panel-reality"><p class="note">Real-bytes derivative envelopes (§24/§25) computed from measured checkpoint bytes — the mounted GLM-5.2 NVFP4 when present, else a synthetic caret. Retention fractions are estimates (a routing census needs inference); the byte math is measured.</p>
+    <div><span class="stat"><span class="k">source</span><span class="v" id="rl-source"></span></span><span class="stat"><span class="k">measured GiB</span><span class="v" id="rl-total"></span></span></div>
+    <table id="t-reality"></table></div>
  <div class="panel" id="panel-maps"><p class="note">§25 planning artifacts. Channel/tile maps are grounded in <em>measured</em> channel-uniqueness (v2 §8.3); node-ownership from the census placement; router-repair preserves expert↔router index coupling (v2 §31:18); overflow/residual/distillation derive from measured saliency. Removal-impact fields are estimates pending causal traces.</p>
     <h3>Channel map</h3><table id="t-channel"></table>
     <h3>Tile map</h3><table id="t-tile"></table>
@@ -303,6 +445,17 @@ def render_dashboard(data: dict[str, Any]) -> str:
  fill('t-router', ['layer','old','new','action','route_bias'], DATA.maps.router_repair.map(r=>({{'layer':r.layer_index,'old':r.old_index,'new':(r.new_index??'-'),'action':r.action,'route_bias':r.route_bias}})));
  fill('t-residual', ['layer','expert','component','severity','target'], DATA.maps.residual_repair.map(r=>({{'layer':r.layer_index,'expert':r.source_expert_id,'component':r.component,'severity':r.severity,'target':r.target}})));
  fill('t-distill', ['layer','expert','type','priority'], DATA.maps.distillation_target.map(r=>({{'layer':r.layer_index,'expert':r.source_expert_id,'type':r.target_type,'priority':r.priority}})));
+ fill('t-hierarchy', ['level','nodes'], DATA.hierarchy.levels.map(l=>({{'level':l, 'nodes':DATA.hierarchy.counts[l]}})));
+ document.getElementById('hier-stats').innerHTML =
+   (DATA.hierarchy.example && DATA.hierarchy.example.behaviour)
+     ? `<span class='stat'><span class='k'>trace-down example</span><span class='v'>${{DATA.hierarchy.example.behaviour}}</span></span>`+
+       Object.entries(DATA.hierarchy.example).filter(([k])=>k!=='behaviour').map(([k,v])=>`<span class='stat'><span class='k'>${{k}}</span><span class='v'>${{v}}</span></span>`).join('')
+     : '<p class="note">no behaviour nodes measured</p>';
+ document.getElementById('rl-source').textContent = DATA.reality.source;
+ document.getElementById('rl-total').textContent = DATA.reality.measured_gib + ' GiB';
+ fill('t-reality', ['envelope','keep','precision','bpw','stored','resident A','resident B','risk'],
+   DATA.reality.candidates.map(r=>({{'envelope':r.envelope+' GiB','keep':(r.keep*100)+'%','precision':r.precision,
+     'bpw':r.bpw,'stored':r.stored,'resident A':r.resident_a,'resident B':r.resident_b, 'risk':r.risk}})));
 
  document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{{
    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.0 — 2026-08-12
+
+Cohesive Atlas Profile Platform IA (Profile vs Quantization & Fit) —
+
+- Dashboard reorganised into three nav sections + an ecosystem link: **Overview**
+  (Summary), **Profiling** (Capability, Success−Failure, Coalitions, Paths,
+  Hierarchy, Planning Maps), **Quantization & Fit** (Compression, Derivatives,
+  Held-out, Real-bytes), and a nav link to the **Eval Harness** (standalone
+  benchmarking app).
+- New **Hierarchy** view: the six-level §9 hierarchy node counts + a trace-down
+  example (components realising the first behaviour, peak shared-channel
+  prevalence).
+- New **Real-bytes** view: §24/§25 derivative envelopes from measured
+  checkpoint bytes — the mounted GLM-5.2 NVFP4 census when present, else a
+  synthetic caret. So Atlas = the profiling/fit platform; Eval stays the
+  benchmark app.
+- Tests: test_f14 extended to defend the new payloads; 169 total; ruff + mypy clean.
+
 ## 0.7.0 — 2026-08-12
 
 Complete the §25 planning-artifact set (all 13 maps now exist) —

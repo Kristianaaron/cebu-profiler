@@ -15,6 +15,13 @@ def test_build_dashboard_data_has_sections():
     assert data["compression"]
     assert data["candidates"]
     assert data["heldout"]
+    assert set(data["hierarchy"]["levels"]) == {
+        "weights", "units", "experts", "coalitions", "pathways", "behaviour"
+    }
+    assert all(data["hierarchy"]["counts"][lv] > 0 for lv in data["hierarchy"]["levels"])
+    assert data["reality"]["candidates"], "real-bytes envelopes must be non-empty"
+    assert data["reality"]["measured_gib"] > 0
+    assert data["ecosystem"]["eval_host"] == 8100
 
 
 def test_render_dashboard_is_self_contained_html():
