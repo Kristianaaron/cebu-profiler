@@ -649,9 +649,24 @@ def render_dashboard(data: dict[str, Any]) -> str:
  th,td{{text-align:left;padding:6px 10px;border-bottom:1px solid #2b2b2b}}
  th{{color:#979797;font-weight:600}}
  .chip{{display:inline-block;background:#262626;border:1px solid #353535;border-radius:4px;padding:2px 8px;margin:2px;font-size:12px}}
- .cap-dom{{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px}}
- .cap-dom .chip{{cursor:pointer}}
- .cap-dom .chip.on{{background:#cfd6e0;color:#10131a;border-color:#cfd6e0}}
+ .cap-tbl-head{{display:flex;justify-content:flex-end;align-items:center;gap:8px;margin:10px 0 4px}}
+ #cap-sort{{background:#15181d;color:#cfd6e0;border:1px solid #3a3a3a;border-radius:6px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;padding:4px 8px;cursor:pointer}}
+ .cap-more-wrap{{display:flex;justify-content:center;margin:8px 0 2px}}
+ #cap-more{{background:transparent;border:1px solid #3a3a3a;color:#cfd6e0;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;padding:5px 16px;border-radius:6px;cursor:pointer}}
+ #cap-more:hover{{border-color:#6b6b6b;color:#fff}}
+ #cap-filter-btn{{background:transparent;border:1px solid #3a3a3a;color:#cfd6e0;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;padding:4px 12px;border-radius:6px;cursor:pointer}}
+ #cap-filter-btn:hover{{border-color:#6b6b6b;color:#fff}}
+ #cap-fcount{{color:#979797;margin-left:6px;font-size:11px}}
+ .cap-tray-bd{{position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:59;opacity:0;pointer-events:none;transition:opacity .2s}}
+ .cap-tray-bd.show{{opacity:1;pointer-events:auto}}
+ .cap-tray{{position:fixed;top:0;right:0;height:100vh;width:280px;background:#101316;border-left:1px solid #3a3a3a;z-index:60;transform:translateX(105%);transition:transform .22s ease;display:flex;flex-direction:column;box-shadow:-10px 0 34px rgba(0,0,0,0.5)}}
+ .cap-tray.open{{transform:translateX(0)}}
+ .cap-tray-head{{display:flex;justify-content:space-between;align-items:center;padding:14px;border-bottom:1px solid #2e2e2e;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:13px;color:#e9edf3}}
+ .cap-tray-head button{{background:none;border:none;color:#979797;font-size:18px;cursor:pointer;line-height:1}}
+ .cap-tray-head button:hover{{color:#fff}}
+ .cap-tray-body{{overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:10px}}
+ .cap-tray-body label{{display:flex;justify-content:space-between;align-items:center;color:#cfd6e0;font-size:12.5px;cursor:pointer;gap:8px}}
+ .cap-tray-body input[type=checkbox]{{accent-color:#cfd6e0;width:14px;height:14px}}
  .green{{color:#cdcdcd}} .amber{{color:#999999}} .red{{color:#5b5b5b}}
  .note{{color:#979797;font-size:12px}}
  .panel h3{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:13px;color:#b4b4b4;margin:18px 0 6px}}
@@ -731,8 +746,14 @@ def render_dashboard(data: dict[str, Any]) -> str:
      </aside>
    </div>
    <script type="application/json" id="cap3d-json">{cap3d_json}</script>
-   <div class="cap-dom" id="cap-domain-filters"></div>
+   <div class="cap-tbl-head">
+     <select id="cap-sort" title="sort"><option value="strength">sort: strongest → weakest</option><option value="score">sort: score</option><option value="name">sort: category</option></select>
+     <button id="cap-filter-btn" title="filter domains">Filter <span id="cap-fcount"></span></button>
+   </div>
+   <div class="cap-tray-bd" id="cap-tray-bd"></div>
+   <div class="cap-tray" id="cap-tray"><div class="cap-tray-head"><span>Domains</span><button id="cap-tray-close" title="close">&#215;</button></div><div class="cap-tray-body" id="cap-domain-filters"></div></div>
    <table id="t-capability"></table>
+   <div class="cap-more-wrap"><button id="cap-more">Load more</button></div>
  </div>
  <div class="panel" id="panel-contrast"><p class="note">success − failure saliency per label (measured); positive = experts more salient on successes.</p><table id="t-contrast"></table></div>
  <div class="panel" id="panel-coalition"><p class="note">Co-routed expert pairs (count) at layer 0 (measured).</p><table id="t-coalition"></table></div>
@@ -767,22 +788,43 @@ def render_dashboard(data: dict[str, Any]) -> str:
  function tierOf(s){{return s>=0.75?'strong':s>=0.5?'good':s>=0.25?'moderate':'weak';}}
  function sc(s){{return s>=0.75?'#e2b45c':s>=0.5?'#c6cdd8':s>=0.25?'#b08e6b':'#d0686b';}}
  var CAP_COLS = ['category','layer','expert','score','strength'];
- var CAP_ROWS = DATA.capability.flatMap(r=>r.top.map(x=>({{category:r.label, layer:'L'+x.layer, expert:'E'+x.expert, score:Math.round(x.score*100)+'%', strength:'<span style="color:'+sc(x.score)+'">'+tierOf(x.score)+'</span>'}})));
+ var CAP_ROWS = DATA.capability.flatMap(r=>r.top.map(x=>({{category:r.label, layer:'L'+x.layer, expert:'E'+x.expert, scoreNum:x.score, score:Math.round(x.score*100)+'%', strength:'<span style="color:'+sc(x.score)+'">'+tierOf(x.score)+'</span>'}})));
  var capOn = {{}}; DATA.capability.forEach(function(r){{ capOn[r.label]=true; }});
+ function tierRank(s){{ return s>=0.75?0:s>=0.5?1:s>=0.25?2:3; }}
+ var sortMode = 'strength';
+ var capLimit = 20, capStep = 20;
  function renderCap(){{
    var rows = CAP_ROWS.filter(function(r){{ return capOn[r.category]; }});
-   document.getElementById('t-capability').innerHTML = "<table>"+cols(CAP_COLS)+el(null,rows)+"</table>";
+   if (sortMode !== 'name') {{
+     rows = rows.slice().sort(function(a,b){{
+       if (sortMode === 'score') return b.scoreNum - a.scoreNum;
+       return (tierRank(a.scoreNum)-tierRank(b.scoreNum)) || (b.scoreNum-a.scoreNum);
+     }});
+   }}
+   var total = rows.length, shown = rows.slice(0, capLimit);
+   document.getElementById('t-capability').innerHTML = "<table>"+cols(CAP_COLS)+el(null,shown)+"</table>";
+   var mo = document.getElementById('cap-more');
+   if (mo) mo.style.display = (shown.length < total && total > capStep) ? '' : 'none';
  }}
  (function wireDom(){{
-   var box = document.getElementById('cap-domain-filters'); if (!box) return;
-   box.innerHTML = DATA.capability.map(function(r){{ return '<span class="chip'+(capOn[r.label]?' on':'')+'" data-d="'+r.label+'">'+r.label+'</span>'; }}).join('');
-   box.querySelectorAll('.chip').forEach(function(ch){{
-     ch.addEventListener('click', function(){{
-       capOn[ch.dataset.d] = !capOn[ch.dataset.d];
-       ch.classList.toggle('on', capOn[ch.dataset.d]);
-       renderCap();
-     }});
+   var btn = document.getElementById('cap-filter-btn'), tray = document.getElementById('cap-tray'), bd = document.getElementById('cap-tray-bd'), close = document.getElementById('cap-tray-close'), fcount = document.getElementById('cap-fcount');
+   var boxf = document.getElementById('cap-domain-filters');
+   var sortSel = document.getElementById('cap-sort');
+   if (!boxf) return;
+   if (sortSel) sortSel.addEventListener('change', function(){{ sortMode = sortSel.value; capLimit = capStep; renderCap(); }});
+   var more = document.getElementById('cap-more');
+   if (more) more.addEventListener('click', function(){{ capLimit += capStep; renderCap(); }});
+   function countSel(){{ var n=0,tot=0,k; for(k in capOn){{ tot++; if(capOn[k]) n++; }} if (fcount) fcount.textContent=n+'/'+tot; }}
+   boxf.innerHTML = DATA.capability.map(function(r){{ return '<label><span>'+r.label+'</span><input type="checkbox" '+(capOn[r.label]?'checked':'')+' data-d="'+r.label+'"></label>'; }}).join('');
+   boxf.querySelectorAll('input[type=checkbox]').forEach(function(ch){{
+     ch.addEventListener('change', function(){{ capOn[ch.dataset.d]=ch.checked; capLimit=capStep; renderCap(); countSel(); }});
    }});
+   countSel();
+   function openTray(o){{ tray.classList.toggle('open',o); bd.classList.toggle('show',o); }}
+   if (btn) btn.addEventListener('click', function(){{ openTray(true); }});
+   if (close) close.addEventListener('click', function(){{ openTray(false); }});
+   if (bd) bd.addEventListener('click', function(){{ openTray(false); }});
+   countSel();
  }})();
  renderCap();
  fill('t-contrast', ['label','top success−failure (delta)'],
