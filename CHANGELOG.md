@@ -17,12 +17,12 @@ Capability tab: monochrome 3D voxel view + sticky detail panel, agent-friendly �
 - **True 3D cubes** (all 8 corners + visible faces projected) so rotating stays
   readable; layers spaced wider; hover/ease with a generous hit radius that
   highlights the whole layer slice.
-- **Isometric (3D POV) stacked sheets**, no rotation UI: each capability is a
-  diamond-column, each layer a translucent rhombus sheet stacked up, and every
-  voxel's tile (with a shaded side face) reads as a 3D stack from a fixed
-  isometric view. Hover resolves by nearest-tile-center among the translucent
-  overlapped tiles — verified 192/192 in headless Chromium. Hovered/pinned
-  tile's edges highlight. Wheel-zoom only.
+- **Isometric translucent cube stacks** on a light background, matching the
+  `layer-ref` target: each voxel renders as a 3D iso cube (top/front/side
+  faces + crisp edges), capabilities/experts run along the two iso diagonals
+  and layers stack up, so each row reads as a vertical 3D stack. Hover =
+  nearest-center among containing top tiles (verified 192/192); hovered/pinned
+  cube edges highlight white on light blue. Wheel-zoom only.
 - **Layer filter** on the right panel: L0 / L1 / … / all chips to view each
   layer separately or together, and it filters both the canvas and the panel.
 - **Hover = the tile under the cursor**: point-in-polygon over each tile's

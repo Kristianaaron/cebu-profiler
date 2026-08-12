@@ -417,22 +417,32 @@ _CAP3D_JS = r"""
   function isOn(v, l) { return v.label === l.label && v.layer === l.layer && v.expert === l.expert; }
   function fillQuad(pts, style) { ctx.fillStyle = style; ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (var q = 1; q < 4; q++) ctx.lineTo(pts[q][0], pts[q][1]); ctx.closePath(); ctx.fill(); }
   function strokeQuad(pts) { ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (var q = 1; q < 4; q++) ctx.lineTo(pts[q][0], pts[q][1]); ctx.closePath(); ctx.stroke(); }
+  function aa(v4) { return Math.max(0, Math.min(1, v4)).toFixed(3); }
   function draw() {
     layout();
     ctx.clearRect(0, 0, W, H);
-    for (var i = 0; i < cells.length; i++) {
-      var c = cells[i]; fillQuad(c.side, 'rgba(20,26,34,' + Math.min(1, 0.35 + 0.6 * c.v.score).toFixed(3) + ')');
+    ctx.fillStyle = '#f4f6f9'; ctx.fillRect(0, 0, W, H);   // light canvas bg (matches ref)
+    // painter-sort: draw back/high cells first, near/lower last so stacks read correctly
+    var order = cells.slice();
+    order.sort(function (a, b) { return (a.cy - b.cy) || (a.v.layer - b.v.layer); });
+    for (var i = 0; i < order.length; i++) {
+      var c = order[i], v = c.v, top = c.top, body = T * 0.85;
+      var y0v = [[top[0][0], top[0][1] + body], [top[1][0], top[1][1] + body], [top[2][0], top[2][1] + body], [top[3][0], top[3][1] + body]];
+      var fl = [top[3], top[0], y0v[0], y0v[3]];   // front-left face
+      var fr = [top[1], top[2], y0v[2], y0v[1]];   // front-right face
+      var isSel = pin && isOn(v, pin), isHov = hover && isOn(v, hover);
+      var alpha = Math.max(0.04, (0.2 + 0.7 * v.score));
+      // three translucent faces like the reference: top lightest, sides darker
+      fillQuad(fr, 'rgba(96,126,170,' + aa(alpha * 0.85) + ')');   // right face darker
+      fillQuad(fl, 'rgba(154,180,214,' + aa(alpha * 0.95) + ')'); // front face mid
+      if (isSel || isHov) fillQuad(top, 'rgba(235,242,252,' + aa(Math.min(1, alpha + 0.45)) + ')');
+      else fillQuad(top, 'rgba(214,228,246,' + aa(alpha) + ')');
+      // crisp edges
+      if (isSel || isHov) { ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.6; }
+      else { ctx.strokeStyle = 'rgba(84,114,158,0.9)'; ctx.lineWidth = 1; }
+      strokeQuad(top); strokeQuad([[fl[0][0], fl[0][1]], [fl[1][0], fl[1][1]], [fl[2][0], fl[2][1]], [fl[3][0], fl[3][1]]]); strokeQuad([[fr[0][0], fr[0][1]], [fr[1][0], fr[1][1]], [fr[2][0], fr[2][1]], [fr[3][0], fr[3][1]]]);
     }
-    for (var j = 0; j < cells.length; j++) {
-      var cc = cells[j], v = cc.v, isSel = pin && isOn(v, pin), isHov = hover && isOn(v, hover);
-      if (isSel || isHov) {
-        fillQuad(cc.top, 'rgba(236,241,249,' + Math.min(1, v.score + 0.4).toFixed(3) + ')');
-        ctx.strokeStyle = isSel ? '#ffffff' : 'rgba(255,255,255,0.95)'; ctx.lineWidth = 1.5; strokeQuad(cc.top);
-      } else {
-        fillQuad(cc.top, 'rgba(236,241,249,' + (Math.max(0.1, 0.22 + 0.72 * v.score)).toFixed(3) + ')');
-      }
-    }
-    ctx.fillStyle = 'rgba(135,143,157,0.75)'; ctx.font = '11px system-ui'; ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(70,90,120,0.8)'; ctx.font = '11px system-ui'; ctx.textAlign = 'left';
     ctx.fillText('diagonals = experts & capabilities · layers stack up · score = opacity · filter on the right', 6, H - 6);
   }
 
@@ -608,7 +618,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .stat{{display:inline-block;background:#1d2430;border:1px solid #2a3342;border-radius:6px;padding:10px 14px;margin:4px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
  .stat .k{{color:#8a94a6;font-size:11px;display:block}} .stat .v{{font-size:18px;color:#d5dbe3}}
  .cap3d-wrap{{position:relative;display:flex;gap:12px;align-items:flex-start;background:#05070a;border:1px solid #262c38;border-radius:8px;padding:10px}}
- canvas#cap3d{{flex:1;min-width:0;width:100%;aspect-ratio:680/420;height:auto;display:block;touch-action:none;cursor:grab;border-radius:6px;background:#000}}
+ canvas#cap3d{{flex:1;min-width:0;width:100%;aspect-ratio:680/420;height:auto;display:block;touch-action:none;cursor:default;border-radius:6px;background:#f4f6f9}}
  canvas#cap3d.dragging{{cursor:grabbing}}
  .cap3d-panel{{flex:0 0 300px;position:sticky;top:0;align-self:flex-start;background:#0a0c10;border-left:1px solid #262c38;padding-left:12px;max-height:420px;overflow:auto;font-size:12px;color:#cfd6e0}}
  .cap3d-panel .p-head{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12.5px;color:#e9edf3;margin:2px 0 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
