@@ -22,8 +22,7 @@ Capability tab: monochrome 3D voxel view + sticky detail panel, agent-friendly �
   a fixed iso view (capabilities/experts on the two diagonals, layers up) on the
   near-black canvas — no cubes, no outlines. Cell opacity = saliency; the only
   stroke is a faint sheet edge. Hover = nearest-center among containing top
-  tiles (verified 192/192); hovered/pinned cell edges highlight white. Wheel-zoom only.
-- **Layer filter** on the right panel: L0 / L1 / … / all chips to view each
+  tiles (verified 192/192); hovered/pinned cell edges highlight white. Wheel-zoom only.- **Layer filter** on the right panel: L0 / L1 / … / all chips to view each
   layer separately or together, and it filters both the canvas and the panel.
 - **Hover = the tile under the cursor**: point-in-polygon over each tile's
   top rhombus; where translucent overlapped tiles both contain the cursor it

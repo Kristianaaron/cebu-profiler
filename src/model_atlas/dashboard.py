@@ -370,11 +370,13 @@ _CAP3D_JS = r"""
   // step vL=(-du,dw); layer l lifts it by l*T so stacks are vertical.
   function tile(E, L, l) {
     var x = (E - L) * du0, y = (E + L) * dw0 - l * T;
+    var GAP = 0.78;                       // cell size relative to lattice step (gap between neighbours)
+    var du = du0 * GAP, dw = dw0 * GAP;
     return [
-      [x - du0, y + dw0],   // a + vL
-      [x, y],               // a
-      [x + du0, y + dw0],   // a + vE
-      [x, y + 2 * dw0]      // a + vE + vL
+      [x - du, y + dw],   // a + vL
+      [x, y],             // a
+      [x + du, y + dw],   // a + vE
+      [x, y + 2 * dw]     // a + vE + vL
     ];
   }
   // Vertical wall under the tile's left +front edge down to the next layer.
