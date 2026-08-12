@@ -761,8 +761,9 @@ def render_dashboard(data: dict[str, Any]) -> str:
  function fill(id, headers, rows){{document.getElementById(id).innerHTML = "<table><caption>"+(headers.join(' · '))+"</caption>"+cols(headers)+el(null,rows)+"</table>";}}
 
  function tierOf(s){{return s>=0.75?'strong':s>=0.5?'good':s>=0.25?'moderate':'weak';}}
- fill('t-capability', ['label','top layer/expert (score · tier)'],
-   DATA.capability.map(r=>({{label:r.label, top:r.top.map(x=>`L${{x.layer}}E${{x.expert}} (${{x.score}}) ${{tierOf(x.score)}}`).join(' · ')}})));
+ function sc(s){{return s>=0.75?'#e2b45c':s>=0.5?'#c6cdd8':s>=0.25?'#b08e6b':'#d0686b';}}
+ fill('t-capability', ['category','layer','expert','score','strength'],
+   DATA.capability.flatMap(r=>r.top.map(x=>({{category:r.label, layer:'L'+x.layer, expert:'E'+x.expert, score:Math.round(x.score*100)+'%', strength:'<span style="color:'+sc(x.score)+'">'+tierOf(x.score)+'</span>'}}))));
  fill('t-contrast', ['label','top success−failure (delta)'],
    DATA.contrast.map(r=>({{label:r.label, top:r.top.map(x=>`L${{x.layer}}E${{x.expert}} (${{x.delta}})`).join(' · ')}})));
  fill('t-coalition', ['pair','coactivity'], DATA.coalitions.map(r=>({{pair:`L0E${{r.pair[0]}} / L0E${{r.pair[1]}}`, coactivity:r.coactivity}})));
