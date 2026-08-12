@@ -17,18 +17,18 @@ Capability tab: monochrome 3D voxel view + sticky detail panel, agent-friendly �
 - **True 3D cubes** (all 8 corners + visible faces projected) so rotating stays
   readable; layers spaced wider; hover/ease with a generous hit radius that
   highlights the whole layer slice.
-- **Overlap clarity**: each cube draws an opaque dark body first then a dithered
-  grayscale saliency surface, so a nearer cube cleanly occludes a farther one
-  (no muddiness); depth-fog dims far cubes and crisp edges keep layers separable.
+- **Translucent cubes** (no outline, no dither): each face is a see-through
+  grayscale fill whose opacity encodes saliency; depth-fog dims far cubes so
+  overlaps stay separable, and the **active (hovered/pinned) cube's edges**
+  highlight — no per-cube outlines otherwise.
 - **Layer filter** on the right panel: L0 / L1 / … / all chips to view each
   layer separately or together, and it filters both the canvas and the panel.
 - **Fixed hover targeting**: hit-testing is now point-in-polygon against each
   cube's rendered front face (front-most wins), instead of the 3D centroid —
   so hovering directly over a cube selects it. Cursor becomes a **pointer** over
   a cube (grab/grabbing otherwise) and hover highlights the active layer slice.
-- Monochrome grayscale with **dense ordered dither + opacity-as-saliency**
-  (hot = more opaque) on the dominant face; high-DPI/integer-snapped, no
-  animation loop.
+- See-through grayscale cubes with **opacity-as-saliency** (hot = more opaque),
+  no dither/outline; high-DPI/integer-snapped, no animation loop.
 - Agent-friendly: `<caption>` + `th scope="col"` on every table; a
   `<script type="application/json" id="cap3d-json">` structured block; panel is
   `aria-live`; the canonical table remains the ground truth.

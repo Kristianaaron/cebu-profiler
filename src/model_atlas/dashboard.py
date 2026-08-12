@@ -339,10 +339,9 @@ def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
 
 _CAP3D_JS = r"""
 // Capability 3D voxel view — dependency-free, render-on-interaction only.
-// True 3D cubes. Overlap clarity: each cube draws an OPAQUE dark body first
-// (so a nearer cube cleanly occludes a farther one — no muddiness), then a
-// dithered grayscale surface whose density/opacity encodes saliency; crisp
-// edges + depth fog keep layers separable.
+// Translucent 3D cubes with no outline and no dither; saliency = fill
+// opacity. Depth fog dims far cubes so overlaps stay separable, and the
+// active (hovered/pinned) cube's edges highlight.
 // A layer filter on the right panel shows layers separately or together.
 (function () {
   var cv = document.getElementById('cap3d');
@@ -411,19 +410,6 @@ _CAP3D_JS = r"""
     cubes = d;
   }
 
-  var BAYER = [[0,8,2,10],[12,4,14,6],[3,11,1,9],[15,7,13,5]];
-  function ditherVoxel(x0, y0, s, score, c) {
-    var cell = Math.max(2, Math.round(s / 9));
-    var g = Math.max(1, Math.min(15, Math.round(score * 15)));
-    var a = Math.min(1, 0.55 + 0.45 * score);
-    c.fillStyle = 'rgba(236,241,249,' + a.toFixed(3) + ')';
-    for (var cy = 0, col = 0; cy < s; cy += cell, col++) {
-      for (var cx = 0, row = 0; cx < s; cx += cell, row++) {
-        if (g > BAYER[col % 4][row % 4]) c.fillRect(x0 + cx, y0 + cy, cell, cell);
-      }
-    }
-  }
-
   function facePts(pts, f) { return FACES[f].c.map(function (ci) { return pts[ci]; }); }
   function traceFace(fp) {
     ctx.beginPath(); ctx.moveTo(fp[0][0], fp[0][1]);
@@ -441,18 +427,11 @@ _CAP3D_JS = r"""
     var inLayer = selLayer && selLayer.label === v.label && selLayer.layer === v.layer;
     var inHovLayer = !pin && hover && v.label === hover.label && v.layer === hover.layer;
     var fg = fog(cb.depth);
-    var aq = Math.min(1, 0.45 + 0.55 * v.score) * fg;
-    // visible-faces first pass: opaque dark bodies so overlaps stay crisp
+    var aq = Math.min(1, 0.5 + 0.5 * v.score) * fg;
+    // translucent cubes: fill each visible face with saliency color. No opaque
+    // body, no dither, no outline — just see-through cubes.
     var vis = [];
     for (var f = 0; f < 6; f++) if (cb.nz[f] > 0) vis.push(f);
-    for (var vi = 0; vi < vis.length; vi++) {
-      var fp = facePts(cb.pts, vis[vi]);
-      ctx.fillStyle = '#0a0c11';
-      traceFace(fp); ctx.fill();
-    }
-    // second pass: dithered saliency surface on the dominant face + shaded sides
-    var dom = vis[0], domNz = -1;
-    for (var v2 = 0; v2 < vis.length; v2++) if (cb.nz[vis[v2]] > domNz) { domNz = cb.nz[vis[v2]]; dom = vis[v2]; }
     for (var v3 = 0; v3 < vis.length; v3++) {
       var f2 = vis[v3];
       var fp2 = facePts(cb.pts, f2);
@@ -460,24 +439,10 @@ _CAP3D_JS = r"""
       ctx.fillStyle = 'rgba(236,241,249,' + (aq * shade).toFixed(3) + ')';
       traceFace(fp2); ctx.fill();
     }
-    // dense dither on the dominant (front-most) face
-    var fpd = facePts(cb.pts, dom);
-    var xs = [], ys = [];
-    for (var q = 0; q < 4; q++) { xs.push(fpd[q][0]); ys.push(fpd[q][1]); }
-    var x0 = Math.round(Math.min.apply(null, xs)), y0 = Math.round(Math.min.apply(null, ys));
-    var s = Math.max(2, Math.round(Math.max.apply(null, xs) - x0));
-    ctx.save(); traceFace(fpd); ctx.clip();
-    ditherVoxel(x0, y0, s, v.score, ctx);
-    ctx.restore();
-    // crisp edges on visible faces
-    for (var v4 = 0; v4 < vis.length; v4++) {
-      var fp3 = facePts(cb.pts, vis[v4]);
-      ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 1; traceFace(fp3); ctx.stroke();
-    }
-    // highlight
-    if (isSel) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; for (var v5 = 0; v5 < vis.length; v5++) { ctx.strokeStyle = v5 === 0 ? '#fff' : 'rgba(255,255,255,0.4)'; traceFace(facePts(cb.pts, vis[v5])); ctx.stroke(); } }
-    else if (isHover) { ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 1.5; traceFace(facePts(cb.pts, dom)); ctx.stroke(); }
-    else if (inLayer || inHovLayer) { ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = 1; traceFace(facePts(cb.pts, dom)); ctx.stroke(); }
+    // hover/active: highlight the cube's edges
+    if (isSel) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; for (var v5 = 0; v5 < vis.length; v5++) traceFace(facePts(cb.pts, vis[v5])); ctx.stroke(); }
+    else if (isHover) { ctx.strokeStyle = 'rgba(255,255,255,0.92)'; ctx.lineWidth = 1.5; for (var v6 = 0; v6 < vis.length; v6++) traceFace(facePts(cb.pts, vis[v6])); ctx.stroke(); }
+    else if (inLayer || inHovLayer) { ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = 1; for (var v7 = 0; v7 < vis.length; v7++) traceFace(facePts(cb.pts, vis[v7])); ctx.stroke(); }
   }
 
   function draw() {
