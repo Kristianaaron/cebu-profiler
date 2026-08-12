@@ -417,20 +417,21 @@ _CAP3D_JS = r"""
     ctx.save(); tracePath(poly); ctx.clip();
     var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9, k;
     for (k = 0; k < 4; k++) { if (poly[k][0] < x0) x0 = poly[k][0]; if (poly[k][0] > x1) x1 = poly[k][0]; if (poly[k][1] < y0) y0 = poly[k][1]; if (poly[k][1] > y1) y1 = poly[k][1]; }
-    var g = Math.round(24 + 62 * level);                 // solid opaque face grey
-    ctx.fillStyle = 'rgb(' + g + ',' + (g + 3) + ',' + (g + 8) + ')';
+    var g = Math.round(22 + 70 * level);                 // solid opaque face grey
+    ctx.fillStyle = 'rgb(' + g + ',' + (g + 3) + ',' + (g + 10) + ')';
     ctx.fillRect(Math.floor(x0), Math.floor(y0), Math.ceil(x1 - x0), Math.ceil(y1 - y0));
-    var s = Math.max(2, Math.round((x1 - x0) / 10));       // dense dots
-    var t = Math.max(0, Math.min(15, Math.round(Math.min(1, level) * 15.5)));
-    ctx.fillStyle = 'rgba(235,240,250,' + aa(Math.min(1, 0.6 + 0.4 * level)) + ')';
+    // subtle dither so the face stays a solid plate with a soft grain
+    var s = Math.max(2, Math.round((x1 - x0) / 5));        // faint sparse dots
+    var t = Math.max(0, Math.min(15, Math.round(Math.min(1, level) * 9)));
+    ctx.fillStyle = 'rgba(240,244,252,' + aa(0.3 + 0.3 * level) + ')';
     var col = 0, row = 0;
     for (var yy = Math.floor(y0); yy < y1; yy += s, col++) {
       row = 0;
       for (var xx = Math.floor(x0); xx < x1; xx += s, row++) {
-        if (t > BAYER[col & 3][row & 3]) ctx.fillRect(xx, yy, s + 0.5, s + 0.5);
+        if (t > BAYER[col & 3][row & 3]) ctx.fillRect(xx, yy, s, s);
       }
     }
-    ctx.strokeStyle = 'rgba(245,248,252,0.5)'; ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 1.3;
     ctx.beginPath(); ctx.moveTo(poly[0][0], poly[0][1]); for (var q = 1; q < 4; q++) ctx.lineTo(poly[q][0], poly[q][1]); ctx.closePath(); ctx.stroke();
     ctx.restore();
   }
@@ -452,7 +453,7 @@ _CAP3D_JS = r"""
     for (var f = 0; f < 6; f++) {
       if (cb.nz[f] <= 0) continue;
       var shade = 0.30 + 0.70 * Math.max(0, cb.nz[f]);   // light source shading
-      var level = (active ? 1.35 : 1) * shade * hot;
+      var level = (active ? 1.5 : 1.15) * shade * hot * (f === 1 ? 1.25 : f === 5 ? 1.0 : 0.72); // top brightest, then front, sides darker
       ditherFace(facePath(cb.pts, f), Math.min(1, level), active);
     }  }
 
@@ -650,7 +651,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .layout{{display:flex;min-height:100vh}}
  .col{{flex:1;display:flex;flex-direction:column;min-width:0}}
  nav.side{{width:200px;flex:0 0 200px;display:flex;flex-direction:column;gap:2px;background:#161a22;border-right:1px solid #262c38;padding:14px 10px;position:sticky;top:0;height:100vh;overflow-y:auto;box-sizing:border-box}}
- nav.side .tab{{display:flex;align-items:center;gap:9px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:16px;padding:8px 10px;cursor:pointer;color:#aab3c0;border-radius:6px}}
+ nav.side .tab{{display:flex;align-items:center;gap:9px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:14px;padding:8px 10px;cursor:pointer;color:#aab3c0;border-radius:6px}}
  nav.side .tab svg{{flex:0 0 auto}}
  nav.side .tab:hover{{background:#1d2430}}
  nav.side .tab.active{{color:#7cc0ff;background:#1d2430}}
