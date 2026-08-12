@@ -649,7 +649,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  th,td{{text-align:left;padding:6px 10px;border-bottom:1px solid #2b2b2b}}
  th{{color:#979797;font-weight:600}}
  .chip{{display:inline-block;background:#262626;border:1px solid #353535;border-radius:4px;padding:2px 8px;margin:2px;font-size:12px}}
- .cap-tbl-head{{display:flex;justify-content:flex-end;align-items:center;gap:8px;margin:10px 0 4px}}
+ .cap-tbl-head{{display:flex;justify-content:flex-end;align-items:center;gap:8px;margin:14px 0 20px}}
  #cap-sort{{background:#121519;color:#aeb5bf;border:1px solid #343a42;border-radius:6px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;padding:4px 24px 4px 10px;cursor:pointer}}
  #cap-sort option{{background:#121519;color:#b6bdc7}}
  .cap-sort-lbl{{color:#7d848e;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:11px;text-transform:uppercase;letter-spacing:.06em}}
