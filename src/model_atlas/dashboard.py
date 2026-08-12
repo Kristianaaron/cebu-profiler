@@ -650,7 +650,9 @@ def render_dashboard(data: dict[str, Any]) -> str:
  th{{color:#979797;font-weight:600}}
  .chip{{display:inline-block;background:#262626;border:1px solid #353535;border-radius:4px;padding:2px 8px;margin:2px;font-size:12px}}
  .cap-tbl-head{{display:flex;justify-content:flex-end;align-items:center;gap:8px;margin:10px 0 4px}}
- #cap-sort{{background:#15181d;color:#cfd6e0;border:1px solid #3a3a3a;border-radius:6px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;padding:4px 8px;cursor:pointer}}
+ #cap-sort{{background:#121519;color:#aeb5bf;border:1px solid #343a42;border-radius:6px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;padding:4px 24px 4px 10px;cursor:pointer}}
+ #cap-sort option{{background:#121519;color:#b6bdc7}}
+ .cap-sort-lbl{{color:#7d848e;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:11px;text-transform:uppercase;letter-spacing:.06em}}
  .cap-more-wrap{{display:flex;justify-content:center;margin:8px 0 2px}}
  #cap-more{{background:transparent;border:1px solid #3a3a3a;color:#cfd6e0;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;padding:5px 16px;border-radius:6px;cursor:pointer}}
  #cap-more:hover{{border-color:#6b6b6b;color:#fff}}
@@ -747,7 +749,8 @@ def render_dashboard(data: dict[str, Any]) -> str:
    </div>
    <script type="application/json" id="cap3d-json">{cap3d_json}</script>
    <div class="cap-tbl-head">
-     <select id="cap-sort" title="sort"><option value="strength">sort: strongest → weakest</option><option value="score">sort: score</option><option value="name">sort: category</option></select>
+     <label class="cap-sort-lbl" for="cap-sort">sort</label>
+     <select id="cap-sort" title="sort"><option value="strength">strongest → weakest</option><option value="score">score</option><option value="name">category</option></select>
      <button id="cap-filter-btn" title="filter domains">Filter <span id="cap-fcount"></span></button>
    </div>
    <div class="cap-tray-bd" id="cap-tray-bd"></div>
