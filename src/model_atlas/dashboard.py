@@ -649,6 +649,9 @@ def render_dashboard(data: dict[str, Any]) -> str:
  th,td{{text-align:left;padding:6px 10px;border-bottom:1px solid #2b2b2b}}
  th{{color:#979797;font-weight:600}}
  .chip{{display:inline-block;background:#262626;border:1px solid #353535;border-radius:4px;padding:2px 8px;margin:2px;font-size:12px}}
+ .cap-dom{{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px}}
+ .cap-dom .chip{{cursor:pointer}}
+ .cap-dom .chip.on{{background:#cfd6e0;color:#10131a;border-color:#cfd6e0}}
  .green{{color:#cdcdcd}} .amber{{color:#999999}} .red{{color:#5b5b5b}}
  .note{{color:#979797;font-size:12px}}
  .panel h3{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:13px;color:#b4b4b4;margin:18px 0 6px}}
@@ -728,6 +731,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
      </aside>
    </div>
    <script type="application/json" id="cap3d-json">{cap3d_json}</script>
+   <div class="cap-dom" id="cap-domain-filters"></div>
    <table id="t-capability"></table>
  </div>
  <div class="panel" id="panel-contrast"><p class="note">success − failure saliency per label (measured); positive = experts more salient on successes.</p><table id="t-contrast"></table></div>
@@ -762,8 +766,25 @@ def render_dashboard(data: dict[str, Any]) -> str:
 
  function tierOf(s){{return s>=0.75?'strong':s>=0.5?'good':s>=0.25?'moderate':'weak';}}
  function sc(s){{return s>=0.75?'#e2b45c':s>=0.5?'#c6cdd8':s>=0.25?'#b08e6b':'#d0686b';}}
- fill('t-capability', ['category','layer','expert','score','strength'],
-   DATA.capability.flatMap(r=>r.top.map(x=>({{category:r.label, layer:'L'+x.layer, expert:'E'+x.expert, score:Math.round(x.score*100)+'%', strength:'<span style="color:'+sc(x.score)+'">'+tierOf(x.score)+'</span>'}}))));
+ var CAP_COLS = ['category','layer','expert','score','strength'];
+ var CAP_ROWS = DATA.capability.flatMap(r=>r.top.map(x=>({{category:r.label, layer:'L'+x.layer, expert:'E'+x.expert, score:Math.round(x.score*100)+'%', strength:'<span style="color:'+sc(x.score)+'">'+tierOf(x.score)+'</span>'}})));
+ var capOn = {{}}; DATA.capability.forEach(function(r){{ capOn[r.label]=true; }});
+ function renderCap(){{
+   var rows = CAP_ROWS.filter(function(r){{ return capOn[r.category]; }});
+   document.getElementById('t-capability').innerHTML = "<table>"+cols(CAP_COLS)+el(null,rows)+"</table>";
+ }}
+ (function wireDom(){{
+   var box = document.getElementById('cap-domain-filters'); if (!box) return;
+   box.innerHTML = DATA.capability.map(function(r){{ return '<span class="chip'+(capOn[r.label]?' on':'')+'" data-d="'+r.label+'">'+r.label+'</span>'; }}).join('');
+   box.querySelectorAll('.chip').forEach(function(ch){{
+     ch.addEventListener('click', function(){{
+       capOn[ch.dataset.d] = !capOn[ch.dataset.d];
+       ch.classList.toggle('on', capOn[ch.dataset.d]);
+       renderCap();
+     }});
+   }});
+ }})();
+ renderCap();
  fill('t-contrast', ['label','top success−failure (delta)'],
    DATA.contrast.map(r=>({{label:r.label, top:r.top.map(x=>`L${{x.layer}}E${{x.expert}} (${{x.delta}})`).join(' · ')}})));
  fill('t-coalition', ['pair','coactivity'], DATA.coalitions.map(r=>({{pair:`L0E${{r.pair[0]}} / L0E${{r.pair[1]}}`, coactivity:r.coactivity}})));
