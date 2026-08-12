@@ -422,10 +422,10 @@ _CAP3D_JS = r"""
       var a = (active ? 0.5 + 0.4 * hot * shade : 0.05 + 0.20 * hot * shade); // low opacity by default
       var poly = facePath(cb.pts, f);
       tracePath(poly);
-      ctx.fillStyle = 'rgba(226,234,246,' + aa(a) + ')';
+      ctx.fillStyle = 'rgba(235,235,235,' + aa(a) + ')';
       ctx.fill();
       if (active) { ctx.strokeStyle = 'rgba(255,255,255,0.95)'; ctx.lineWidth = 2; }
-      else { ctx.strokeStyle = 'rgba(205,216,232,' + aa(0.35 * shade) + ')'; ctx.lineWidth = 1; }
+      else { ctx.strokeStyle = 'rgba(218,218,218,' + aa(0.35 * shade) + ')'; ctx.lineWidth = 1; }
       ctx.stroke();
     }
   }
@@ -443,11 +443,11 @@ _CAP3D_JS = r"""
     ctx.font = '10.5px system-ui'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
     for (la = 0; la < nl; la++) {
       if (!lp[la].n) continue;
-      ctx.fillStyle = 'rgba(140,160,190,0.5)';
+      ctx.fillStyle = 'rgba(163,163,163,0.5)';
       ctx.fillText('L' + la, lp[la].x / lp[la].n - 34, lp[la].y / lp[la].n);
     }
     ctx.textBaseline = 'alphabetic';
-    ctx.fillStyle = 'rgba(150,160,180,0.85)'; ctx.font = '11px system-ui'; ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(163,163,163,0.85)'; ctx.font = '11px system-ui'; ctx.textAlign = 'left';
     ctx.fillText('experts (x) · layers (y) · capabilities (z) · dither = saliency · drag to rotate · scroll to zoom', 6, H - 6);
   }
 
@@ -512,7 +512,7 @@ _CAP3D_JS = r"""
     for (var i = 0; i < all.length; i++) {
       var v = all[i];
       if (v.layer !== lastL && layerOn[v.layer]) {
-        html += '<div class="p-grp" onclick="window.capLayer(' + li + ',' + v.layer + ')">layer L' + v.layer + '<span class="p-grp-caret">&#9656;</span></div>';
+        html += '<div class="p-grp" onclick="window.capLayer(' + li + ',' + v.layer + ')">layer L' + v.layer + '<span class="p-grp-caret">&#7171716;</span></div>';
         lastL = v.layer;
       }
       html += rowHtml(v);
@@ -623,7 +623,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
             )
     nav_html.append(
         "<a class='navlink' href='http://${{location.hostname}}:8100/' target='_blank'>"
-        "Eval Harness &#8599;</a>"
+        "Eval Harness &#7d7d7d9;</a>"
     )
     tab_html = "".join(nav_html)
     return f"""<!doctype html>
@@ -634,71 +634,71 @@ def render_dashboard(data: dict[str, Any]) -> str:
 <title>Atlas Lab — model-atlas</title>
 <style>
  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
- body{{font-family:'Inter',ui-sans-serif,system-ui,sans-serif;margin:0;background:#0f1115;color:#d5dbe3}}
- header{{padding:18px 24px;background:#161a22;border-bottom:1px solid #262c38}}
+ body{{font-family:'Inter',ui-sans-serif,system-ui,sans-serif;margin:0;background:#171717212;color:#d7d7d7cdc}}
+ header{{padding:18px 24px;background:#4a4a4ab1b;border-bottom:1px solid #666666e2e}}
  h1{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;letter-spacing:-0.01em;font-size:18px;margin:0}}
- .sub{{color:#8a94a6;font-size:12px;margin-top:4px}}
+ .sub{{color:#8e8e8e797;font-size:12px;margin-top:4px}}
  .layout{{display:flex;min-height:100vh}}
  .col{{flex:1;display:flex;flex-direction:column;min-width:0}}
- nav.side{{width:200px;flex:0 0 200px;display:flex;flex-direction:column;gap:2px;background:#161a22;border-right:1px solid #262c38;padding:14px 10px;position:sticky;top:0;height:100vh;overflow-y:auto;box-sizing:border-box}}
- nav.side .tab{{display:flex;align-items:center;gap:9px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:14px;padding:8px 10px;cursor:pointer;color:#aab3c0;border-radius:6px}}
+ nav.side{{width:200px;flex:0 0 200px;display:flex;flex-direction:column;gap:2px;background:#4a4a4ab1b;border-right:1px solid #666666e2e;padding:14px 10px;position:sticky;top:0;height:100vh;overflow-y:auto;box-sizing:border-box}}
+ nav.side .tab{{display:flex;align-items:center;gap:9px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:14px;padding:8px 10px;cursor:pointer;color:#9393934b4;border-radius:6px}}
  nav.side .tab svg{{flex:0 0 auto}}
- nav.side .tab:hover{{background:#1d2430}}
- nav.side .tab.active{{color:#d7dfe8;background:#1d2430}}
+ nav.side .tab:hover{{background:#393939626}}
+ nav.side .tab.active{{color:#e8e8e8fdf;background:#393939626}}
  main.main{{flex:1;padding:22px 26px}}
  .panel{{display:none}} .panel.active{{display:block}}
  table{{border-collapse:collapse;width:100%;font-size:13px;margin-top:8px}}
- th,td{{text-align:left;padding:6px 10px;border-bottom:1px solid #222937}}
- th{{color:#8a94a6;font-weight:600}}
- .chip{{display:inline-block;background:#1d2430;border:1px solid #2a3342;border-radius:4px;padding:2px 8px;margin:2px;font-size:12px}}
- .green{{color:#c3cdd6}} .amber{{color:#8f99a4}} .red{{color:#515a65}}
- .note{{color:#8a94a6;font-size:12px}}
- .panel h3{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:13px;color:#aab3c0;margin:18px 0 6px}}
- .navsec{{color:#5d6673;font-size:10.5px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;margin:14px 10px 4px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
- .navlink{{display:block;margin:14px 10px 0;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;color:#d7dfe8;text-decoration:none;padding:6px 0;border-top:1px solid #262c38}}
- .navlink:hover{{color:#eef2f6}}
- .stat{{display:inline-block;background:#1d2430;border:1px solid #2a3342;border-radius:6px;padding:10px 14px;margin:4px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
- .stat .k{{color:#8a94a6;font-size:11px;display:block}} .stat .v{{font-size:18px;color:#d5dbe3}}
- .cap3d-wrap{{position:relative;display:flex;gap:12px;align-items:stretch;border:1px solid #262c38;border-radius:8px;padding:10px;
-   background:#07070a;
+ th,td{{text-align:left;padding:6px 10px;border-bottom:1px solid #555555b2b}}
+ th{{color:#8e8e8e797;font-weight:600}}
+ .chip{{display:inline-block;background:#393939626;border:1px solid #3e3e3e535;border-radius:4px;padding:2px 8px;margin:2px;font-size:12px}}
+ .green{{color:#d2d2d2dcd}} .amber{{color:#999999999}} .red{{color:#777777b5b}}
+ .note{{color:#8e8e8e797;font-size:12px}}
+ .panel h3{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:13px;color:#9393934b4;margin:18px 0 6px}}
+ .navsec{{color:#6c6c6c767;font-size:10.5px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;margin:14px 10px 4px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
+ .navlink{{display:block;margin:14px 10px 0;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;color:#e8e8e8fdf;text-decoration:none;padding:6px 0;border-top:1px solid #666666e2e}}
+ .navlink:hover{{color:#b5b5b52f2}}
+ .stat{{display:inline-block;background:#393939626;border:1px solid #3e3e3e535;border-radius:6px;padding:10px 14px;margin:4px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
+ .stat .k{{color:#8e8e8e797;font-size:11px;display:block}} .stat .v{{font-size:18px;color:#d7d7d7cdc}}
+ .cap3d-wrap{{position:relative;display:flex;gap:12px;align-items:stretch;border:1px solid #666666e2e;border-radius:8px;padding:10px;
+   background:#2d2d2d808;
    background-image:linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px);
    background-size:48px 48px,48px 48px}}
  .cap3d-canvas{{position:relative;flex:1;min-width:0}}
  canvas#cap3d{{width:100%;aspect-ratio:680/420;height:auto;display:block;touch-action:none;cursor:default;border-radius:6px;background:transparent}}
- .cap3d-controls{{position:absolute;top:6px;left:6px;z-index:3;display:flex;align-items:center;gap:4px;background:rgba(10,13,19,0.7);border:1px solid #3a4250;border-radius:6px;padding:3px 4px}}
- .cap3d-controls button{{width:19px;height:19px;display:inline-flex;align-items:center;justify-content:center;padding:0;color:#cfd6e0;background:#12161d;border:1px solid #3a4250;border-radius:4px;cursor:pointer}}
- .cap3d-controls button:hover{{border-color:#59636f;color:#fff;background:#1a1f28}}
- .cap3d-controls .cspread{{display:flex;align-items:center;gap:4px;color:#8a94a6;font-size:9.5px;letter-spacing:.03em;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;margin:0 2px}}
+ .cap3d-controls{{position:absolute;top:6px;left:6px;z-index:3;display:flex;align-items:center;gap:4px;background:rgba(14,14,14,0.7);border:1px solid #444444444;border-radius:6px;padding:3px 4px}}
+ .cap3d-controls button{{width:19px;height:19px;display:inline-flex;align-items:center;justify-content:center;padding:0;color:#bbbbbb7d7;background:#333333717;border:1px solid #444444444;border-radius:4px;cursor:pointer}}
+ .cap3d-controls button:hover{{border-color:#5b5b5b464;color:#ffffff;background:#171717020}}
+ .cap3d-controls .cspread{{display:flex;align-items:center;gap:4px;color:#8e8e8e797;font-size:9.5px;letter-spacing:.03em;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;margin:0 2px}}
  .cap3d-controls input[type=range]{{-webkit-appearance:none;appearance:none;width:90px;height:14px;background:transparent;cursor:pointer}}
- .cap3d-controls input[type=range]::-webkit-slider-runnable-track{{height:1px;background:#3a4250;border-radius:1px}}
- .cap3d-controls input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;appearance:none;width:8px;height:8px;border-radius:50%;background:#cfd6e0;border:none;margin-top:-3.5px}}
- .cap3d-controls input[type=range]::-moz-range-track{{height:1px;background:#3a4250;border:none}}
- .cap3d-controls input[type=range]::-moz-range-thumb{{width:8px;height:8px;border:none;border-radius:50%;background:#cfd6e0}}
- .cap3d-vig{{position:absolute;inset:0;pointer-events:none;border-radius:6px;background:radial-gradient(ellipse 72% 68% at 50% 48%, transparent 42%, rgba(7,7,10,0.5) 74%, #07070a 100%)}}
+ .cap3d-controls input[type=range]::-webkit-slider-runnable-track{{height:1px;background:#444444444;border-radius:1px}}
+ .cap3d-controls input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;appearance:none;width:8px;height:8px;border-radius:50%;background:#bbbbbb7d7;border:none;margin-top:-3.5px}}
+ .cap3d-controls input[type=range]::-moz-range-track{{height:1px;background:#444444444;border:none}}
+ .cap3d-controls input[type=range]::-moz-range-thumb{{width:8px;height:8px;border:none;border-radius:50%;background:#bbbbbb7d7}}
+ .cap3d-vig{{position:absolute;inset:0;pointer-events:none;border-radius:6px;background:radial-gradient(ellipse 72% 68% at 50% 48%, transparent 42%, rgba(8,8,8,0.5) 74%, #2d2d2d808 100%)}}
  canvas#cap3d.dragging{{cursor:grabbing}}
- .cap3d-panel{{flex:0 0 300px;align-self:stretch;background:#0a0c10;border-left:1px solid #262c38;padding-left:12px;overflow-y:auto;font-size:12px;color:#cfd6e0}}
- .cap3d-panel .p-head{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12.5px;color:#e9edf3;margin:2px 0 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
- .cap3d-panel .p-sub{{color:#5d6673;font-size:10.5px;margin:2px 0 8px}}
- .cap3d-panel .p-grp{{color:#d7dfe8;font-size:11px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;margin:8px 0 2px;cursor:pointer;display:flex;align-items:center;gap:6px}}
- .cap3d-panel .p-grp:hover{{color:#eef2f6;text-decoration:underline}}
+ .cap3d-panel{{flex:0 0 300px;align-self:stretch;background:#4a4a4ad0d;border-left:1px solid #666666e2e;padding-left:12px;overflow-y:auto;font-size:12px;color:#bbbbbb7d7}}
+ .cap3d-panel .p-head{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12.5px;color:#eeeeeeeee;margin:2px 0 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+ .cap3d-panel .p-sub{{color:#6c6c6c767;font-size:10.5px;margin:2px 0 8px}}
+ .cap3d-panel .p-grp{{color:#e8e8e8fdf;font-size:11px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;margin:8px 0 2px;cursor:pointer;display:flex;align-items:center;gap:6px}}
+ .cap3d-panel .p-grp:hover{{color:#b5b5b52f2;text-decoration:underline}}
  .cap3d-panel .p-grp-caret{{font-size:9px;opacity:.8;transition:transform .1s}}
- .cap3d-panel .p-back{{color:#d7dfe8;cursor:pointer;text-decoration:none;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
+ .cap3d-panel .p-back{{color:#e8e8e8fdf;cursor:pointer;text-decoration:none;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
  .cap3d-panel .p-back:hover{{text-decoration:underline}}
- .cap3d-panel .p-filt{{display:flex;align-items:center;gap:4px;border-bottom:1px solid #262c38;padding-bottom:8px;margin-bottom:8px}}
- .cap3d-panel .p-filt-l{{color:#5d6673;font-size:10px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;margin-right:2px;text-transform:uppercase;letter-spacing:.06em}}
- .cap3d-panel .p-chip{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:10.5px;color:#8a94a6;background:#12161d;border:1px solid #2a3342;border-radius:999px;padding:2px 9px;cursor:pointer}}
- .cap3d-panel .p-chip.on{{color:#0a0c10;background:#e9edf3;border-color:#e9edf3}}
- .cap3d-panel .p-chip:hover{{border-color:#d7dfe8;color:#d7dfe8}}
+ .cap3d-panel .p-filt{{display:flex;align-items:center;gap:4px;border-bottom:1px solid #666666e2e;padding-bottom:8px;margin-bottom:8px}}
+ .cap3d-panel .p-filt-l{{color:#6c6c6c767;font-size:10px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;margin-right:2px;text-transform:uppercase;letter-spacing:.06em}}
+ .cap3d-panel .p-chip{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:10.5px;color:#8e8e8e797;background:#333333717;border:1px solid #3e3e3e535;border-radius:999px;padding:2px 9px;cursor:pointer}}
+ .cap3d-panel .p-chip.on{{color:#4a4a4ad0d;background:#eeeeeeeee;border-color:#eeeeeeeee}}
+ .cap3d-panel .p-chip:hover{{border-color:#e8e8e8fdf;color:#e8e8e8fdf}}
  .cap3d-panel .p-row{{display:flex;align-items:center;gap:8px;padding:3px 4px;border-radius:4px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:11px}}
- .cap3d-panel .p-row:hover{{background:#161a22}}
- .cap3d-panel .p-row.sel{{background:#1d2430;color:#fff}}
- .cap3d-panel .p-bar{{flex:0 0 42px;height:5px;background:#1a1f28;border-radius:3px;overflow:hidden}}
- .cap3d-panel .p-bar i{{display:block;height:100%;background:#e9edf3}}
+ .cap3d-panel .p-row:hover{{background:#4a4a4ab1b}}
+ .cap3d-panel .p-row.sel{{background:#393939626;color:#ffffff}}
+ .cap3d-panel .p-bar{{flex:0 0 42px;height:5px;background:#171717020;border-radius:3px;overflow:hidden}}
+ .cap3d-panel .p-bar i{{display:block;height:100%;background:#eeeeeeeee}}
  .cap3d-panel .p-tier{{flex:0 0 auto;margin-left:auto;font-size:9.5px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;text-transform:uppercase;letter-spacing:.04em;padding:1px 5px;border-radius:3px;border:1px solid currentColor;opacity:.9}}
- .cap3d-panel .p-tier.strong{{color:#e8edf3}}
- .cap3d-panel .p-tier.good{{color:#c3ccd6}}
- .cap3d-panel .p-tier.moderate{{color:#98a2ad}}
- .cap3d-panel .p-tier.weak{{color:#5b6470}}
+ .cap3d-panel .p-tier.strong{{color:#e8e8e8ded}}
+ .cap3d-panel .p-tier.good{{color:#ccccccccc}}
+ .cap3d-panel .p-tier.moderate{{color:#7d7d7d2a2}}
+ .cap3d-panel .p-tier.weak{{color:#606060565}}
 </style></head><body>
 <div class="layout">
 <nav class="side">{tab_html}</nav>
