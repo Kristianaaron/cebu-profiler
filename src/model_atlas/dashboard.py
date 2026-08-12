@@ -102,6 +102,29 @@ def _contrast_rows(model: MiniMoE, contrast: Any) -> list[dict[str, Any]]:
     return rows
 
 
+def _contrast_voxels(model: MiniMoE, contrast: Any) -> dict[str, Any]:
+    """Signed success−failure saliency per (layer, expert), per capability label.
+
+    delta = pos_saliency − neg_saliency; positive favours success, negative
+    favours failure. Normalised per label for a diverging display.
+    """
+    labels = [lbl.value for lbl in list(CapabilityLabel)[:12]]
+    n_layers = len(model.layers)
+    n_exp = model.n_exp
+    voxels: list[dict[str, Any]] = []
+    for li, label in enumerate(list(CapabilityLabel)[:12]):
+        rows = contrast.contrast(
+            label, SuccessState.SUCCESS, SuccessState.FAILURE, topk=n_layers * n_exp
+        )
+        by_cell = {(lay, e): d for lay, e, d in rows}
+        mx = max((abs(d) for d in by_cell.values()), default=0.0) or 1.0
+        for lay in range(n_layers):
+            for e in range(n_exp):
+                d = by_cell.get((lay, e), 0.0)
+                voxels.append({"label": li, "layer": lay, "expert": e, "delta": round(d / mx, 3)})
+    return {"labels": labels, "n_layers": n_layers, "n_experts": n_exp, "voxels": voxels}
+
+
 def _real_bytes_payload() -> dict[str, Any]:
     """Real-bytes derivative envelopes (§24/§25) for the Quantization & Fit view.
 
@@ -327,6 +350,7 @@ def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
         "capability": _capability_rows(model, saliency),
         "capability3d": _capability_voxels(model, saliency),
         "contrast": _contrast_rows(model, contrast),
+        "contrast3d": _contrast_voxels(model, contrast),
         "coalitions": coalitions,
         "paths": paths,
         "compression": compression,
@@ -576,6 +600,108 @@ _CAP3D_JS = r"""
 """
 
 
+_CONTRAST_JS = r"""
+// Success−Failure view — dependency-free, render-on-interaction only.
+// Each (label, layer, expert) cell encodes success−failure saliency:
+//   * bright FILLED tile  -> success-favoured (learning pulls for successes)
+//   * faint OUTLINE only  -> failure-favoured (route matters for failures)
+//   * brightness/opacity  = |delta| magnitude (strength of the contrast)
+// divergence is per-label normalised. Hover shows the exact values.
+(function () {
+  var cv = document.getElementById('cap3d-contrast');
+  if (!cv || !cv.getContext || !DATA.contrast3d || !DATA.contrast3d.voxels) return;
+  var panelEl = document.getElementById('cap3d-panel-contrast');
+  var V = DATA.contrast3d, labels = V.labels, nl = V.n_layers, ne = V.n_experts, vox = V.voxels;
+  var dpr = (window.devicePixelRatio || 1);
+  var W = cv.clientWidth || 680, H = cv.clientHeight || 420;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  var ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  var hover = null, cells = [], PAD = 16, CELLH = 32, LOOM = 8, TOP0 = 120, COLPER = 4, COLPAD = 150, GAPW = 18, ROWGAP = 14;
+
+  function layout() {
+    var cw = cv.clientWidth || W, chh = cv.clientHeight || H;
+    if (cw !== W || chh !== H) { W = cw; H = chh; cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); }
+    var pad = 16, gap = 18, rowGap = 12, loom = 8;
+    var ncolPer = 4, nrows = Math.ceil(labels.length / ncolPer);
+    var colW = (W - 2 * pad - (ncolPer - 1) * gap) / ncolPer;
+    var cellW = colW / ne;
+    var cellH = Math.min(46, cellW * 1.15);
+    var stackH = nl * cellH + (nl - 1) * loom;
+    var totalH = nrows * stackH + (nrows - 1) * rowGap;
+    var top0 = (H - totalH) / 2;
+    PAD = pad; CELLH = cellH; LOOM = loom; TOP0 = top0; COLPER = ncolPer; COLPAD = colW; GAPW = gap; ROWGAP = rowGap;
+    cells = [];
+    for (var li = 0; li < labels.length; li++) {
+      var colIdx = li % ncolPer, rowIdx = Math.floor(li / ncolPer);
+      var cx = pad + colIdx * (colW + gap);
+      var cy = top0 + rowIdx * (stackH + rowGap);
+      for (var ly = 0; ly < nl; ly++) {
+        var cellY = cy + ly * (cellH + loom);
+        for (var e = 0; e < ne; e++) {
+          var v = vox[0];
+          for (var k = 0; k < vox.length; k++) if (vox[k].label === li && vox[k].layer === ly && vox[k].expert === e) { v = vox[k]; break; }
+          cells.push({ v: v, x: cx + e * cellW + 2, y: cellY + 2, w: cellW - 4, h: cellH - 4 });
+        }
+      }
+    }
+  }
+  function isOn(a, b) { return a.label === b.label && a.layer === b.layer && a.expert === b.expert; }
+    function draw() {
+    layout();
+    ctx.clearRect(0, 0, W, H);
+    for (var i = 0; i < cells.length; i++) {
+      var c = cells[i], d = c.v.delta, s = Math.min(1, Math.abs(d)), active = hover && isOn(hover, c.v);
+      var x = c.x, y = c.y, w = c.w, h = c.h;
+      if (d > 0.12) {            // success-favoured: bright filled tile
+        ctx.fillStyle = 'rgba(218,226,238,' + (0.10 + 0.62 * s).toFixed(3) + ')';
+        ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
+        if (active) { ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.8; ctx.strokeRect(x, y, w, h); }
+      } else if (d < -0.12) {    // failure-favoured: faint outline
+        if (active) { ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.8; }
+        else { ctx.strokeStyle = 'rgba(150,160,175,' + (0.30 + 0.55 * s).toFixed(3) + ')'; ctx.lineWidth = 1 + s; }
+        ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+      } else {                   // neutral
+        ctx.fillStyle = 'rgba(200,210,224,' + (0.05 + 0.10 * s).toFixed(3) + ')';
+        ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
+        if (active) { ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.8; ctx.strokeRect(x, y, w, h); }
+      }
+    }
+    ctx.fillStyle = 'rgba(150,160,180,0.85)'; ctx.font = '10.5px system-ui';
+    ctx.textAlign = 'left'; ctx.fillText('\u25A0 filled = success-favoured   \u25A1 outlined = failure-favoured   brightness = |\u0394|', PAD, H - 8);
+    ctx.textAlign = 'right';
+    for (var L = 0; L < nl; L++) {
+      ctx.fillStyle = 'rgba(150,160,180,0.9)'; ctx.font = '11px system-ui';
+      ctx.fillText('L' + L, PAD - 8, TOP0 + L * (CELLH + LOOM) + CELLH / 2);
+    }
+  }
+  function pick(e) {
+    var r = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0, width: W, height: H };
+    var bx = (e.clientX - r.left) * (W / r.width), by = (e.clientY - r.top) * (H / r.height);
+    for (var i = 0; i < cells.length; i++) { var c = cells[i]; if (bx >= c.x && bx <= c.x + c.w && by >= c.y && by <= c.y + c.h) return c.v; }
+    return null;
+  }
+  function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+  function renderPanel() {
+    var v = hover; var html = '';
+    if (!v) { if (panelEl) panelEl.innerHTML = '<p class="p-sub">Hover a cell to inspect the success vs failure contrast.</p>'; return; }
+    var d = v.delta;
+    var kind = d > 0.12 ? 'success-favoured' : d < -0.12 ? 'failure-favoured' : 'neutral';
+    var sign = d >= 0 ? '+' : '';
+    html += '<div class="p-head" title="' + esc(labels[v.label]) + '">\u25B8 ' + esc(labels[v.label]) + ' <span class="mut">· L' + v.layer + ' / E' + v.expert + '</span></div>';
+    html += '<div class="p-sub">' + (labels[v.label] || '') + ' · layer L' + v.layer + ' · expert E' + v.expert + '</div>';
+    html += '<div style="margin:10px 0;font-size:20px;font-weight:700;font-family:JetBrains Mono,monospace">delta ' + sign + (Math.round(d * 1000) / 1000) + '</div>';
+    html += '<div class="p-sub" style="color:#e9edf3">' + kind + (v.label >= 0 ? '' : '') + '</div>';
+    html += '<div class="p-sub" style="color:#979797">\u0394 = success saliency \u2212 failure saliency (normalised per capability). Filled = leans toward successful runs; outlined = leans toward failures.</div>';
+    if (panelEl) panelEl.innerHTML = html + '<div style="height:12px"></div>';
+  }
+  function redraw() { draw(); renderPanel(); }
+  cv.addEventListener('pointermove', function (e) { hover = pick(e); redraw(); });
+  if (cv.style) cv.style.cursor = 'default';
+  draw(); renderPanel();
+})();
+"""
+
 _TAB_TEMPLATE = """<div class="tab" data-tab="{id}"><svg viewBox="0 0 24 24" width="15" height="15" {_LUCIDE} style="flex:0 0 auto">{icon}</svg><span>{title}</span></div>"""
 
 
@@ -758,7 +884,18 @@ def render_dashboard(data: dict[str, Any]) -> str:
    <table id="t-capability"></table>
    <div class="cap-more-wrap"><button id="cap-more">Load more</button></div>
  </div>
- <div class="panel" id="panel-contrast"><p class="note">success − failure saliency per label (measured); positive = experts more salient on successes.</p><table id="t-contrast"></table></div>
+ <div class="panel" id="panel-contrast">
+   <p class="note">Success − Failure: for each expert cell, how much its saliency is tied to successful vs failed runs (Δ = success − failure saliency, normalised per capability). Bright filled tiles lean success; outlined lean failure.</p>
+   <div class="cap3d-wrap">
+     <div class="cap3d-canvas">
+       <canvas id="cap3d-contrast"
+         role="img"
+         aria-label="Success versus failure saliency map: bright filled tiles favour successes, outlined tiles favour failures;"></canvas>
+       <div class="cap3d-vig"></div>
+     </div>
+     <aside class="cap3d-panel" id="cap3d-panel-contrast" aria-live="polite"></aside>
+   </div>
+   <table id="t-contrast"></table></div>'''
  <div class="panel" id="panel-coalition"><p class="note">Co-routed expert pairs (count) at layer 0 (measured).</p><table id="t-coalition"></table></div>
  <div class="panel" id="panel-path"><p class="note">Most frequent cross-layer route signatures with success rate (measured).</p><table id="t-path"></table></div>
  <div class="panel" id="panel-hierarchy"><p class="note">Six-level atlas hierarchy (v2 §9): L1 weights → L2 units → L3 experts → L4 coalitions → L5 pathways → L6 behaviour, traceable up and down. Per-level node counts are measured; the example shows how many lower-level components realise the first behaviour (and the peak shared-channel prevalence — how load-bearing).</p><div id="hier-stats"></div><table id="t-hierarchy"></table></div>
@@ -859,6 +996,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
      'bpw':r.bpw,'stored':r.stored,'resident A':r.resident_a,'resident B':r.resident_b, 'risk':r.risk}})));
 
  {_CAP3D_JS}
+ {_CONTRAST_JS}
  document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{{
    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
    document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
