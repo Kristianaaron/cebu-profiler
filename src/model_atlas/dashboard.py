@@ -370,7 +370,7 @@ _CAP3D_JS = r"""
   // step vL=(-du,dw); layer l lifts it by l*T so stacks are vertical.
   function tile(E, L, l) {
     var x = (E - L) * du0, y = (E + L) * dw0 - l * T;
-    var GAP = 0.78;                       // cell size relative to lattice step (gap between neighbours)
+    var GAP = 0.6;                        // cell size relative to lattice step (clear dark gaps)
     var du = du0 * GAP, dw = dw0 * GAP;
     return [
       [x - du, y + dw],   // a + vL
@@ -386,7 +386,7 @@ _CAP3D_JS = r"""
   }
   function layout() {
     var sc2 = Math.min((W - 48) / ((ne + labels.length) * 0.87 + 2), (H - 56) / (nl + (ne + labels.length) * 0.55));
-    S = sc2; du0 = S * 0.87; dw0 = S * 0.5; T = S * 1.15;
+    S = sc2; du0 = S * 0.87; dw0 = S * 0.5; T = S * 1.7;
     // bounds of all top tiles + side faces (origin 0,0)
     var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
     function scan(pt) { if (pt[0] < x0) x0 = pt[0]; if (pt[0] > x1) x1 = pt[0]; if (pt[1] < y0) y0 = pt[1]; if (pt[1] > y1) y1 = pt[1]; }
@@ -461,13 +461,14 @@ _CAP3D_JS = r"""
   function pick(e) {
     var r = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0 };
     var bx = e.clientX - r.left, by = e.clientY - r.top;
-    var best = null, bd = 1e18;
-    for (var i = 0; i < cells.length; i++) {
-      if (!inPoly(bx, by, cells[i].top)) continue;
-      var dd = (cells[i].cx - bx) * (cells[i].cx - bx) + (cells[i].cy - by) * (cells[i].cy - by);
-      if (dd < bd) { bd = dd; best = cells[i].v; }
+    // return the exact, visually-topmost cell under the cursor: the last cell
+    // in painter order whose on-screen diamond contains the point.
+    var order = cells.slice();
+    order.sort(function (a, b) { return (a.cy - b.cy) || (a.v.layer - b.v.layer); });
+    for (var i = order.length - 1; i >= 0; i--) {
+      if (inPoly(bx, by, order[i].top)) return order[i].v;
     }
-    return best;
+    return null;
   }
 
   function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
