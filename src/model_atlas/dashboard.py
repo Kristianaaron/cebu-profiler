@@ -347,7 +347,7 @@ _CAP3D_JS = r"""
 // voxel is a translucent isometric tile plus a shaded side face so stacks read
 // as 3D. Each cell's TOP diamond projects to a fixed screen parallelogram
 // disjoint from every other top diamond => hover stays exact/unambiguous.
-// Wheel zooms. (No drag-rotate.)
+// Wheel zooms. Drag to rotate (yaw/pitch).
 (function () {
   var cv = document.getElementById('cap3d');
   if (!cv || !cv.getContext || !DATA.capability3d || !DATA.capability3d.voxels) return;
@@ -359,26 +359,31 @@ _CAP3D_JS = r"""
   var ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  var zoom = 1.0, S = 6, T = S, du0 = S * 0.87, dw0 = S * 0.5, OX = 0, OY = 0;   // iso params
+  var zoom = 1.0, ry = 0.0, rx = 0.8, S = 6, T = S, du0 = S * 0.87, dw0 = S * 0.5, OX = 0, OY = 0;   // iso params + rotation
   var hover = null, pin = null, focus = 0, selLayer = null;
   var layerOn = []; for (var _l0 = 0; _l0 < nl; _l0++) layerOn.push(true);
   var cells = [];   // { v, top: [4 pts screen], side: [4 pts screen] }
+  var dragging = false, moved = 0, lastX = 0, lastY = 0;
 
-  // Isometric rhombus tile for cell (E,L,l): perfect lattice tiling via two
-  // basis vectors, vE = one expert step (down-right), vL = one capability step
-  // (down-left). Layer l shifts the whole tile up by l*T so stacks are vertical.
-  // Isometric RHOMBUS tile for cell (E,L,l) — a true tiling parallelogram
-  // (translation lattice) spanned by expert step vE=(du,dw) and capability
-  // step vL=(-du,dw); layer l lifts it by l*T so stacks are vertical.
+  // 3D yaw+pitch rotation, orthographic projection (drops z for screen depth).
+  function proj(ox, oy, oz) {
+    var cy = Math.cos(ry), sy = Math.sin(ry), cx = Math.cos(rx), sx = Math.sin(rx);
+    var px = ox * cy + oz * sy, pz = -ox * sy + oz * cy, py = oy;
+    var y2 = py * cx - pz * sx, z2 = py * sx + pz * cx;
+    return [px, y2];
+  }
+  // Rotating isometric rhombus tile for cell (E,L,l): experts run along one
+  // object axis, capabilities along the other, layers lift by l*T; the whole
+  // lattice is yawed/pitched by (ry,rx) then orthographically projected.
   function tile(E, L, l) {
-    var x = (E - L) * du0, y = (E + L) * dw0 - l * T;
-    var GAP = 0.6;                        // cell size relative to lattice step (clear dark gaps)
+    var u = (E - L) * du0, w = (E + L) * dw0, oy = -l * T;
+    var GAP = 0.45;                       // cell size relative to lattice step (clear dark gaps)
     var du = du0 * GAP, dw = dw0 * GAP;
     return [
-      [x - du, y + dw],   // a + vL
-      [x, y],             // a
-      [x + du, y + dw],   // a + vE
-      [x, y + 2 * dw]     // a + vE + vL
+      proj(u - du, oy, w - dw),
+      proj(u + du, oy, w - dw),
+      proj(u + du, oy, w + dw),
+      proj(u - du, oy, w + dw)
     ];
   }
   // Vertical wall under the tile's left +front edge down to the next layer.
@@ -392,7 +397,7 @@ _CAP3D_JS = r"""
     var cw = cv.clientWidth || W, chh = cv.clientHeight || H;
     if (cw !== W || chh !== H) { W = cw; H = chh; cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); }
     var sc2 = Math.min((W - 48) / ((ne + labels.length) * 0.87 + 2), (H - 56) / (nl + (ne + labels.length) * 0.55));
-    S = sc2; du0 = S * 0.87; dw0 = S * 0.5; T = S * 1.7;
+    S = sc2; du0 = S * 0.87; dw0 = S * 0.5; T = S * 2.5;
     // bounds of all top tiles + side faces (origin 0,0)
     var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
     function scan(pt) { if (pt[0] < x0) x0 = pt[0]; if (pt[0] > x1) x1 = pt[0]; if (pt[1] < y0) y0 = pt[1]; if (pt[1] > y1) y1 = pt[1]; }
@@ -452,7 +457,7 @@ _CAP3D_JS = r"""
       }
     }
     ctx.fillStyle = 'rgba(140,160,200,0.8)'; ctx.font = '11px system-ui'; ctx.textAlign = 'left';
-    ctx.fillText('diagonals = experts & capabilities · layers stack up as sheets · score = opacity · filter on the right', 6, H - 6);
+    ctx.fillText('diagonals = experts & capabilities · layers stack up · score = opacity · drag to rotate · scroll to zoom · filter on the right', 6, H - 6);
   }
 
   function inPoly(px, py, poly) {
@@ -534,18 +539,37 @@ _CAP3D_JS = r"""
   window.capLayerOn = function (layer) { layerOn[layer] = !layerOn[layer]; if (pin && !layerOn[pin.layer]) pin = null; redraw(); };
   window.capAllLayers = function () { for (var l = 0; l < nl; l++) layerOn[l] = true; redraw(); };
 
-  function cur(p) { if (cv.style) cv.style.cursor = p ? 'pointer' : 'default'; }
+  function cur(p) { if (cv.style) cv.style.cursor = dragging ? 'grabbing' : (p ? 'pointer' : 'default'); }
   function onMove(e) {
     layout();              // rebuild cells at the canvas's CURRENT size so pick never drifts from draw
-    var p = pick(e);
-    hover = p; draw(); renderPanel(); cur(p);
+    if (dragging) {
+      var dx = e.clientX - lastX, dy = e.clientY - lastY;
+      moved += Math.abs(dx) + Math.abs(dy);
+      lastX = e.clientX; lastY = e.clientY;
+      ry += dx * 0.012; rx += dy * 0.012; rx = Math.max(0.06, Math.min(1.5, rx));
+      hover = null; draw(); cur(null);
+    } else {
+      var p = pick(e);
+      hover = p; draw(); renderPanel(); cur(p);
+    }
   }
   function onDown(e) {
-    layout(); var p = pick(e); if (p) { pin = (pin && isOn(pin, p)) ? null : p; focus = p.label; draw(); renderPanel(); }
+    dragging = true; moved = 0; lastX = e.clientX; lastY = e.clientY;
+    if (cv.setPointerCapture) cv.setPointerCapture(e.pointerId);
+    cv.classList.add('dragging'); cur(null);
+  }
+  function onUp(e) {
+    if (!dragging) return;
+    dragging = false; cv.classList.remove('dragging');
+    if (moved < 6) {               // it was a click, not a drag -> toggle pin
+      layout(); var p = pick(e); if (p) { pin = (pin && isOn(pin, p)) ? null : p; focus = p.label; draw(); renderPanel(); }
+    } else cur(null);
   }
   cv.addEventListener('pointermove', onMove);
   cv.addEventListener('pointerdown', onDown);
-  cv.addEventListener('wheel', function (e) { e.preventDefault(); zoom = Math.max(0.5, Math.min(2.5, zoom * (e.deltaY < 0 ? 1.05 : 0.95))); draw(); }, { passive: false });
+  cv.addEventListener('pointerup', onUp);
+  cv.addEventListener('pointercancel', function () { dragging = false; cv.classList.remove('dragging'); });
+  cv.addEventListener('wheel', function (e) { e.preventDefault(); zoom = Math.max(0.4, Math.min(3.0, zoom * (e.deltaY < 0 ? 1.05 : 0.95))); draw(); }, { passive: false });
   window.addEventListener('resize', function () {
     var W2 = cv.clientWidth || W, H2 = cv.clientHeight || H;
     cv.width = Math.round(W2 * dpr); cv.height = Math.round(H2 * dpr);
