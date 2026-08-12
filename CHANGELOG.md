@@ -17,6 +17,11 @@ Capability tab: monochrome 3D voxel view + sticky detail panel, agent-friendly â
 - **True 3D cubes** (all 8 corners + visible faces projected) so rotating stays
   readable; layers spaced wider; hover/ease with a generous hit radius that
   highlights the whole layer slice.
+- **Overlap clarity**: each cube draws an opaque dark body first then a dithered
+  grayscale saliency surface, so a nearer cube cleanly occludes a farther one
+  (no muddiness); depth-fog dims far cubes and crisp edges keep layers separable.
+- **Layer filter** on the right panel: L0 / L1 / â€¦ / all chips to view each
+  layer separately or together, and it filters both the canvas and the panel.
 - Monochrome grayscale with **dense ordered dither + opacity-as-saliency**
   (hot = more opaque) on the dominant face; high-DPI/integer-snapped, no
   animation loop.

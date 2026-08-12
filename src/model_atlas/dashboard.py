@@ -339,10 +339,11 @@ def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
 
 _CAP3D_JS = r"""
 // Capability 3D voxel view — dependency-free, render-on-interaction only.
-// Monochrome grayscale CUBES on near-black: saliency is expressed by opacity
-// (hot = more opaque) and by ordered-dither density on the dominant face.
-// Cubes are true 3D (project all 8 corners + visible faces) so rotating stays
-// readable. High-DPI + integer snapping, no animation loop -> cheap.
+// True 3D cubes. Overlap clarity: each cube draws an OPAQUE dark body first
+// (so a nearer cube cleanly occludes a farther one — no muddiness), then a
+// dithered grayscale surface whose density/opacity encodes saliency; crisp
+// edges + depth fog keep layers separable.
+// A layer filter on the right panel shows layers separately or together.
 (function () {
   var cv = document.getElementById('cap3d');
   if (!cv || !cv.getContext || !DATA.capability3d || !DATA.capability3d.voxels) return;
@@ -354,11 +355,13 @@ _CAP3D_JS = r"""
   var ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  var SX = 1.25, SY = 2.0, SZ = 1.5; // layers spaced wide for readability
-  var HFE = 0.34;                    // cube half-extent (object units)
+  var SX = 1.25, SY = 2.0, SZ = 1.5;
+  var HFE = 0.34;
   var ry = 0.8, rx = 0.5, zoom = 1.0;
   var hover = null, pin = null, focus = 0, selLayer = null;
+  var layerOn = []; for (var _l0 = 0; _l0 < nl; _l0++) layerOn.push(true);
   var cubes = [];
+  var depthMin = 0, depthMax = 0;
 
   var CORNERS = [[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]];
   var FACES = [
@@ -388,107 +391,107 @@ _CAP3D_JS = r"""
       pts.push([W / 2 + r[0] * sc, H / 2 + r[1] * sc, r[2] * sc]);
     }
     var nz = [];
-    for (var f = 0; f < 6; f++) {
-      var nr = rot3(FACES[f].n[0], FACES[f].n[1], FACES[f].n[2]);
-      nz.push(nr[2]); // >0 = facing viewer
-    }
+    for (var f = 0; f < 6; f++) { var nr = rot3(FACES[f].n[0], FACES[f].n[1], FACES[f].n[2]); nz.push(nr[2]); }
     return { v: v, pts: pts, nz: nz, depth: rc[2], sc: sc };
   }
-  function recompute() { cubes = vox.map(projectCube); }
+  function recompute() {
+    cubes = [];
+    var d = vox.filter(function (v) { return layerOn[v.layer]; }).map(projectCube);
+    depthMin = 1e9; depthMax = -1e9;
+    for (var i = 0; i < d.length; i++) { if (d[i].depth < depthMin) depthMin = d[i].depth; if (d[i].depth > depthMax) depthMax = d[i].depth; }
+    cubes = d;
+  }
 
   var BAYER = [[0,8,2,10],[12,4,14,6],[3,11,1,9],[15,7,13,5]];
-  var _ditherCount = 0;
   function ditherVoxel(x0, y0, s, score, c) {
-    var cell = Math.max(2, Math.round(s / 10));
+    var cell = Math.max(2, Math.round(s / 9));
     var g = Math.max(1, Math.min(15, Math.round(score * 15)));
-    var a = Math.min(1, 0.30 + 0.70 * score);
+    var a = Math.min(1, 0.55 + 0.45 * score);
     c.fillStyle = 'rgba(236,241,249,' + a.toFixed(3) + ')';
     for (var cy = 0, col = 0; cy < s; cy += cell, col++) {
       for (var cx = 0, row = 0; cx < s; cx += cell, row++) {
-        if (g > BAYER[col % 4][row % 4]) { c.fillRect(Math.round(x0 + cx), Math.round(y0 + cy), cell, cell); _ditherCount++; }
+        if (g > BAYER[col % 4][row % 4]) c.fillRect(x0 + cx, y0 + cy, cell, cell);
       }
     }
   }
 
-  function facePath(pts, f) { return FACES[f].c.map(function (ci) { return pts[ci]; }); }
+  function facePts(pts, f) { return FACES[f].c.map(function (ci) { return pts[ci]; }); }
+  function traceFace(fp) {
+    ctx.beginPath(); ctx.moveTo(fp[0][0], fp[0][1]);
+    for (var q = 1; q < 4; q++) ctx.lineTo(fp[q][0], fp[q][1]);
+    ctx.closePath();
+  }
+  function fog(depth) {
+    var t = (depthMax - depthMin) ? (depth - depthMin) / (depthMax - depthMin) : 0.5; // 0 far..1 near
+    return 0.55 + 0.45 * t; // far cubes dimmer
+  }
   function drawCube(cb) {
     var v = cb.v;
     var isSel = pin && v.label === pin.label && v.layer === pin.layer && v.expert === pin.expert;
     var isHover = hover && v.label === hover.label && v.layer === hover.layer && v.expert === hover.expert;
     var inLayer = selLayer && selLayer.label === v.label && selLayer.layer === v.layer;
-    var inHoverLayer = !pin && hover && v.label === hover.label && v.layer === hover.layer;
-    var edge = (isSel ? 2 : isHover ? 1.6 : (inLayer || inHoverLayer) ? 1 : 0);
-    var aq = Math.min(1, 0.30 + 0.70 * v.score);
-    var dom = -1, domNz = -1;
-    for (var f = 0; f < 6; f++) {
-      if (cb.nz[f] <= 0) continue;
-      var fp = facePath(cb.pts, f);
-      ctx.save();
-      ctx.beginPath();
-      ctx.moveTo(fp[0][0], fp[0][1]);
-      ctx.lineTo(fp[1][0], fp[1][1]);
-      ctx.lineTo(fp[2][0], fp[2][1]);
-      ctx.lineTo(fp[3][0], fp[3][1]);
-      ctx.closePath();
-      var shade = 0.35 + 0.65 * Math.max(0, cb.nz[f]);
+    var inHovLayer = !pin && hover && v.label === hover.label && v.layer === hover.layer;
+    var fg = fog(cb.depth);
+    var aq = Math.min(1, 0.45 + 0.55 * v.score) * fg;
+    // visible-faces first pass: opaque dark bodies so overlaps stay crisp
+    var vis = [];
+    for (var f = 0; f < 6; f++) if (cb.nz[f] > 0) vis.push(f);
+    for (var vi = 0; vi < vis.length; vi++) {
+      var fp = facePts(cb.pts, vis[vi]);
+      ctx.fillStyle = '#0a0c11';
+      traceFace(fp); ctx.fill();
+    }
+    // second pass: dithered saliency surface on the dominant face + shaded sides
+    var dom = vis[0], domNz = -1;
+    for (var v2 = 0; v2 < vis.length; v2++) if (cb.nz[vis[v2]] > domNz) { domNz = cb.nz[vis[v2]]; dom = vis[v2]; }
+    for (var v3 = 0; v3 < vis.length; v3++) {
+      var f2 = vis[v3];
+      var fp2 = facePts(cb.pts, f2);
+      var shade = 0.5 + 0.5 * Math.max(0, cb.nz[f2]);
       ctx.fillStyle = 'rgba(236,241,249,' + (aq * shade).toFixed(3) + ')';
-      ctx.fill();
-      if (cb.nz[f] > domNz) { domNz = cb.nz[f]; dom = f; }
-      ctx.restore();
+      traceFace(fp2); ctx.fill();
     }
-    // dense dither on the single dominant (front-most) face
-    if (dom >= 0) {
-      var fp = facePath(cb.pts, dom);
-      var xs = [], ys = [];
-      for (var q = 0; q < 4; q++) { xs.push(fp[q][0]); ys.push(fp[q][1]); }
-      var x0 = Math.round(Math.min.apply(null, xs)), y0 = Math.round(Math.min.apply(null, ys));
-      var s = Math.max(2, Math.round(Math.max.apply(null, xs) - x0));
-      ctx.save();
-      ctx.beginPath();
-      ctx.moveTo(fp[0][0], fp[0][1]);
-      for (var q2 = 1; q2 < 4; q2++) ctx.lineTo(fp[q2][0], fp[q2][1]);
-      ctx.closePath();
-      ctx.clip();
-      ditherVoxel(x0, y0, s, v.score, ctx);
-      ctx.restore();
+    // dense dither on the dominant (front-most) face
+    var fpd = facePts(cb.pts, dom);
+    var xs = [], ys = [];
+    for (var q = 0; q < 4; q++) { xs.push(fpd[q][0]); ys.push(fpd[q][1]); }
+    var x0 = Math.round(Math.min.apply(null, xs)), y0 = Math.round(Math.min.apply(null, ys));
+    var s = Math.max(2, Math.round(Math.max.apply(null, xs) - x0));
+    ctx.save(); traceFace(fpd); ctx.clip();
+    ditherVoxel(x0, y0, s, v.score, ctx);
+    ctx.restore();
+    // crisp edges on visible faces
+    for (var v4 = 0; v4 < vis.length; v4++) {
+      var fp3 = facePts(cb.pts, vis[v4]);
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 1; traceFace(fp3); ctx.stroke();
     }
-    if (edge) { // highlight outline on the outer silhouette is subtle; keep simple
-      for (var f2 = 0; f2 < 6; f2++) {
-        if (cb.nz[f2] <= 0) continue;
-        var fp2 = facePath(cb.pts, f2);
-        ctx.save(); ctx.beginPath(); ctx.moveTo(fp2[0][0], fp2[0][1]);
-        for (var q3 = 1; q3 < 4; q3++) ctx.lineTo(fp2[q3][0], fp2[q3][1]);
-        ctx.closePath();
-        ctx.strokeStyle = isSel ? '#fff' : 'rgba(255,255,255,0.85)';
-        ctx.lineWidth = edge; ctx.stroke(); ctx.restore();
-        if (!isSel) break; // only nearest face outlined unless pinned
-      }
-    }
+    // highlight
+    if (isSel) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; for (var v5 = 0; v5 < vis.length; v5++) { ctx.strokeStyle = v5 === 0 ? '#fff' : 'rgba(255,255,255,0.4)'; traceFace(facePts(cb.pts, vis[v5])); ctx.stroke(); } }
+    else if (isHover) { ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 1.5; traceFace(facePts(cb.pts, dom)); ctx.stroke(); }
+    else if (inLayer || inHovLayer) { ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = 1; traceFace(facePts(cb.pts, dom)); ctx.stroke(); }
   }
 
   function draw() {
-    recompute(); _ditherCount = 0;
+    recompute();
     ctx.clearRect(0, 0, W, H);
     var order = [];
     for (var i = 0; i < cubes.length; i++) order.push([cubes[i].depth, i]);
     order.sort(function (a, b) { return a[0] - b[0]; });
     for (var k = 0; k < order.length; k++) drawCube(cubes[order[k][1]]);
     ctx.fillStyle = 'rgba(135,143,157,0.75)'; ctx.font = '11px system-ui'; ctx.textAlign = 'left';
-    ctx.fillText('experts (x) · layers (y) · labels (depth) · opacity = saliency', 6, H - 6);
+    ctx.fillText('experts (x) · layers (y) · labels (depth) · filter on the right', 6, H - 6);
   }
 
   function pick(e) {
     var r = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0 };
     var bx = e.clientX - r.left, by = e.clientY - r.top, best = null, bd = 1e9;
     for (var i = 0; i < cubes.length; i++) {
-      // project the cube center again (cheap for ~200) for a stable hit point
-      // use centroid of front-face corners as the hit anchor
       var ax = (cubes[i].pts[0][0] + cubes[i].pts[7][0]) / 2;
       var ay = (cubes[i].pts[0][1] + cubes[i].pts[7][1]) / 2;
       var dd = (ax - bx) * (ax - bx) + (ay - by) * (ay - by);
       if (dd < bd) { bd = dd; best = cubes[i].v; }
     }
-    return bd < 529 ? best : null; // ~23px generous hit radius
+    return bd < 529 ? best : null;
   }
 
   function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
@@ -499,28 +502,37 @@ _CAP3D_JS = r"""
     return '<div class="p-row' + (isSel ? ' sel' : isHov ? ' hov' : '') +
       '" onclick="window.capSel(' + v.label + ',' + v.layer + ',' + v.expert + ')">E' + v.expert + ' ' + bar(v) + '</div>';
   }
+  function filterHtml() {
+    var h = '<div class="p-filt"><span class="p-filt-l">layers</span>';
+    for (var l = 0; l < nl; l++) {
+      h += '<span class="p-chip' + (layerOn[l] ? ' on' : '') + '" onclick="window.capLayerOn(' + l + ')">L' + l + '</span>';
+    }
+    h += '<span class="p-chip' + (layerOn.every(Boolean) ? ' on' : '') + '" onclick="window.capAllLayers()">all</span></div>';
+    return h;
+  }
   function renderPanel() {
     var li = hover ? hover.label : (pin ? pin.label : focus);
     if (selLayer) li = selLayer.label;
     focus = li;
     var name = labels[li] || '';
+    var head = filterHtml();
     if (selLayer && selLayer.label === li) {
-      var rows = vox.filter(function (v) { return v.label === li && v.layer === selLayer.layer; })
+      var rows = vox.filter(function (v) { return v.label === li && v.layer === selLayer.layer && layerOn[v.layer]; })
         .sort(function (a, b) { return a.expert - b.expert; });
-      var html = '<div class="p-head" title="' + name + '">\u25B8 ' + esc(name) + ' <span class="mut">· layer L' + selLayer.layer + '</span></div>';
+      var html = head + '<div class="p-head" title="' + name + '">\u25B8 ' + esc(name) + ' <span class="mut">· layer L' + selLayer.layer + '</span></div>';
       html += '<div class="p-sub"><a class="p-back" href="javascript:void(0)" onclick="window.capClearLayer()">\u2190 all layers</a> · ' + rows.length + ' experts</div>';
       for (var j = 0; j < rows.length; j++) html += rowHtml(rows[j]);
       if (panelEl) panelEl.innerHTML = html;
       return;
     }
-    var all = vox.filter(function (v) { return v.label === li; })
+    var all = vox.filter(function (v) { return v.label === li && layerOn[v.layer]; })
       .sort(function (a, b) { return (a.layer - b.layer) || (a.expert - b.expert); });
-    var html = '<div class="p-head" title="' + name + '">' + (pin ? '\u25CF ' : '\u25CB ') + esc(name) + '</div>';
-    html += '<div class="p-sub">' + all.length + ' measured cells · hover or click</div>';
+    var html = head + '<div class="p-head" title="' + name + '">' + (pin ? '\u25CF ' : '\u25CB ') + esc(name) + '</div>';
+    html += '<div class="p-sub">' + all.length + ' visible cells · hover or click</div>';
     var lastL = -1;
     for (var i = 0; i < all.length; i++) {
       var v = all[i];
-      if (v.layer !== lastL) {
+      if (v.layer !== lastL && layerOn[v.layer]) {
         html += '<div class="p-grp" onclick="window.capLayer(' + li + ',' + v.layer + ')">layer L' + v.layer + '<span class="p-grp-caret">&#9656;</span></div>';
         lastL = v.layer;
       }
@@ -533,6 +545,8 @@ _CAP3D_JS = r"""
   window.capSel = function (label, layer, expert) { pin = { label: label, layer: layer, expert: expert }; focus = label; redraw(); };
   window.capLayer = function (label, layer) { selLayer = { label: label, layer: layer }; pin = null; focus = label; redraw(); };
   window.capClearLayer = function () { selLayer = null; redraw(); };
+  window.capLayerOn = function (layer) { layerOn[layer] = !layerOn[layer]; if (pin && !layerOn[pin.layer]) pin = null; redraw(); };
+  window.capAllLayers = function () { for (var l = 0; l < nl; l++) layerOn[l] = true; redraw(); };
 
   var dragging = false, moved = 0, lastX = 0, lastY = 0;
   cv.addEventListener('pointerdown', function (e) {
@@ -668,6 +682,11 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .cap3d-panel .p-grp-caret{{font-size:9px;opacity:.8;transition:transform .1s}}
  .cap3d-panel .p-back{{color:#7cc0ff;cursor:pointer;text-decoration:none;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
  .cap3d-panel .p-back:hover{{text-decoration:underline}}
+ .cap3d-panel .p-filt{{display:flex;align-items:center;gap:4px;border-bottom:1px solid #262c38;padding-bottom:8px;margin-bottom:8px}}
+ .cap3d-panel .p-filt-l{{color:#5d6673;font-size:10px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;margin-right:2px;text-transform:uppercase;letter-spacing:.06em}}
+ .cap3d-panel .p-chip{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:10.5px;color:#8a94a6;background:#12161d;border:1px solid #2a3342;border-radius:999px;padding:2px 9px;cursor:pointer}}
+ .cap3d-panel .p-chip.on{{color:#0a0c10;background:#e9edf3;border-color:#e9edf3}}
+ .cap3d-panel .p-chip:hover{{border-color:#7cc0ff;color:#7cc0ff}}
  .cap3d-panel .p-row{{display:flex;align-items:center;gap:8px;padding:3px 4px;border-radius:4px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:11px}}
  .cap3d-panel .p-row:hover{{background:#161a22}}
  .cap3d-panel .p-row.sel{{background:#1d2430;color:#fff}}
