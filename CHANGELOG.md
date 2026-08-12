@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.0 — 2026-08-12
+
+Complete the §25 planning-artifact set (all 13 maps now exist) —
+
+- `planning/maps.py`: 7 new typed maps — ChannelMap, TileMap, NodeOwnershipMap,
+  OverflowPackMap, RouterRepairMap, ResidualRepairMap, DistillationTargetMap —
+  joining the existing keep/precision/residency/coalition-protection/
+  path-preservation/substitute maps.
+- `planning/maps_build.py`: `build_planning_maps` produces all 7 from a
+  synthetic model + measured REAP saliency. Channel/tile maps grounded in
+  measured channel-uniqueness (§8.3); node-ownership from the census placement;
+  router-repair reindexes expert↔router slots contiguously with route_bias
+  locked on (§31:18); overflow/residual/distillation derive from measured
+  saliency and are tagged estimated.
+- Dashboard: new "Planning Maps" tab rendering all 7 maps for browser QA.
+- Tests: `test_f21_maps` (7); 169 total; ruff + mypy clean.
+
 ## 0.6.0 — 2026-08-12
 
 Real-bytes derivative-candidate planner (blueprint §24/§25, F10), grounded in

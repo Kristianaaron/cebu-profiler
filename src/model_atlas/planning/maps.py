@@ -96,6 +96,131 @@ class SubstituteMap(BaseModel):
     entries: list[SubstituteEntry] = Field(default_factory=list)
 
 
+class ChannelEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    layer_index: int
+    source_expert_id: int
+    channel_id: int
+    importance: float  # measured channel-importance proxy (uniqueness/TENP)
+    keep: bool
+
+
+class ChannelMap(BaseModel):
+    """§25 channel map: which channels each expert retains (v2 §18 grain)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entries: list[ChannelEntry] = Field(default_factory=list)
+
+
+class TileEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    layer_index: int
+    source_expert_id: int
+    tile_index: int
+    channel_start: int
+    importance: float
+    keep: bool
+
+
+class TileMap(BaseModel):
+    """§25 tile map: block granularity over the expert's channel dim."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entries: list[TileEntry] = Field(default_factory=list)
+
+
+class NodeOwnershipEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tensor_key: str
+    role: str
+    layer_index: int | None = None
+    source_expert_id: int | None = None
+    node: str  # node_a | node_b | nvme_a | nvme_b | replicated
+
+
+class NodeOwnershipMap(BaseModel):
+    """§25 node-ownership map: which physical node each tensor lives on."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entries: list[NodeOwnershipEntry] = Field(default_factory=list)
+
+
+class OverflowPackEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    layer_index: int
+    source_expert_id: int
+    tier: str  # nvme_a | nvme_b (stored but not resident)
+    reason: str
+
+
+class OverflowPackMap(BaseModel):
+    """§25 overflow-pack map: experts stored on the NVMe tier (non-resident)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entries: list[OverflowPackEntry] = Field(default_factory=list)
+
+
+class RouterRepairEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    layer_index: int
+    old_index: int
+    new_index: int | None  # None => dropped
+    action: str  # keep | drop
+    route_bias: bool  # correction bias must move in lockstep (v2 §31:18)
+
+
+class RouterRepairMap(BaseModel):
+    """§25 router-repair map: reindex router slots exactly with renumbering."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entries: list[RouterRepairEntry] = Field(default_factory=list)
+
+
+class ResidualRepairEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    layer_index: int
+    source_expert_id: int
+    component: str  # residual_bias | expert_output | routing_bias
+    severity: float
+    target: str  # what to repair (e.g. "bias", "distill")
+
+
+class ResidualRepairMap(BaseModel):
+    """§25 residual-repair map: residuals needing bias/behaviour repair."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entries: list[ResidualRepairEntry] = Field(default_factory=list)
+
+
+class DistillationTargetEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    layer_index: int
+    source_expert_id: int
+    target_type: str  # expert | lane | layer
+    priority: float
+
+
+class DistillationTargetMap(BaseModel):
+    """§25 distillation-target map: high-value components kept for KD/student."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entries: list[DistillationTargetEntry] = Field(default_factory=list)
+
+
 class CandidatePlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

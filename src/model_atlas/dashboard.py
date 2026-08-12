@@ -42,6 +42,7 @@ _ICONS: dict[str, str] = {
     "compression": '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
     "candidate": '<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
     "heldout": '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1 1 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
+    "maps": '<polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21 3 6"/><polyline points="3 6 9 9 15 6 21 9"/><line x1="9" x2="9" y1="9" y2="18"/>',
 }
 
 
@@ -173,6 +174,20 @@ def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
             for r in rep.per_label[:8]
         ]
 
+    # §25 planning-artifact maps (measured/estimated, see maps_build)
+    from model_atlas.planning.maps_build import build_planning_maps
+
+    maps = build_planning_maps(model, saliency)
+    maps_payload = {
+        "channel": [e.model_dump() for e in maps.channel.entries],
+        "tile": [e.model_dump() for e in maps.tile.entries],
+        "node_ownership": [e.model_dump() for e in maps.node_ownership.entries],
+        "overflow_pack": [e.model_dump() for e in maps.overflow_pack.entries],
+        "router_repair": [e.model_dump() for e in maps.router_repair.entries],
+        "residual_repair": [e.model_dump() for e in maps.residual_repair.entries],
+        "distillation_target": [e.model_dump() for e in maps.distillation_target.entries],
+    }
+
     return {
         "meta": {
             "arch": ARCH.name,
@@ -188,6 +203,7 @@ def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
         "compression": compression,
         "candidates": candidates,
         "heldout": heldout_rows or [],
+        "maps": maps_payload,
     }
 
 
@@ -206,6 +222,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
         {"id": "compression", "title": "Compression"},
         {"id": "candidate", "title": "Derivatives"},
         {"id": "heldout", "title": "Held-out"},
+        {"id": "maps", "title": "Planning Maps"},
     ]
     tab_html = "".join(_TAB_TEMPLATE.format(id=t["id"], title=t["title"], icon=_ICONS.get(t["id"], ""), _LUCIDE=_LUCIDE) for t in tabs)
     return f"""<!doctype html>
@@ -232,6 +249,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .chip{{display:inline-block;background:#1d2430;border:1px solid #2a3342;border-radius:4px;padding:2px 8px;margin:2px;font-size:12px}}
  .green{{color:#6fe3a1}} .amber{{color:#ffcf6b}} .red{{color:#ff7b7b}}
  .note{{color:#8a94a6;font-size:12px}}
+ .panel h3{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:13px;color:#aab3c0;margin:18px 0 6px}}
 </style></head><body>
 <div class="layout">
 <nav class="side">{tab_html}</nav>
@@ -248,6 +266,15 @@ def render_dashboard(data: dict[str, Any]) -> str:
  <div class="panel" id="panel-compression"><p class="note">Per-expert compression response (int4 vs int8), reconstruction error + output drift (measured math).</p><table id="t-compression"></table></div>
  <div class="panel" id="panel-candidate"><p class="note">Derivative candidates: kept experts/layer, resident bytes per node, go/no-go fit, held-out retention.</p><table id="t-candidate"></table></div>
  <div class="panel" id="panel-heldout"><p class="note">Per-capability held-out retention (derivative vs source), measured.</p><table id="t-heldout"></table></div>
+ <div class="panel" id="panel-maps"><p class="note">§25 planning artifacts. Channel/tile maps are grounded in <em>measured</em> channel-uniqueness (v2 §8.3); node-ownership from the census placement; router-repair preserves expert↔router index coupling (v2 §31:18); overflow/residual/distillation derive from measured saliency. Removal-impact fields are estimates pending causal traces.</p>
+    <h3>Channel map</h3><table id="t-channel"></table>
+    <h3>Tile map</h3><table id="t-tile"></table>
+    <h3>Node ownership</h3><table id="t-ownership"></table>
+    <h3>Overflow pack (NVMe)</h3><table id="t-overflow"></table>
+    <h3>Router repair</h3><table id="t-router"></table>
+    <h3>Residual repair</h3><table id="t-residual"></table>
+    <h3>Distillation targets</h3><table id="t-distill"></table>
+ </div>
 </main>
 </div>
 <script>
@@ -269,6 +296,13 @@ def render_dashboard(data: dict[str, Any]) -> str:
  fill('t-candidate', ['name','kept/layer','resident A','resident B','fitted','retention','promo'],
    DATA.candidates.map(c=>({{name:c.name, 'kept/layer':(c.kept_per_layer?Object.values(c.kept_per_layer).join(','):'-'), 'resident A':c.resident_a, 'resident B':c.resident_b, fitted:c.fitted, retention:c.retention, promo:(c.promotion_blocked?'blocked':'ok')}})));
  fill('t-heldout', ['label','n','source','deriv','retention'], DATA.heldout.map(r=>({{label:r.label, n:r.n, source:r.source, deriv:r.deriv, retention:r.retention}})));
+ fill('t-channel', ['layer','expert','chan','importance','keep'], DATA.maps.channel.map(r=>({{'layer':r.layer_index,'expert':r.source_expert_id,'chan':r.channel_id,'importance':r.importance,'keep':r.keep}})));
+ fill('t-tile', ['layer','expert','tile','start','importance','keep'], DATA.maps.tile.map(r=>({{'layer':r.layer_index,'expert':r.source_expert_id,'tile':r.tile_index,'start':r.channel_start,'importance':r.importance,'keep':r.keep}})));
+ fill('t-ownership', ['tensor','role','layer','expert','node'], DATA.maps.node_ownership.map(r=>({{'tensor':r.tensor_key,'role':r.role,'layer':(r.layer_index??'-'),'expert':(r.source_expert_id??'-'),'node':r.node}})));
+ fill('t-overflow', ['layer','expert','tier','reason'], DATA.maps.overflow_pack.map(r=>({{'layer':r.layer_index,'expert':r.source_expert_id,'tier':r.tier,'reason':r.reason}})));
+ fill('t-router', ['layer','old','new','action','route_bias'], DATA.maps.router_repair.map(r=>({{'layer':r.layer_index,'old':r.old_index,'new':(r.new_index??'-'),'action':r.action,'route_bias':r.route_bias}})));
+ fill('t-residual', ['layer','expert','component','severity','target'], DATA.maps.residual_repair.map(r=>({{'layer':r.layer_index,'expert':r.source_expert_id,'component':r.component,'severity':r.severity,'target':r.target}})));
+ fill('t-distill', ['layer','expert','type','priority'], DATA.maps.distillation_target.map(r=>({{'layer':r.layer_index,'expert':r.source_expert_id,'type':r.target_type,'priority':r.priority}})));
 
  document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{{
    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
