@@ -369,6 +369,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  h1{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;letter-spacing:-0.01em;font-size:18px;margin:0}}
  .sub{{color:#8a94a6;font-size:12px;margin-top:4px}}
  .layout{{display:flex;min-height:100vh}}
+ .col{{flex:1;display:flex;flex-direction:column;min-width:0}}
  nav.side{{width:200px;flex:0 0 200px;display:flex;flex-direction:column;gap:2px;background:#161a22;border-right:1px solid #262c38;padding:14px 10px;position:sticky;top:0;height:100vh;overflow-y:auto;box-sizing:border-box}}
  nav.side .tab{{display:flex;align-items:center;gap:9px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;padding:8px 10px;cursor:pointer;color:#aab3c0;border-radius:6px}}
  nav.side .tab svg{{flex:0 0 auto}}
@@ -391,6 +392,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
 </style></head><body>
 <div class="layout">
 <nav class="side">{tab_html}</nav>
+<div class="col">
 <header><h1>Atlas Profile Platform — model-atlas</h1>
 <div class="sub">{data["meta"]["arch"]} · {data["meta"]["layers"]} layers · {data["meta"]["experts"]} experts · top-{data["meta"]["top_k"]} · seed {data["meta"]["seed"]} — synthetic miniature MoE; all values measured by the F3–F13 runtime. Two surfaces: <em>Profiling</em> (how the model routes &amp; what components carry) and <em>Quantization &amp; Fit</em> (how to shrink it + real-bytes envelopes).</div></header>
 <main class="main">
@@ -417,7 +419,8 @@ def render_dashboard(data: dict[str, Any]) -> str:
     <h3>Residual repair</h3><table id="t-residual"></table>
     <h3>Distillation targets</h3><table id="t-distill"></table>
  </div>
-</main>
+ </main>
+</div>
 </div>
 <script>
  const DATA = {payload};
