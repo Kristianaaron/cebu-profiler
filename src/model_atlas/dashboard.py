@@ -359,120 +359,101 @@ _CAP3D_JS = r"""
   var ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  var zoom = 1.0, ry = 0.0, rx = 0.8, S = 6, T = S, du0 = S * 0.87, dw0 = S * 0.5, OX = 0, OY = 0;   // iso params + rotation
+  var SX = 1.25, SY = 2.0, SZ = 1.7, HFE = 0.46;
+  var zoom = 1.0, ry = 0.78, rx = 0.62, OX = 0, OY = 0;   // rotation + centre
   var hover = null, pin = null, focus = 0, selLayer = null;
   var layerOn = []; for (var _l0 = 0; _l0 < nl; _l0++) layerOn.push(true);
-  var cells = [];   // { v, top: [4 pts screen], side: [4 pts screen] }
+  var cells = [];   // { v, pts[8], nz[6], vispolys[], depth, cx, cy }
   var dragging = false, moved = 0, lastX = 0, lastY = 0;
 
-  // 3D yaw+pitch rotation, orthographic projection (drops z for screen depth).
-  function proj(ox, oy, oz) {
+  var CORNERS = [[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]];
+  var FACES = [
+    { c: [0,1,5,4], n: [0,-1,0] },
+    { c: [3,2,6,7], n: [0,1,0] },
+    { c: [0,3,7,4], n: [-1,0,0] },
+    { c: [1,2,6,5], n: [1,0,0] },
+    { c: [0,1,2,3], n: [0,0,-1] },
+    { c: [4,5,6,7], n: [0,0,1] }
+  ];
+
+  function rot3(x, y, z) {
     var cy = Math.cos(ry), sy = Math.sin(ry), cx = Math.cos(rx), sx = Math.sin(rx);
-    var px = ox * cy + oz * sy, pz = -ox * sy + oz * cy, py = oy;
+    var px = x * cy + z * sy, pz = -x * sy + z * cy, py = y;
     var y2 = py * cx - pz * sx, z2 = py * sx + pz * cx;
-    return [px, y2];
+    return [px, y2, z2];
   }
-  // Rotating isometric rhombus tile for cell (E,L,l): experts run along one
-  // object axis, capabilities along the other, layers lift by l*T; the whole
-  // lattice is yawed/pitched by (ry,rx) then orthographically projected.
-  function tile(E, L, l) {
-    var u = (E - L) * du0, w = (E + L) * dw0, oy = -l * T;
-    var GAP = 0.45;                       // cell size relative to lattice step (clear dark gaps)
-    var du = du0 * GAP, dw = dw0 * GAP;
-    return [
-      proj(u - du, oy, w - dw),
-      proj(u + du, oy, w - dw),
-      proj(u + du, oy, w + dw),
-      proj(u - du, oy, w + dw)
-    ];
-  }
-  // Vertical wall under the tile's left +front edge down to the next layer.
-  function side(E, L, l) {
-    var a = tile(E, L, l), b = tile(E, L, l + 1);
-    return [[a[0][0], a[0][1]], [a[3][0], a[3][1]], [b[3][0], b[3][1]], [b[0][0], b[0][1]]];
-  }
+
   function layout() {
-    // Always size to the LIVE canvas, not whatever width was measured at load
-    // (the tab is hidden until shown, so init may have fallen back to 680).
     var cw = cv.clientWidth || W, chh = cv.clientHeight || H;
     if (cw !== W || chh !== H) { W = cw; H = chh; cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); }
-    var sc2 = Math.min((W - 48) / ((ne + labels.length) * 0.87 + 2), (H - 56) / (nl + (ne + labels.length) * 0.55));
-    S = sc2; du0 = S * 0.87; dw0 = S * 0.5; T = S * 2.5;
-    // bounds of all top tiles + side faces (origin 0,0)
-    var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
-    function scan(pt) { if (pt[0] < x0) x0 = pt[0]; if (pt[0] > x1) x1 = pt[0]; if (pt[1] < y0) y0 = pt[1]; if (pt[1] > y1) y1 = pt[1]; }
-    for (var li = 0; li < labels.length; li++) {
-      for (var ly = 0; ly < nl; ly++) {
-        if (!layerOn[ly]) continue;
-        for (var ex = 0; ex < ne; ex++) {
-          var t = tile(ex, li, ly); for (var q = 0; q < 4; q++) scan(t[q]);
-          var s2 = side(ex, li, ly); for (var q2 = 0; q2 < 4; q2++) scan(s2[q2]);
-        }
-      }
+    var sc = Math.min((W - 70) / (Math.max(ne * SX, nl * SY, labels.length * SZ) + 4), (H - 70) / (nl * SY + labels.length * SZ + 3)) * 0.95 * zoom;
+    function projAll(v, ox0, oy0) {
+      var cx = (v.expert - (ne - 1) / 2) * SX, cy = -(v.layer - (nl - 1) / 2) * SY, cz = (v.label - (labels.length - 1) / 2) * SZ;
+      var rc = rot3(cx, cy, cz), pts = [];
+      for (var i = 0; i < 8; i++) { var r = rot3(cx + CORNERS[i][0] * HFE, cy + CORNERS[i][1] * HFE, cz + CORNERS[i][2] * HFE); pts.push([ox0 + r[0] * sc, oy0 + r[1] * sc, r[2] * sc]); }
+      return { rc: rc, pts: pts };
     }
+    var flat = vox.filter(function (v) { return layerOn[v.layer]; });
+    var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9, i;
+    function scan(pp) { if (pp[0] < x0) x0 = pp[0]; if (pp[0] > x1) x1 = pp[0]; if (pp[1] < y0) y0 = pp[1]; if (pp[1] > y1) y1 = pp[1]; }
+    for (i = 0; i < flat.length; i++) { var o = projAll(flat[i], 0, 0); for (var j = 0; j < 8; j++) scan(o.pts[j]); }
     OX = W / 2 - (x0 + x1) / 2; OY = H / 2 - (y0 + y1) / 2;
-    function move(pts, ox, oy) { var o = []; for (var i = 0; i < pts.length; i++) o.push([pts[i][0] + ox, pts[i][1] + oy]); return o; }
     cells = [];
-    for (var label2 = 0; label2 < labels.length; label2++) {
-      for (var layer2 = 0; layer2 < nl; layer2++) {
-        if (!layerOn[layer2]) continue;
-        for (var e2 = 0; e2 < ne; e2++) {
-          var v2 = vox[0];
-          for (var k2 = 0; k2 < vox.length; k2++) if (vox[k2].label === label2 && vox[k2].layer === layer2 && vox[k2].expert === e2) { v2 = vox[k2]; break; }
-          var tp = move(tile(e2, label2, layer2), OX, OY);
-          cells.push({ v: v2, top: tp, side: move(side(e2, label2, layer2), OX, OY),
-            cx: (tp[0][0] + tp[1][0] + tp[2][0] + tp[3][0]) / 4, cy: (tp[0][1] + tp[1][1] + tp[2][1] + tp[3][1]) / 4 });
-        }
-      }
+    for (i = 0; i < flat.length; i++) {
+      var v = flat[i], o = projAll(v, OX, OY), nz = [], vis = [];
+      for (var f = 0; f < 6; f++) { var nr = rot3(FACES[f].n[0], FACES[f].n[1], FACES[f].n[2]); nz.push(nr[2]); if (nr[2] > 0) vis.push(FACES[f].c.map(function (ci) { return o.pts[ci]; })); }
+      cells.push({ v: v, pts: o.pts, nz: nz, vispolys: vis, depth: o.rc[2] * sc, cx: OX + o.rc[0] * sc, cy: OY + o.rc[1] * sc });
     }
   }
 
   function isOn(v, l) { return v.label === l.label && v.layer === l.layer && v.expert === l.expert; }
-  function fillQuad(pts, style) { ctx.fillStyle = style; ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (var q = 1; q < 4; q++) ctx.lineTo(pts[q][0], pts[q][1]); ctx.closePath(); ctx.fill(); }
-  function strokeQuad(pts) { ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (var q = 1; q < 4; q++) ctx.lineTo(pts[q][0], pts[q][1]); ctx.closePath(); ctx.stroke(); }
+  function facePath(pts, f) { return FACES[f].c.map(function (ci) { return pts[ci]; }); }
+  function tracePath(poly) { ctx.beginPath(); ctx.moveTo(poly[0][0], poly[0][1]); for (var q = 1; q < 4; q++) ctx.lineTo(poly[q][0], poly[q][1]); ctx.closePath(); }
   function aa(v4) { return Math.max(0, Math.min(1, v4)).toFixed(3); }
   var BAYER = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
-  // Force a translucent dark base then an ordered-dither of light dots whose
-  // density encodes a shade/level (dithered-cube look, monochrome on the grid).
-  function ditherFace(poly, level, base) {
-    ctx.save();
-    ctx.beginPath(); ctx.moveTo(poly[0][0], poly[0][1]); for (var q = 1; q < 4; q++) ctx.lineTo(poly[q][0], poly[q][1]); ctx.closePath(); ctx.clip();
+  // Dense ordered dither on a face — like the reference: small light dots whose
+  // density encodes shade x saliency, over a faint dark base, clipped to the face.
+  function ditherFace(poly, level, active) {
+    ctx.save(); tracePath(poly); ctx.clip();
     var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9, k;
     for (k = 0; k < 4; k++) { if (poly[k][0] < x0) x0 = poly[k][0]; if (poly[k][0] > x1) x1 = poly[k][0]; if (poly[k][1] < y0) y0 = poly[k][1]; if (poly[k][1] > y1) y1 = poly[k][1]; }
-    ctx.fillStyle = 'rgba(22,26,34,' + aa(base) + ')';
+    var baseGray = Math.round(16 + 26 * level) + ';'
+    ctx.fillStyle = 'rgba(' + (30 + 40 * level) + ',' + (33 + 40 * level) + ',' + (40 + 44 * level) + ',' + aa(0.86) + ')';
     ctx.fillRect(Math.floor(x0), Math.floor(y0), Math.ceil(x1 - x0), Math.ceil(y1 - y0));
-    var s = Math.max(3, Math.round((x1 - x0) * 0.12));
-    var g = Math.max(1, Math.min(15, Math.round(level * 15)));
-    ctx.fillStyle = 'rgba(208,216,228,' + aa(Math.min(1, 0.25 + level * 0.75)) + ')';
-    var col = 0;
+    var s = Math.max(2, Math.round((x1 - x0) / 12));       // clear, dense dots
+    var t = Math.max(0, Math.min(15, Math.round(Math.min(1, level) * 16)));
+    ctx.fillStyle = 'rgba(212,220,234,' + aa(0.72 + 0.28 * level) + ')';
+    var col = 0, row = 0;
     for (var yy = Math.floor(y0); yy < y1; yy += s, col++) {
-      var row = 0;
+      row = 0;
       for (var xx = Math.floor(x0); xx < x1; xx += s, row++) {
-        if (g > BAYER[col & 3][row & 3]) ctx.fillRect(xx, yy, s + 0.5, s + 0.5);
+        if (t > BAYER[col & 3][row & 3]) ctx.fillRect(xx, yy, s + 0.5, s + 0.5);
       }
     }
+    ctx.strokeStyle = 'rgba(180,190,205,0.25)'; ctx.lineWidth = 0.75;
+    ctx.beginPath(); ctx.moveTo(poly[0][0], poly[0][1]); for (var q = 1; q < 4; q++) ctx.lineTo(poly[q][0], poly[q][1]); ctx.closePath(); ctx.stroke();
     ctx.restore();
   }
+  function drawCube(cb) {
+    var v = cb.v;
+    var active = (pin && isOn(v, pin)) || (hover && isOn(v, hover));
+    var hot = 0.22 + 0.78 * v.score;               // saliency brightness
+    for (var f = 0; f < 6; f++) {
+      if (cb.nz[f] <= 0) continue;
+      var shade = 0.30 + 0.70 * Math.max(0, cb.nz[f]);   // light source shading
+      var level = (active ? 1.35 : 1) * shade * hot;
+      ditherFace(facePath(cb.pts, f), Math.min(1, level), active);
+    }
+  }
+
   function draw() {
     layout();
-    ctx.clearRect(0, 0, W, H);   // transparent canvas -> grid/vignette behind shows through
-    // painter-sort cells back-to-front, then draw each voxel as a dithered cube
+    ctx.clearRect(0, 0, W, H);   // transparent canvas -> grid + vignette behind
     var order = cells.slice();
-    order.sort(function (a, b) { return (a.cy - b.cy) || (a.v.layer - b.v.layer); });
-    for (var i = 0; i < order.length; i++) {
-      var c = order[i], v = c.v, top = c.top, body = T * 0.72;
-      var yv = [[top[0][0], top[0][1] + body], [top[1][0], top[1][1] + body], [top[2][0], top[2][1] + body], [top[3][0], top[3][1] + body]];
-      var fl = [top[3], top[0], yv[0], yv[3]];   // front-left face
-      var fr = [top[1], top[2], yv[2], yv[1]];   // front-right face
-      var hot = 0.30 + 0.7 * v.score;
-      var isSel = pin && isOn(v, pin), isHov = hover && isOn(v, hover);
-      var boost = (isSel || isHov) ? 0.35 : 0;
-      ditherFace(fr, (0.45 + boost) * hot, 0.5);                 // darker side
-      ditherFace(fl, (0.68 + boost) * hot, 0.5);                 // mid front
-      ditherFace(top, (0.95 + boost) * hot, 0.5);                // bright top
-    }
+    order.sort(function (a, b) { return a.depth - b.depth; });
+    for (var i = 0; i < order.length; i++) drawCube(order[i]);
     ctx.fillStyle = 'rgba(150,160,180,0.85)'; ctx.font = '11px system-ui'; ctx.textAlign = 'left';
-    ctx.fillText('experts & capabilities along the two diagonals · layers stack up · drag to rotate · scroll to zoom · dither = saliency', 6, H - 6);
+    ctx.fillText('experts (x) · layers (y) · capabilities (z) · dither = saliency · drag to rotate · scroll to zoom', 6, H - 6);
   }
 
   function inPoly(px, py, poly) {
@@ -485,19 +466,16 @@ _CAP3D_JS = r"""
   }
   function pick(e) {
     var r = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0, width: W, height: H };
-    // map the cursor into the canvas drawing space W x H exactly, correcting any
-    // drift between the layout size and the current rendered rect (zoom/resize)
     var bx = (e.clientX - r.left) * (W / r.width), by = (e.clientY - r.top) * (H / r.height);
-    // return the exact, visually-topmost cell under the cursor: the last cell
-    // in painter order whose on-screen diamond contains the point.
+    // visually-topmost cube under the cursor: last in painter order containing it
     var order = cells.slice();
-    order.sort(function (a, b) { return (a.cy - b.cy) || (a.v.layer - b.v.layer); });
+    order.sort(function (a, b) { return a.depth - b.depth; });
     for (var i = order.length - 1; i >= 0; i--) {
-      if (inPoly(bx, by, order[i].top)) return order[i].v;
+      var vsps = order[i].vispolys;
+      for (var f = 0; f < vsps.length; f++) { if (inPoly(bx, by, vsps[f])) return order[i].v; }
     }
     return null;
   }
-
   function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
   function tier(sc) { if (sc >= 0.75) return 'strong'; if (sc >= 0.5) return 'good'; if (sc >= 0.25) return 'moderate'; return 'weak'; }
   function tierBadge(v) { return '<span class="p-tier ' + tier(v.score) + '">' + tier(v.score) + '</span>'; }
