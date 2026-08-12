@@ -385,6 +385,10 @@ _CAP3D_JS = r"""
     return [[a[0][0], a[0][1]], [a[3][0], a[3][1]], [b[3][0], b[3][1]], [b[0][0], b[0][1]]];
   }
   function layout() {
+    // Always size to the LIVE canvas, not whatever width was measured at load
+    // (the tab is hidden until shown, so init may have fallen back to 680).
+    var cw = cv.clientWidth || W, chh = cv.clientHeight || H;
+    if (cw !== W || chh !== H) { W = cw; H = chh; cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); }
     var sc2 = Math.min((W - 48) / ((ne + labels.length) * 0.87 + 2), (H - 56) / (nl + (ne + labels.length) * 0.55));
     S = sc2; du0 = S * 0.87; dw0 = S * 0.5; T = S * 1.7;
     // bounds of all top tiles + side faces (origin 0,0)
@@ -460,8 +464,10 @@ _CAP3D_JS = r"""
     return inside;
   }
   function pick(e) {
-    var r = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0 };
-    var bx = e.clientX - r.left, by = e.clientY - r.top;
+    var r = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0, width: W, height: H };
+    // map the cursor into the canvas drawing space W x H exactly, correcting any
+    // drift between the layout size and the current rendered rect (zoom/resize)
+    var bx = (e.clientX - r.left) * (W / r.width), by = (e.clientY - r.top) * (H / r.height);
     // return the exact, visually-topmost cell under the cursor: the last cell
     // in painter order whose on-screen diamond contains the point.
     var order = cells.slice();
@@ -527,8 +533,16 @@ _CAP3D_JS = r"""
   window.capAllLayers = function () { for (var l = 0; l < nl; l++) layerOn[l] = true; redraw(); };
 
   function cur(p) { if (cv.style) cv.style.cursor = p ? 'pointer' : 'default'; }
-  cv.addEventListener('pointermove', function (e) { var p = pick(e); hover = p; draw(); renderPanel(); cur(p); });
-  cv.addEventListener('pointerdown', function (e) { var p = pick(e); if (p) { pin = (pin && isOn(pin, p)) ? null : p; focus = p.label; draw(); renderPanel(); } });
+  function onMove(e) {
+    layout();              // rebuild cells at the canvas's CURRENT size so pick never drifts from draw
+    var p = pick(e);
+    hover = p; draw(); renderPanel(); cur(p);
+  }
+  function onDown(e) {
+    layout(); var p = pick(e); if (p) { pin = (pin && isOn(pin, p)) ? null : p; focus = p.label; draw(); renderPanel(); }
+  }
+  cv.addEventListener('pointermove', onMove);
+  cv.addEventListener('pointerdown', onDown);
   cv.addEventListener('wheel', function (e) { e.preventDefault(); zoom = Math.max(0.5, Math.min(2.5, zoom * (e.deltaY < 0 ? 1.05 : 0.95))); draw(); }, { passive: false });
   window.addEventListener('resize', function () {
     var W2 = cv.clientWidth || W, H2 = cv.clientHeight || H;
