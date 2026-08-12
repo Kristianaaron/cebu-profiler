@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.1 — 2026-08-12
+
+Native Atlas↔Eval bridge: eval-lab's Atlas Lab now natively consumes the full
+profiler picture (no data dropped) —
+
+- `atlas/export.py` emits a consolidated `planning_maps.json` (the seven
+  granular §25 maps + per-candidate precision/residency/coverage), registered
+  in the §27 output contract so nothing is flagged as an unknown artifact.
+- Prepared for the eval-harness consumer: bridge carries precision/residency/
+  coverage + §25 maps + real-bytes candidates end to end.
+
 ## 0.8.0 — 2026-08-12
 
 Cohesive Atlas Profile Platform IA (Profile vs Quantization & Fit) —

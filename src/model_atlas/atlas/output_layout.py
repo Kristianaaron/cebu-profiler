@@ -53,6 +53,7 @@ ATLAS_RUN_FILES: frozenset[str] = frozenset(
         "tile_map.parquet",
         "compression_manifest.json",
         "hierarchy_map.json",
+        "planning_maps.json",
         "projection_sensitivity.parquet",
         "ablation_results.parquet",
         "negative_controls.parquet",
@@ -111,6 +112,7 @@ def expected_run_files(evidence_level: EvidenceLevel) -> frozenset[str]:
             "projection_sensitivity.parquet",
             "compression_manifest.json",
             "hierarchy_map.json",
+            "planning_maps.json",
         }
     if _level_at_least(EvidenceLevel.CAUSAL_ATLAS):
         base |= {

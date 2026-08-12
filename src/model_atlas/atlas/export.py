@@ -24,6 +24,7 @@ from model_atlas.atlas.runtime import MiniMoE
 from model_atlas.builder import build_derivative, register_derivative
 from model_atlas.ecosystem import build_mini_moe_for, prompt_corpus
 from model_atlas.planning import CandidatePlan, SearchInputs, generate_candidates
+from model_atlas.planning.maps_build import build_planning_maps
 from model_atlas.schemas.model_asset import AssetType, ModelAsset
 from model_atlas.schemas.ontology import DataPartition
 
@@ -97,6 +98,54 @@ def _serialize_plan(plan: CandidatePlan, strategy: str, keep_per_layer: int) -> 
                 for e in plan.precision.entries
             ]
         },
+    }
+
+
+def _planning_maps_payload(
+    model: MiniMoE,
+    saliency: SaliencyAccumulator,
+    plans: list[CandidatePlan],
+) -> dict[str, Any]:
+    """Consolidate the seven granular §25 maps + per-candidate fit into one file."""
+    ms = build_planning_maps(model, saliency)
+    map_names = (
+        "channel",
+        "tile",
+        "node_ownership",
+        "overflow_pack",
+        "router_repair",
+        "residual_repair",
+        "distillation_target",
+    )
+    return {
+        "schema_version": 1,
+        "source_arch": model.arch.name,
+        "maps": {name: [e.model_dump() for e in getattr(ms, name).entries] for name in map_names},
+        "candidates": [
+            {
+                "name": p.name,
+                "kept_per_layer": {str(k): v for k, v in p.kept_per_layer.items()},
+                "resident_bytes_a": p.resident_bytes_a,
+                "resident_bytes_b": p.resident_bytes_b,
+                "stored_bytes": p.stored_bytes,
+                "coverage": (
+                    round(p.keep.kept_count() / len(p.keep.entries), 4)
+                    if p.keep.entries
+                    else 0.0
+                ),
+                "precision": [
+                    {
+                        "layer_index": e.layer_index,
+                        "source_expert_id": e.source_expert_id,
+                        "precision": e.precision,
+                        "bits": e.bits,
+                        "reconstruction_error": e.reconstruction_error,
+                    }
+                    for e in p.precision.entries
+                ],
+            }
+            for p in plans
+        ],
     }
 
 
@@ -223,6 +272,14 @@ def export_run(
             json.dumps(_serialize_derivative(asset, result), indent=2, sort_keys=True)
         )
         evidence.append("derivative.json")
+
+    # §25 consolidated planning-maps artifact: the seven granular §25 maps plus
+    # per-candidate precision/residency — surfaced natively by the eval-harness
+    # Atlas Lab via the manifest bridge.
+    (run_dir / "planning_maps.json").write_text(
+        json.dumps(_planning_maps_payload(model, saliency, plans), indent=2, sort_keys=True)
+    )
+    evidence.append("planning_maps.json")
 
     manifest: dict[str, Any] = {
         "schema_version": _SCHEMA_VERSION,

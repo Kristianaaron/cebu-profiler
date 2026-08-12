@@ -34,12 +34,30 @@ def test_export_writes_parseable_run_files(tmp_path):
         "plans.json",
         "compression_manifest.json",
         "hierarchy_map.json",
+        "planning_maps.json",
     ]
     for fname in fnames:
         assert (run_dir / fname).exists(), fname
         assert isinstance(_read_json(run_dir / fname), (list, dict))
     n_extra = len(list(run_dir.iterdir())) - len(fnames)
-    assert n_extra == 0  # no build -> exactly the five base files
+    assert n_extra == 0  # no build -> exactly the six base files
+
+
+def test_export_writes_planning_maps_artifact(tmp_path):
+    _write_fixture_corpus(tmp_path)
+    result = export_run(
+        str(tmp_path / "out"), eval_lab_root=str(tmp_path / "eval_lab"), seed=1, keep_per_layer=3
+    )
+    run_dir = Path(result["run_dir"])
+    pm = _read_json(run_dir / "planning_maps.json")
+    assert pm["source_arch"] == "k3-mini"
+    for name in (
+        "channel", "tile", "node_ownership", "overflow_pack",
+        "router_repair", "residual_repair", "distillation_target",
+    ):
+        assert pm["maps"][name], f"empty maps.{name}"
+    assert pm["candidates"]
+    assert all("precision" in c and "resident_bytes_a" in c for c in pm["candidates"])
 
 
 def test_export_writes_parseable_hierarchy_map(tmp_path):
