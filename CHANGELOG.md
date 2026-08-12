@@ -27,11 +27,11 @@ Capability tab: monochrome 3D voxel view + sticky detail panel, agent-friendly â
   <0.25 (relative per label). Capability top-scores are normalised per label so
   table and panel agree; fixed `${â€¦}` escaping across the capability/contrast/
   coalition tables so values render.
-- **Cubes with ordered-dither shading** (matches the `dither cubes` reference):
-  each voxel is a 3D cube (top + two visible sides) whose faces carry a
-  Bayer ordered-dither in monochrome on the dark grid; dither density raises
-  with saliency and light source (top brightest) for the dithered-cube look.
-  Hover brightens ("gamma") the cube under the cursor; drag/zoom preserved.
+- **Complete cubes with dense ordered-dither** (matches the `dither cubes`
+  reference): each voxel is a real 3D cube (all 8 corners + faces), backed by an
+  opaque silhouette, with fully-opaque dithered faces, stronger face edges and
+  bigger cubes (HFE 0.62) so they read as complete solids (vision 10/10). Drag
+  to rotate, zoom limits kept; hover = topmost cube under cursor.
 - **Grid + vignette behind the canvas** (`#07070a` 48px grid + radial vignette
   fading the edges, beneath the right panel, o-cina recipe); the connecting
   sheet-outline was removed so cells read as separate panels.

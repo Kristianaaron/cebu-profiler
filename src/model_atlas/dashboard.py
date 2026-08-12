@@ -359,8 +359,8 @@ _CAP3D_JS = r"""
   var ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  var SX = 1.55, SY = 2.5, SZ = 2.2, HFE = 0.46;
-  var zoom = 1.0, ry = 0.78, rx = 0.62, OX = 0, OY = 0;   // rotation + centre
+  var SX = 1.7, SY = 2.8, SZ = 2.4, HFE = 0.62;
+  var zoom = 1.0, ry = 0.70, rx = 0.70, OX = 0, OY = 0;   // rotation + centre
   var hover = null, pin = null, focus = 0, selLayer = null;
   var layerOn = []; for (var _l0 = 0; _l0 < nl; _l0++) layerOn.push(true);
   var cells = [];   // { v, pts[8], nz[6], vispolys[], depth, cx, cy }
@@ -417,12 +417,12 @@ _CAP3D_JS = r"""
     ctx.save(); tracePath(poly); ctx.clip();
     var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9, k;
     for (k = 0; k < 4; k++) { if (poly[k][0] < x0) x0 = poly[k][0]; if (poly[k][0] > x1) x1 = poly[k][0]; if (poly[k][1] < y0) y0 = poly[k][1]; if (poly[k][1] > y1) y1 = poly[k][1]; }
-    var baseGray = Math.round(16 + 26 * level) + ';'
-    ctx.fillStyle = 'rgba(' + (30 + 40 * level) + ',' + (33 + 40 * level) + ',' + (40 + 44 * level) + ',' + aa(0.86) + ')';
+    var g = Math.round(24 + 62 * level);                 // solid opaque face grey
+    ctx.fillStyle = 'rgb(' + g + ',' + (g + 3) + ',' + (g + 8) + ')';
     ctx.fillRect(Math.floor(x0), Math.floor(y0), Math.ceil(x1 - x0), Math.ceil(y1 - y0));
-    var s = Math.max(2, Math.round((x1 - x0) / 12));       // clear, dense dots
-    var t = Math.max(0, Math.min(15, Math.round(Math.min(1, level) * 16)));
-    ctx.fillStyle = 'rgba(212,220,234,' + aa(0.72 + 0.28 * level) + ')';
+    var s = Math.max(2, Math.round((x1 - x0) / 10));       // dense dots
+    var t = Math.max(0, Math.min(15, Math.round(Math.min(1, level) * 15.5)));
+    ctx.fillStyle = 'rgba(235,240,250,' + aa(Math.min(1, 0.6 + 0.4 * level)) + ')';
     var col = 0, row = 0;
     for (var yy = Math.floor(y0); yy < y1; yy += s, col++) {
       row = 0;
@@ -430,21 +430,31 @@ _CAP3D_JS = r"""
         if (t > BAYER[col & 3][row & 3]) ctx.fillRect(xx, yy, s + 0.5, s + 0.5);
       }
     }
-    ctx.strokeStyle = 'rgba(180,190,205,0.25)'; ctx.lineWidth = 0.75;
+    ctx.strokeStyle = 'rgba(245,248,252,0.5)'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(poly[0][0], poly[0][1]); for (var q = 1; q < 4; q++) ctx.lineTo(poly[q][0], poly[q][1]); ctx.closePath(); ctx.stroke();
     ctx.restore();
+  }
+  function hull(pts) {
+    pts = pts.map(function (p) { return [p[0], p[1]]; }).sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
+    function cross(o, a, b) { return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]); }
+    var lower = [], upper = [];
+    for (var i = 0; i < pts.length; i++) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], pts[i]) <= 0) lower.pop(); lower.push(pts[i]); }
+    for (var j = pts.length - 1; j >= 0; j--) { while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], pts[j]) <= 0) upper.pop(); upper.push(pts[j]); }
+    lower.pop(); upper.pop(); return lower.concat(upper);
   }
   function drawCube(cb) {
     var v = cb.v;
     var active = (pin && isOn(v, pin)) || (hover && isOn(v, hover));
     var hot = 0.22 + 0.78 * v.score;               // saliency brightness
+    // opaque silhouette base so every cube reads as a complete closed solid
+    var hp = hull(cb.pts, 7);
+    if (hp) { ctx.fillStyle = 'rgba(19,23,30,0.97)'; ctx.beginPath(); ctx.moveTo(hp[0][0], hp[0][1]); for (var hi = 1; hi < hp.length; hi++) ctx.lineTo(hp[hi][0], hp[hi][1]); ctx.closePath(); ctx.fill(); }
     for (var f = 0; f < 6; f++) {
       if (cb.nz[f] <= 0) continue;
       var shade = 0.30 + 0.70 * Math.max(0, cb.nz[f]);   // light source shading
       var level = (active ? 1.35 : 1) * shade * hot;
       ditherFace(facePath(cb.pts, f), Math.min(1, level), active);
-    }
-  }
+    }  }
 
   function draw() {
     layout();
