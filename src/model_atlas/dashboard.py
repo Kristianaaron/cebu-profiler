@@ -710,7 +710,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
    <p>End-to-end parent→derivative Atlas over a genuine synthetic mini-MoE. Everything below is computed by the same measured code paths as the test suite. This is the <strong>Atlas Profile Platform</strong>: use <em>Profiling</em> to understand the model, <em>Quantization &amp; Fit</em> to shrink/score it, and the <strong>Eval Harness</strong> link (bottom of the nav) for independent benchmarking.</p>
  </div>
  <div class="panel" id="panel-capability">
-   <p class="note">Experts × layers saliency map: one dithered cube per scored <code>(layer, expert)</code> cell, capability labels run along the depth axis; brightness = measured saliency (per-label normalised). <strong>Drag to rotate · scroll to zoom · hover for values.</strong> The tables below are the canonical, agent-readable form — no vision needed to read the data.</p>
+   <p class="note">Experts × layers saliency map: one dithered cube per scored <code>(layer, expert)</code> cell, capability labels run along the depth axis; brightness = measured saliency (per-label normalised). <strong>Drag to rotate · scroll to zoom · hover for values.</strong></p>
    <div class="cap3d-wrap">
      <div class="cap3d-canvas">
        <canvas id="cap3d"
