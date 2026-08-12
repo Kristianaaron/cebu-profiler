@@ -648,7 +648,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .navlink:hover{{color:#a8d6ff}}
  .stat{{display:inline-block;background:#1d2430;border:1px solid #2a3342;border-radius:6px;padding:10px 14px;margin:4px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
  .stat .k{{color:#8a94a6;font-size:11px;display:block}} .stat .v{{font-size:18px;color:#d5dbe3}}
- .cap3d-wrap{{position:relative;display:flex;gap:12px;align-items:flex-start;border:1px solid #262c38;border-radius:8px;padding:10px;
+ .cap3d-wrap{{position:relative;display:flex;gap:12px;align-items:stretch;border:1px solid #262c38;border-radius:8px;padding:10px;
    background:#07070a;
    background-image:linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px);
    background-size:48px 48px,48px 48px}}
@@ -661,7 +661,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .cap3d-controls input[type=range]{{width:120px;accent-color:#7cc0ff}}
  .cap3d-vig{{position:absolute;inset:0;pointer-events:none;border-radius:6px;background:radial-gradient(ellipse 72% 68% at 50% 48%, transparent 42%, rgba(7,7,10,0.5) 74%, #07070a 100%)}}
  canvas#cap3d.dragging{{cursor:grabbing}}
- .cap3d-panel{{flex:0 0 300px;position:sticky;top:0;align-self:flex-start;background:#0a0c10;border-left:1px solid #262c38;padding-left:12px;max-height:420px;overflow:auto;font-size:12px;color:#cfd6e0}}
+ .cap3d-panel{{flex:0 0 300px;align-self:stretch;background:#0a0c10;border-left:1px solid #262c38;padding-left:12px;overflow-y:auto;font-size:12px;color:#cfd6e0}}
  .cap3d-panel .p-head{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12.5px;color:#e9edf3;margin:2px 0 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
  .cap3d-panel .p-sub{{color:#5d6673;font-size:10.5px;margin:2px 0 8px}}
  .cap3d-panel .p-grp{{color:#7cc0ff;font-size:11px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;margin:8px 0 2px;cursor:pointer;display:flex;align-items:center;gap:6px}}
@@ -679,7 +679,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .cap3d-panel .p-row.sel{{background:#1d2430;color:#fff}}
  .cap3d-panel .p-bar{{flex:0 0 42px;height:5px;background:#1a1f28;border-radius:3px;overflow:hidden}}
  .cap3d-panel .p-bar i{{display:block;height:100%;background:#e9edf3}}
- .cap3d-panel .p-tier{{flex:0 0 auto;font-size:9.5px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;text-transform:uppercase;letter-spacing:.04em;padding:1px 5px;border-radius:3px;border:1px solid currentColor;opacity:.9}}
+ .cap3d-panel .p-tier{{flex:0 0 auto;margin-left:auto;font-size:9.5px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;text-transform:uppercase;letter-spacing:.04em;padding:1px 5px;border-radius:3px;border:1px solid currentColor;opacity:.9}}
  .cap3d-panel .p-tier.strong{{color:#8fe3a0}}
  .cap3d-panel .p-tier.good{{color:#9fc4ff}}
  .cap3d-panel .p-tier.moderate{{color:#e2cf7f}}
