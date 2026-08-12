@@ -16,6 +16,7 @@ from model_atlas.checkpoint.source_manifest import load_manifest
 from model_atlas.checkpoint.structural_graph import build_structural_graph
 from model_atlas.dashboard import write_dashboard
 from model_atlas.planning.memory_planner import GIB, assess
+from model_atlas.planning.realbytes import account_manifest, plan_candidates, report
 from model_atlas.registry.architectures import get_registry
 
 app = typer.Typer(no_args_is_help=True, help="Model-agnostic Atlas platform CLI.")
@@ -176,6 +177,20 @@ def census(arch: str) -> None:
     role_totals = manifest.bytes_by_role()
     for role, b in sorted(role_totals.items(), key=lambda kv: -kv[1]):
         print(f"  role {role.value}: {b:.0f}")
+
+
+@app.command("real-candidates")
+def real_candidates(
+    checkpoint_dir: str,
+    envelopes: str = typer.Option(
+        "190,210,225", "--envelopes", help="Comma-separated GiB envelopes"
+    ),
+) -> None:
+    """Plan real-bytes derivative candidates at the given resident envelopes."""
+    manifest = load_manifest(checkpoint_dir)
+    acc = account_manifest(manifest)
+    envs = tuple(float(x) for x in envelopes.split(","))
+    print(report(plan_candidates(acc, envelopes=envs), acc))
 
 
 @app.command()

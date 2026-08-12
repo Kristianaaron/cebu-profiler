@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.0 — 2026-08-12
+
+Real-bytes derivative-candidate planner (blueprint §24/§25, F10), grounded in
+the measured GLM-5.2 NVFP4 census —
+
+- `planning/realbytes.py`: `account_manifest` aggregates a checkpoint manifest
+  into measured backbone (BF16) vs routed-expert bytes from each tensor's
+  `byte_size` (never `numel × dtype_bytes` — the NVFP4 experts are ~8.19 bpw).
+  `plan_candidates` produces per-envelope derivative candidates (default
+  190/210/225 GB): pruning retention + target expert/backbone bpw, stored and
+  per-node resident bytes, coverage, and a measured-vs-estimated tag (§31:20).
+- `CLI real-candidates <checkpoint_dir>` prints the candidate report against a
+  real mounted checkpoint.
+- Real numbers (GLM-5.2 NVFP4, wired drive): 432.9 GiB measured (experts
+  397.7 GiB @ 8.19 bpw, backbone 35.2 GiB @ 16 bpw). 190 GiB → keep 60% at FP8;
+  210 GiB → keep 70% at FP8; 225 GiB → keep 50% at full 8.19 bpw — the measured
+  echo of the prune-vs-uniform-low-bit thesis.
+- Tests: `test_f20_realbytes` (7) incl. a drive-gated GLM integration; 162 total;
+  ruff + mypy clean.
+
 ## 0.5.0 — 2026-08-12
 
 Six-level atlas hierarchy (v2 §9) — traceable up and down, closing the gap

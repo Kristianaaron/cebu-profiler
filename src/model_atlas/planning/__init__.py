@@ -19,6 +19,13 @@ from model_atlas.planning.memory_planner import (
     assess,
     resident_bytes_by_node,
 )
+from model_atlas.planning.realbytes import (
+    RealAccount,
+    RealCandidate,
+    account_manifest,
+    plan_candidates,
+    report,
+)
 from model_atlas.planning.search import (
     SearchInputs,
     build_candidate,
@@ -46,4 +53,9 @@ __all__ = [
     "build_candidate",
     "expert_src_bytes",
     "generate_candidates",
+    "RealAccount",
+    "RealCandidate",
+    "account_manifest",
+    "plan_candidates",
+    "report",
 ]
