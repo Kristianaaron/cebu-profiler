@@ -360,7 +360,7 @@ _CAP3D_JS = r"""
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
   var SX = 1.7, SY = 2.8, SZ = 2.4, HFE = 0.62;
-  var zoom = 1.0, ry = 0.70, rx = 0.70, OX = 0, OY = 0;   // rotation + centre
+  var zoom = 1.0, spread = 1.0, ry = 0.70, rx = 0.70, OX = 0, OY = 0;   // zoom, layer spread, rotation + centre
   var hover = null, pin = null, focus = 0, selLayer = null;
   var layerOn = []; for (var _l0 = 0; _l0 < nl; _l0++) layerOn.push(true);
   var cells = [];   // { v, pts[8], nz[6], vispolys[], depth, cx, cy }
@@ -388,7 +388,7 @@ _CAP3D_JS = r"""
     if (cw !== W || chh !== H) { W = cw; H = chh; cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); }
     var sc = Math.min((W - 70) / (Math.max(ne * SX, nl * SY, labels.length * SZ) + 4), (H - 70) / (nl * SY + labels.length * SZ + 3)) * 0.95 * zoom;
     function projAll(v, ox0, oy0) {
-      var cx = (v.expert - (ne - 1) / 2) * SX, cy = -(v.layer - (nl - 1) / 2) * SY, cz = (v.label - (labels.length - 1) / 2) * SZ;
+      var cx = (v.expert - (ne - 1) / 2) * SX, cy = -(v.layer - (nl - 1) / 2) * SY * spread, cz = (v.label - (labels.length - 1) / 2) * SZ;
       var rc = rot3(cx, cy, cz), pts = [];
       for (var i = 0; i < 8; i++) { var r = rot3(cx + CORNERS[i][0] * HFE, cy + CORNERS[i][1] * HFE, cz + CORNERS[i][2] * HFE); pts.push([ox0 + r[0] * sc, oy0 + r[1] * sc, r[2] * sc]); }
       return { rc: rc, pts: pts };
@@ -410,52 +410,25 @@ _CAP3D_JS = r"""
   function facePath(pts, f) { return FACES[f].c.map(function (ci) { return pts[ci]; }); }
   function tracePath(poly) { ctx.beginPath(); ctx.moveTo(poly[0][0], poly[0][1]); for (var q = 1; q < 4; q++) ctx.lineTo(poly[q][0], poly[q][1]); ctx.closePath(); }
   function aa(v4) { return Math.max(0, Math.min(1, v4)).toFixed(3); }
-  var BAYER = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
-  // Dense ordered dither on a face — like the reference: small light dots whose
-  // density encodes shade x saliency, over a faint dark base, clipped to the face.
-  function ditherFace(poly, level, active) {
-    ctx.save(); tracePath(poly); ctx.clip();
-    var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9, k;
-    for (k = 0; k < 4; k++) { if (poly[k][0] < x0) x0 = poly[k][0]; if (poly[k][0] > x1) x1 = poly[k][0]; if (poly[k][1] < y0) y0 = poly[k][1]; if (poly[k][1] > y1) y1 = poly[k][1]; }
-    var g = Math.round(22 + 70 * level);                 // solid opaque face grey
-    ctx.fillStyle = 'rgb(' + g + ',' + (g + 3) + ',' + (g + 10) + ')';
-    ctx.fillRect(Math.floor(x0), Math.floor(y0), Math.ceil(x1 - x0), Math.ceil(y1 - y0));
-    // subtle dither so the face stays a solid plate with a soft grain
-    var s = Math.max(2, Math.round((x1 - x0) / 5));        // faint sparse dots
-    var t = Math.max(0, Math.min(15, Math.round(Math.min(1, level) * 9)));
-    ctx.fillStyle = 'rgba(240,244,252,' + aa(0.3 + 0.3 * level) + ')';
-    var col = 0, row = 0;
-    for (var yy = Math.floor(y0); yy < y1; yy += s, col++) {
-      row = 0;
-      for (var xx = Math.floor(x0); xx < x1; xx += s, row++) {
-        if (t > BAYER[col & 3][row & 3]) ctx.fillRect(xx, yy, s, s);
-      }
-    }
-    ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 1.3;
-    ctx.beginPath(); ctx.moveTo(poly[0][0], poly[0][1]); for (var q = 1; q < 4; q++) ctx.lineTo(poly[q][0], poly[q][1]); ctx.closePath(); ctx.stroke();
-    ctx.restore();
-  }
-  function hull(pts) {
-    pts = pts.map(function (p) { return [p[0], p[1]]; }).sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
-    function cross(o, a, b) { return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]); }
-    var lower = [], upper = [];
-    for (var i = 0; i < pts.length; i++) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], pts[i]) <= 0) lower.pop(); lower.push(pts[i]); }
-    for (var j = pts.length - 1; j >= 0; j--) { while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], pts[j]) <= 0) upper.pop(); upper.push(pts[j]); }
-    lower.pop(); upper.pop(); return lower.concat(upper);
-  }
+  // Translucent light cube faces with faint edges; the selected/hovered cube
+  // is much brighter + white double-edge so it clearly stands out.
   function drawCube(cb) {
     var v = cb.v;
     var active = (pin && isOn(v, pin)) || (hover && isOn(v, hover));
-    var hot = 0.22 + 0.78 * v.score;               // saliency brightness
-    // opaque silhouette base so every cube reads as a complete closed solid
-    var hp = hull(cb.pts, 7);
-    if (hp) { ctx.fillStyle = 'rgba(19,23,30,0.97)'; ctx.beginPath(); ctx.moveTo(hp[0][0], hp[0][1]); for (var hi = 1; hi < hp.length; hi++) ctx.lineTo(hp[hi][0], hp[hi][1]); ctx.closePath(); ctx.fill(); }
+    var hot = 0.25 + 0.75 * v.score;
     for (var f = 0; f < 6; f++) {
       if (cb.nz[f] <= 0) continue;
-      var shade = 0.30 + 0.70 * Math.max(0, cb.nz[f]);   // light source shading
-      var level = (active ? 1.5 : 1.15) * shade * hot * (f === 1 ? 1.25 : f === 5 ? 1.0 : 0.72); // top brightest, then front, sides darker
-      ditherFace(facePath(cb.pts, f), Math.min(1, level), active);
-    }  }
+      var shade = 0.3 + 0.7 * Math.max(0, cb.nz[f]);          // face-orientation lighting
+      var a = (active ? 0.5 + 0.4 * hot * shade : 0.05 + 0.20 * hot * shade); // low opacity by default
+      var poly = facePath(cb.pts, f);
+      tracePath(poly);
+      ctx.fillStyle = 'rgba(226,234,246,' + aa(a) + ')';
+      ctx.fill();
+      if (active) { ctx.strokeStyle = 'rgba(255,255,255,0.95)'; ctx.lineWidth = 2; }
+      else { ctx.strokeStyle = 'rgba(205,216,232,' + aa(0.35 * shade) + ')'; ctx.lineWidth = 1; }
+      ctx.stroke();
+    }
+  }
 
   function draw() {
     layout();
@@ -584,6 +557,12 @@ _CAP3D_JS = r"""
   for (var vi = 1; vi < vox.length; vi++) if (vox[vi].score > hi.score) hi = vox[vi];
   focus = hi ? hi.label : 0;
   draw(); renderPanel();
+  (function wireControls() {
+    var zi = document.getElementById('czoomin'), zo = document.getElementById('czoomout'), sp = document.getElementById('cspread');
+    if (zi) zi.addEventListener('click', function () { zoom = Math.min(3, zoom * 1.25); draw(); });
+    if (zo) zo.addEventListener('click', function () { zoom = Math.max(0.4, zoom / 1.25); draw(); });
+    if (sp) sp.addEventListener('input', function () { spread = parseFloat(sp.value); draw(); });
+  })();
 })();
 """
 
@@ -675,6 +654,11 @@ def render_dashboard(data: dict[str, Any]) -> str:
    background-size:48px 48px,48px 48px}}
  .cap3d-canvas{{position:relative;flex:1;min-width:0}}
  canvas#cap3d{{width:100%;aspect-ratio:680/420;height:auto;display:block;touch-action:none;cursor:default;border-radius:6px;background:transparent}}
+ .cap3d-controls{{position:absolute;top:8px;left:8px;z-index:3;display:flex;align-items:center;gap:6px;background:rgba(10,13,19,0.7);border:1px solid #262c38;border-radius:8px;padding:4px 6px}}
+ .cap3d-controls button{{width:26px;height:26px;line-height:1;font-size:17px;color:#e9edf3;background:#12161d;border:1px solid #2a3342;border-radius:6px;cursor:pointer;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
+ .cap3d-controls button:hover{{border-color:#7cc0ff;color:#7cc0ff}}
+ .cap3d-controls .cspread{{display:flex;align-items:center;gap:5px;color:#8a94a6;font-size:11px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;margin:0 4px}}
+ .cap3d-controls input[type=range]{{width:120px;accent-color:#7cc0ff}}
  .cap3d-vig{{position:absolute;inset:0;pointer-events:none;border-radius:6px;background:radial-gradient(ellipse 72% 68% at 50% 48%, transparent 42%, rgba(7,7,10,0.5) 74%, #07070a 100%)}}
  canvas#cap3d.dragging{{cursor:grabbing}}
  .cap3d-panel{{flex:0 0 300px;position:sticky;top:0;align-self:flex-start;background:#0a0c10;border-left:1px solid #262c38;padding-left:12px;max-height:420px;overflow:auto;font-size:12px;color:#cfd6e0}}
@@ -717,6 +701,13 @@ def render_dashboard(data: dict[str, Any]) -> str:
        <canvas id="cap3d"
          role="img"
          aria-label="3D voxel saliency map: x-axis = expert, y-axis = layer, depth = capability label; voxel brightness (grayscale ordered dither) = measured saliency. Interact or read the panel and tables for exact values."></canvas>
+       <div class="cap3d-controls">
+         <button id="czoomout" title="zoom out">−</button>
+         <button id="czoomin" title="zoom in">＋</button>
+         <label class="cspread">layers
+           <input id="cspread" type="range" min="1" max="4" step="0.1" value="1" title="spread the layers apart to hover each expert">
+         </label>
+       </div>
        <div class="cap3d-vig"></div>
      </div>
      <aside class="cap3d-panel" id="cap3d-panel" aria-live="polite">

@@ -27,11 +27,13 @@ Capability tab: monochrome 3D voxel view + sticky detail panel, agent-friendly �
   <0.25 (relative per label). Capability top-scores are normalised per label so
   table and panel agree; fixed `${…}` escaping across the capability/contrast/
   coalition tables so values render.
-- **Complete cubes with dense ordered-dither** (matches the `dither cubes`
-  reference): each voxel is a real 3D cube (all 8 corners + faces), backed by an
-  opaque silhouette, with fully-opaque dithered faces, stronger face edges and
-  bigger cubes (HFE 0.62) so they read as complete solids (vision 10/10). Drag
-  to rotate, zoom limits kept; hover = topmost cube under cursor.
+- **Translucent light cubes + top-left controls**: cubes render as translucent
+  light-grey solids with faint edges and low default opacity so the
+  selected/hovered cube (bright fill + white double-edge) clearly contrasts;
+  all 192 cubes stay visible. A top-left overlay has **zoom −/＋ buttons** and a
+  **"layers" slider** that spreads the layers vertically apart (1×–4×) so
+  hovering/selecting an individual expert is easier. Drag-rotate + scroll-zoom
+  limits kept.
 - **Grid + vignette behind the canvas** (`#07070a` 48px grid + radial vignette
   fading the edges, beneath the right panel, o-cina recipe); the connecting
   sheet-outline was removed so cells read as separate panels.
