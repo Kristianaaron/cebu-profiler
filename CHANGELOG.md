@@ -20,12 +20,17 @@ Capability tab: monochrome 3D voxel view + sticky detail panel, agent-friendly �
 - **Isometric stack of translucent sheet panels, dark mode**: each
   (capability, layer) is a thin translucent sheet panel, and panels stack up in
   a fixed iso view (capabilities/experts on the two diagonals, layers up) on the
-  near-black canvas — no cubes, no outlines. Cell opacity = saliency; the only
-  stroke is a faint sheet edge. Hover = nearest-center among containing top
-  tiles (verified 192/192); hovered/pinned cell edges highlight white. Wheel-zoom only.
-- Canvas sits over a faint 48px grid (`#07070a`, o-cina recipe) with a radial
-  vignette darkening the canvas edges — beneath the right panel — and the
-  connecting sheet-outline was removed so cells read as separate panels.- **Layer filter** on the right panel: L0 / L1 / … / all chips to view each
+  near-black canvas — no cubes, no outlines. Cell opacity = saliency; spacious
+  cells (GAP 0.6) stay disjoint so hover is exact (interior-verified).
+- **Tier tags** on the panel rows and the canonical capability table: a
+  colour-coded tag per score — strong ≥0.75, good ≥0.5, moderate ≥0.25, weak
+  <0.25 (relative per label). Capability top-scores are normalised per label so
+  table and panel agree; fixed `${…}` escaping across the capability/contrast/
+  coalition tables so values render.
+- **Grid + vignette behind the canvas** (`#07070a` 48px grid + radial vignette
+  fading the edges, beneath the right panel, o-cina recipe); the connecting
+  sheet-outline was removed so cells read as separate panels.
+- **Layer filter** on the right panel: L0 / L1 / … / all chips to view each
   layer separately or together, and it filters both the canvas and the panel.
 - **Hover = the tile under the cursor**: point-in-polygon over each tile's
   top rhombus; where translucent overlapped tiles both contain the cursor it

@@ -54,10 +54,12 @@ def _capability_rows(model: MiniMoE, saliency: SaliencyAccumulator) -> list[dict
     rows = []
     for label in list(CapabilityLabel)[:12]:
         ranked = saliency.rank(label, topk=5)
+        ranked = [(lay, e, s) for lay, e, s in ranked if s > 0]
+        mx = max((s for _, _, s in ranked), default=1)
         rows.append(
             {
                 "label": label.value,
-                "top": [{"layer": lay, "expert": e, "score": round(s, 5)} for lay, e, s in ranked],
+                "top": [{"layer": lay, "expert": e, "score": round(s / mx, 3)} for lay, e, s in ranked],
             }
         )
     return rows
@@ -478,12 +480,14 @@ _CAP3D_JS = r"""
   }
 
   function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+  function tier(sc) { if (sc >= 0.75) return 'strong'; if (sc >= 0.5) return 'good'; if (sc >= 0.25) return 'moderate'; return 'weak'; }
+  function tierBadge(v) { return '<span class="p-tier ' + tier(v.score) + '">' + tier(v.score) + '</span>'; }
   function bar(v) { return '<span class="p-bar"><i style="width:' + Math.round(v.score * 100) + '%"></i></span> ' + Math.round(v.score * 100) + '%'; }
   function rowHtml(v) {
     var isSel = pin && isOn(v, pin);
     var isHov = (!pin) && hover && isOn(v, hover);
     return '<div class="p-row' + (isSel ? ' sel' : isHov ? ' hov' : '') +
-      '" onclick="window.capSel(' + v.label + ',' + v.layer + ',' + v.expert + ')">E' + v.expert + ' ' + bar(v) + '</div>';
+      '" onclick="window.capSel(' + v.label + ',' + v.layer + ',' + v.expert + ')">E' + v.expert + ' ' + bar(v) + ' ' + tierBadge(v) + '</div>';
   }
   function filterHtml() {
     var h = '<div class="p-filt"><span class="p-filt-l">layers</span>';
@@ -664,6 +668,11 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .cap3d-panel .p-row.sel{{background:#1d2430;color:#fff}}
  .cap3d-panel .p-bar{{flex:0 0 42px;height:5px;background:#1a1f28;border-radius:3px;overflow:hidden}}
  .cap3d-panel .p-bar i{{display:block;height:100%;background:#e9edf3}}
+ .cap3d-panel .p-tier{{flex:0 0 auto;font-size:9.5px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;text-transform:uppercase;letter-spacing:.04em;padding:1px 5px;border-radius:3px;border:1px solid currentColor;opacity:.9}}
+ .cap3d-panel .p-tier.strong{{color:#8fe3a0}}
+ .cap3d-panel .p-tier.good{{color:#9fc4ff}}
+ .cap3d-panel .p-tier.moderate{{color:#e2cf7f}}
+ .cap3d-panel .p-tier.weak{{color:#7d8593}}
 </style></head><body>
 <div class="layout">
 <nav class="side">{tab_html}</nav>
@@ -720,11 +729,12 @@ def render_dashboard(data: dict[str, Any]) -> str:
  function cols(headers){{return "<thead><tr>"+headers.map(h=>`<th scope="col">${{h}}</th>`).join("")+"</tr></thead>";}}
  function fill(id, headers, rows){{document.getElementById(id).innerHTML = "<table><caption>"+(headers.join(' · '))+"</caption>"+cols(headers)+el(null,rows)+"</table>";}}
 
- fill('t-capability', ['label','top layer/expert (score)'],
-   DATA.capability.map(r=>({{label:r.label, top:r.top.map(x=>`L$x{{x.layer}}E$x{{x.expert}} ($x{{x.score}})`).join(' · ')}})));
+ function tierOf(s){{return s>=0.75?'strong':s>=0.5?'good':s>=0.25?'moderate':'weak';}}
+ fill('t-capability', ['label','top layer/expert (score · tier)'],
+   DATA.capability.map(r=>({{label:r.label, top:r.top.map(x=>`L${{x.layer}}E${{x.expert}} (${{x.score}}) ${{tierOf(x.score)}}`).join(' · ')}})));
  fill('t-contrast', ['label','top success−failure (delta)'],
-   DATA.contrast.map(r=>({{label:r.label, top:r.top.map(x=>`L$x{{x.layer}}E$x{{x.expert}} ($x{{x.delta}})`).join(' · ')}})));
- fill('t-coalition', ['pair','coactivity'], DATA.coalitions.map(r=>({{pair:`L0E$x{{r.pair[0]}} / L0E$x{{r.pair[1]}}`, coactivity:r.coactivity}})));
+   DATA.contrast.map(r=>({{label:r.label, top:r.top.map(x=>`L${{x.layer}}E${{x.expert}} (${{x.delta}})`).join(' · ')}})));
+ fill('t-coalition', ['pair','coactivity'], DATA.coalitions.map(r=>({{pair:`L0E${{r.pair[0]}} / L0E${{r.pair[1]}}`, coactivity:r.coactivity}})));
  fill('t-path', ['count','success rate','signature'], DATA.paths.map(r=>({{count:r.count, 'success rate':r.success_rate, signature:r.signature.map(s=>s.join(',')).join(' | ')}})));
  fill('t-compression', ['layer/expert','format','bits','recon','drift','repair'],
    DATA.compression.flatMap(c=>c.points.map(p=>({{'layer/expert':`L${{c.layer}}E${{c.expert}}`, format:p.format, bits:p.bits, recon:p.recon, drift:p.drift, repair:p.repair}}))));
