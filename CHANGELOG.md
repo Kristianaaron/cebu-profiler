@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.8.2 — 2026-08-12
+
+Capability tab: interactive 3D voxel view + agent-friendly semantics —
+
+- `_capability_voxels`: compact per-(label, layer, expert) voxel payload
+  (score normalised per label; bounded by geometry).
+- Vanilla, dependency-free 3D voxel canvas (no three.js): drag-to-rotate,
+  wheel-zoom, hover tooltip. **Render-on-interaction only** — no animation
+  loop, ~200 voxels, so it stays compute-light on laptops.
+- Agent-friendly: tables now emit `<caption>` + `th scope="col"`; a
+  `<script type="application/json" id="cap3d-json">` block exposes the raw
+  structured data, and the floating labels table + canonical table carry the
+  ground truth (canvas is role=img progressive enhancement).
+- Tests: test_f14 asserts the voxel payload; dashboard JS validated in node
+  (syntax + runtime: 192 voxels drawn, tables render).
+
 ## 0.8.1 — 2026-08-12
 
 Native Atlas↔Eval bridge: eval-lab's Atlas Lab now natively consumes the full

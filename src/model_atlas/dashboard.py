@@ -63,6 +63,30 @@ def _capability_rows(model: MiniMoE, saliency: SaliencyAccumulator) -> list[dict
     return rows
 
 
+def _capability_voxels(model: MiniMoE, saliency: SaliencyAccumulator) -> dict[str, Any]:
+    """Compact 3D voxel payload for the Capability view.
+
+    One voxel per scored (label, layer, expert) cell, score normalised per label
+    to 0..1. Bounded by the geometry (2*8=16 cells/label), so the renderer stays
+    tiny and cheap to draw.
+    """
+    labels = [lbl.value for lbl in list(CapabilityLabel)[:12]]
+    n_layers = len(model.layers)
+    n_exp = model.n_exp
+    voxels: list[dict[str, Any]] = []
+    for li, label in enumerate(list(CapabilityLabel)[:12]):
+        ranked = saliency.rank(label, topk=n_layers * n_exp)
+        ranked = [(lay, e, s) for lay, e, s in ranked if s > 0]
+        if not ranked:
+            continue
+        mx = max(s for _, _, s in ranked)
+        for lay, e, s in ranked:
+            voxels.append(
+                {"label": li, "layer": lay, "expert": e, "score": round(s / mx, 3)}
+            )
+    return {"labels": labels, "n_layers": n_layers, "n_experts": n_exp, "voxels": voxels}
+
+
 def _contrast_rows(model: MiniMoE, contrast: Any) -> list[dict[str, Any]]:
     rows = []
     for label in list(CapabilityLabel)[:12]:
@@ -299,6 +323,7 @@ def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
             "seed": seed,
         },
         "capability": _capability_rows(model, saliency),
+        "capability3d": _capability_voxels(model, saliency),
         "contrast": _contrast_rows(model, contrast),
         "coalitions": coalitions,
         "paths": paths,
@@ -312,12 +337,111 @@ def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
     }
 
 
+_CAP3D_JS = r"""
+// Capability 3D voxel view — dependency-free, render-on-interaction only.
+// No animation loop (so it stays cool on a laptop): draws once, then on
+// drag / wheel / resize. Agent-friendly: the tables + #cap3d-json carry the
+// ground truth; this canvas is a progressive enhancement (role=img).
+(function () {
+  var cv = document.getElementById('cap3d');
+  if (!cv || !cv.getContext || !DATA.capability3d || !DATA.capability3d.voxels) return;
+  var ctx = cv.getContext('2d');
+  var V = DATA.capability3d, labels = V.labels, nl = V.n_layers, ne = V.n_experts, vox = V.voxels;
+  var W = cv.width, H = cv.height;
+  var ry = 0.8, rx = 0.55, zoom = 1.0, hoverI = -1;
+  var proj = [];
+
+  function rot3(x, y, z) {
+    var cy = Math.cos(ry), sy = Math.sin(ry), cx = Math.cos(rx), sx = Math.sin(rx);
+    var px = x * cy + z * sy, pz = -x * sy + z * cy, py = y;
+    var y2 = py * cx - pz * sx, z2 = py * sx + pz * cx;
+    return [px, y2, z2];
+  }
+  var span = Math.max(ne, nl, labels.length) + 2;
+  var scaleNow = function () { return (W / span) * 0.78 * zoom; };
+
+  function project(v) {
+    var sc = scaleNow();
+    var r = rot3((v.expert - (ne - 1) / 2) * 1.25, -(v.layer - (nl - 1) / 2) * 1.25, (v.label - (labels.length - 1) / 2) * 1.25);
+    return [W / 2 + r[0] * sc, H / 2 + r[1] * sc, r[2], v];
+  }
+  function recompute() { proj = vox.map(project); }
+
+  function fillColour(score, depth) {
+    var t = Math.max(0, Math.min(1, score));
+    var h = 230 - 210 * t;
+    var l = 54 - Math.abs(depth) * 14;
+    return 'hsl(' + Math.round(h) + ',85%,' + Math.round(l) + '%)';
+  }
+  function draw() {
+    recompute();
+    ctx.clearRect(0, 0, W, H);
+    var sc = scaleNow();
+    var order = proj.map(function (p, i) { return [p[2], i]; }).sort(function (a, b) { return a[0] - b[0]; });
+    // depth-sorted: draw far voxels first (painter's order)
+    for (var k = 0; k < order.length; k++) {
+      var p = proj[order[k][1]];
+      var s = Math.max(2, sc * 0.62);
+      // dark base (volume) offset toward the viewer's lower-right
+      ctx.fillStyle = 'rgba(10,12,16,0.65)';
+      ctx.fillRect(p[0] - s / 2 + s * 0.28, p[1] - s / 2 + s * 0.28, s, s);
+      // top face (colour by score, brightness by depth)
+      ctx.fillStyle = fillColour(p[3].score, p[2]);
+      ctx.fillRect(p[0] - s / 2, p[1] - s / 2, s, s);
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(p[0] - s / 2, p[1] - s / 2, s, s);
+      if (hoverI === order[k][1]) {
+        ctx.strokeStyle = '#fff'; ctx.strokeRect(p[0] - s / 2 - 1, p[1] - s / 2 - 1, s + 2, s + 2);
+      }
+    }
+    // axis hints (light, informative)
+    ctx.fillStyle = 'rgba(150,158,174,0.7)'; ctx.font = '11px system-ui';
+    ctx.textAlign = 'left'; ctx.fillText('experts (x) / layers (y) / labels (depth)', 8, H - 6);
+    ctx.textAlign = 'right';
+    for (var l = 0; l < Math.min(nl, 4); l++) {
+      var lc = project({ expert: Math.floor(ne / 2), layer: l, label: 0, score: 1 });
+      ctx.fillText('L' + l, lc[0], lc[1] - 6);
+    }
+    ctx.textAlign = 'left';
+  }
+
+  cv.addEventListener('pointerdown', function (e) { dragging = true; lastX = e.clientX; lastY = e.clientY; cv.classList.add('dragging'); cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener('pointermove', function (e) {
+    if (dragging) {
+      ry += (e.clientX - lastX) * 0.01; rx += (e.clientY - lastY) * 0.01;
+      rx = Math.max(0.05, Math.min(1.4, rx)); lastX = e.clientX; lastY = e.clientY; draw();
+    } else {
+      // hover pick: nearest voxel in screen space (cheap on this small set)
+      var bx = e.offsetX, by = e.offsetY, best = -1, bd = 1e9;
+      for (var i = 0; i < proj.length; i++) {
+        var dx = proj[i][0] - bx, dy = proj[i][1] - by, d = dx * dx + dy * dy;
+        if (d < bd) { bd = d; best = i; }
+      }
+      if (best !== hoverI) { hoverI = best; draw(); }
+      var v = proj[best] ? proj[best][3] : null;
+      cv.title = v ? (labels[v.label] + ' · L' + v.layer + 'E' + v.expert + ' · saliency ' + v.score) : '';
+    }
+  });
+  function endDrag(e) { dragging = false; cv.classList.remove('dragging'); }
+  cv.addEventListener('pointerup', endDrag); cv.addEventListener('pointercancel', endDrag);
+  cv.addEventListener('wheel', function (e) { e.preventDefault(); zoom *= (e.deltaY < 0 ? 1.08 : 0.92); zoom = Math.max(0.4, Math.min(3, zoom)); draw(); }, { passive: false });
+  window.addEventListener('resize', function () { recompute(); draw(); });
+
+  var dragging = false, lastX = 0, lastY = 0;
+  try { draw(); } catch (e) { /* keep the page usable if 2D context is restricted */ }
+})();
+"""
+
+
 _TAB_TEMPLATE = """<div class="tab" data-tab="{id}"><svg viewBox="0 0 24 24" width="15" height="15" {_LUCIDE} style="flex:0 0 auto">{icon}</svg><span>{title}</span></div>"""
+
 
 
 def render_dashboard(data: dict[str, Any]) -> str:
     """Return a self-contained interactive HTML page embedding measured data."""
     payload = json.dumps(data).replace("</", "<\\/")
+    cap3d_json = json.dumps(data.get("capability3d", {})).replace("</", "<\\/")
     nav: list[dict[str, Any]] = [
         {
             "section": "Overview",
@@ -389,6 +513,16 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .navlink:hover{{color:#a8d6ff}}
  .stat{{display:inline-block;background:#1d2430;border:1px solid #2a3342;border-radius:6px;padding:10px 14px;margin:4px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
  .stat .k{{color:#8a94a6;font-size:11px;display:block}} .stat .v{{font-size:18px;color:#d5dbe3}}
+ .cap3d-wrap{{position:relative;background:#0a0c10;border:1px solid #262c38;border-radius:8px;padding:10px 10px 6px}}
+ canvas#cap3d{{width:100%;height:auto;display:block;touch-action:none;cursor:grab;border-radius:6px;background:radial-gradient(circle at 50% 40%,#12161d,#0a0c10)}}
+ canvas#cap3d.dragging{{cursor:grabbing}}
+ .cap3d-legend{{display:flex;align-items:center;gap:8px;color:#8a94a6;font-size:11px;margin-top:6px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
+ .cap3d-legend .ramp{{flex:1;height:8px;border-radius:4px;background:linear-gradient(90deg,#3b82f6,#eab308,#ef4444)}}
+ .float-table{{margin-top:12px;background:#12161d;border:1px solid #262c38;border-radius:8px;padding:10px 14px}}
+ .float-table h3{{margin:0 0 6px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;color:#aab3c0}}
+ .float-table table{{margin-top:0}}
+ th[scope]{{color:#8a94a6;font-weight:600}}
+ table caption{{caption-side:top;text-align:left;color:#5d6673;font-size:11px;padding:2px 0 4px}}
 </style></head><body>
 <div class="layout">
 <nav class="side">{tab_html}</nav>
@@ -399,7 +533,16 @@ def render_dashboard(data: dict[str, Any]) -> str:
  <div class="panel" id="panel-summary">
    <p>End-to-end parent→derivative Atlas over a genuine synthetic mini-MoE. Everything below is computed by the same measured code paths as the test suite. This is the <strong>Atlas Profile Platform</strong>: use <em>Profiling</em> to understand the model, <em>Quantization &amp; Fit</em> to shrink/score it, and the <strong>Eval Harness</strong> link (bottom of the nav) for independent benchmarking.</p>
  </div>
- <div class="panel" id="panel-capability"><p class="note">Top layer/expert by mean REAP saliency per capability label (measured).</p><table id="t-capability"></table></div>
+ <div class="panel" id="panel-capability">
+   <p class="note">3D voxel view: one voxel per scored <code>(layer, expert)</code> cell, capability labels run along the depth axis; colour = measured saliency (per-label normalised). <strong>Drag to rotate · scroll to zoom · hover for values.</strong> The tables below are the canonical, agent-readable form — no vision needed to read the data.</p>
+   <div class="cap3d-wrap">
+     <canvas id="cap3d" width="680" height="420" role="img" aria-label="3D voxel saliency map: x-axis = expert, y-axis = layer, depth = capability label; voxel colour = measured saliency. Exact values are in the tables below."></canvas>
+     <div class="cap3d-legend">low <span class="ramp"></span> high</div>
+   </div>
+   <div class="float-table"><h3>Capability labels</h3><table id="t-cap3d-labels"></table></div>
+   <script type="application/json" id="cap3d-json">{cap3d_json}</script>
+   <table id="t-capability"></table>
+ </div>
  <div class="panel" id="panel-contrast"><p class="note">success − failure saliency per label (measured); positive = experts more salient on successes.</p><table id="t-contrast"></table></div>
  <div class="panel" id="panel-coalition"><p class="note">Co-routed expert pairs (count) at layer 0 (measured).</p><table id="t-coalition"></table></div>
  <div class="panel" id="panel-path"><p class="note">Most frequent cross-layer route signatures with success rate (measured).</p><table id="t-path"></table></div>
@@ -427,8 +570,17 @@ def render_dashboard(data: dict[str, Any]) -> str:
  function el(t, rows){{ if(!rows||!rows.length){{return "<tr><td class='note'>no data</td></tr>";}}
    return rows.map(r=>{{let tds = Object.entries(r).map(([k,v]) => {{let s = Array.isArray(v)?v.map(x=>`<span class='chip'>${{x}}</span>`).join(''):(typeof v==='boolean'?(v?'<span class=green>yes</span>':'<span class=red>no</span>'):v);
      return `<td>${{s}}</td>`}}).join(''); return `<tr>${{tds}}</tr>`;}}).join("");}}
- function cols(headers){{return "<thead><tr>"+headers.map(h=>`<th>${{h}}</th>`).join("")+"</tr></thead>";}}
- function fill(id, headers, rows){{document.getElementById(id).innerHTML = "<table>"+cols(headers)+el(null,rows)+"</table>";}}
+ function cols(headers){{return "<thead><tr>"+headers.map(h=>`<th scope="col">${{h}}</th>`).join("")+"</tr></thead>";}}
+ function fill(id, headers, rows){{document.getElementById(id).innerHTML = "<table><caption>"+(headers.join(' · '))+"</caption>"+cols(headers)+el(null,rows)+"</table>";}}
+
+ // Floating capability-labels panel (canonical, agent-readable).
+ fill('t-cap3d-labels', ['capability label','top layer/expert','score','voxels'],
+   DATA.capability3d.labels.map((lab,li)=>{{
+     const vx = DATA.capability3d.voxels.filter(v=>v.label===li).sort((a,b)=>b.score-a.score);
+     const top = vx[0] ? `L$x{{vx[0].layer}}E$x{{vx[0].expert}}` : '—';
+     return {{'capability label':lab, 'top layer/expert': top, 'score': vx[0] ? vx[0].score : '—', 'voxels': vx.length}};
+   }}));
+
 
  fill('t-capability', ['label','top layer/expert (score)'],
    DATA.capability.map(r=>({{label:r.label, top:r.top.map(x=>`L$x{{x.layer}}E$x{{x.expert}} ($x{{x.score}})`).join(' · ')}})));
@@ -460,6 +612,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
    DATA.reality.candidates.map(r=>({{'envelope':r.envelope+' GiB','keep':(r.keep*100)+'%','precision':r.precision,
      'bpw':r.bpw,'stored':r.stored,'resident A':r.resident_a,'resident B':r.resident_b, 'risk':r.risk}})));
 
+ {_CAP3D_JS}
  document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{{
    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
    document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));

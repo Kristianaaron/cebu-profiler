@@ -9,6 +9,8 @@ def test_build_dashboard_data_has_sections():
     data = build_dashboard_data(seed=0)
     assert data["meta"]["arch"] == "k3-mini"
     assert data["capability"]  # per-label expert rankings
+    assert "voxels" in data["capability3d"] and data["capability3d"]["voxels"]
+    assert data["capability3d"]["labels"]
     assert data["contrast"]
     assert data["coalitions"]
     assert data["paths"]
