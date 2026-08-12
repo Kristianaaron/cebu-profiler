@@ -440,8 +440,9 @@ _CAP3D_JS = r"""
       var isSel = pin && isOn(v, pin), isHov = hover && isOn(v, hover);
       var alpha = Math.max(0.05, 0.14 + 0.7 * v.score);
       if (isSel || isHov) {
-        fillQuad(top, 'rgba(226,236,250,' + aa(Math.min(1, alpha + 0.4)) + ')');
-        ctx.strokeStyle = isSel ? '#ffffff' : 'rgba(255,255,255,0.9)'; ctx.lineWidth = 1.5; strokeQuad(top);
+        fillQuad(top, 'rgba(236,244,255,' + aa(Math.min(1, alpha + 0.5)) + ')');
+        ctx.strokeStyle = isSel ? '#ffffff' : 'rgba(255,255,255,0.95)'; ctx.lineWidth = 2; strokeQuad(top);
+        if (!isSel && isHov) { ctx.strokeStyle = 'rgba(120,200,255,0.9)'; ctx.lineWidth = 1; strokeQuad(top); } // inner bright accent
       } else {
         fillQuad(top, 'rgba(216,228,246,' + aa(alpha) + ')');
       }
