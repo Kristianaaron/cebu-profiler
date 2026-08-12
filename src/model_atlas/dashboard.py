@@ -447,8 +447,6 @@ _CAP3D_JS = r"""
       ctx.fillText('L' + la, lp[la].x / lp[la].n - 34, lp[la].y / lp[la].n);
     }
     ctx.textBaseline = 'alphabetic';
-    ctx.fillStyle = 'rgba(163,163,163,0.85)'; ctx.font = '11px system-ui'; ctx.textAlign = 'left';
-    ctx.fillText('experts (x) · layers (y) · capabilities (z) · dither = saliency · drag to rotate · scroll to zoom', 6, H - 6);
   }
 
   function inPoly(px, py, poly) {
@@ -695,10 +693,10 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .cap3d-panel .p-bar{{flex:0 0 42px;height:5px;background:#202020;border-radius:3px;overflow:hidden}}
  .cap3d-panel .p-bar i{{display:block;height:100%;background:#eeeeee}}
  .cap3d-panel .p-tier{{flex:0 0 auto;margin-left:auto;font-size:9.5px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;text-transform:uppercase;letter-spacing:.04em;padding:1px 5px;border-radius:3px;border:1px solid currentColor;opacity:.9}}
- .cap3d-panel .p-tier.strong{{color:#ededed}}
- .cap3d-panel .p-tier.good{{color:#cccccc}}
- .cap3d-panel .p-tier.moderate{{color:#a2a2a2}}
- .cap3d-panel .p-tier.weak{{color:#656565}}
+ .cap3d-panel .p-tier.strong{{color:#e2b45c}}
+ .cap3d-panel .p-tier.good{{color:#c6cdd8}}
+ .cap3d-panel .p-tier.moderate{{color:#b08e6b}}
+ .cap3d-panel .p-tier.weak{{color:#d0686b}}
 </style></head><body>
 <div class="layout">
 <nav class="side">{tab_html}</nav>
@@ -710,7 +708,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
    <p>End-to-end parent→derivative Atlas over a genuine synthetic mini-MoE. Everything below is computed by the same measured code paths as the test suite. This is the <strong>Atlas Profile Platform</strong>: use <em>Profiling</em> to understand the model, <em>Quantization &amp; Fit</em> to shrink/score it, and the <strong>Eval Harness</strong> link (bottom of the nav) for independent benchmarking.</p>
  </div>
  <div class="panel" id="panel-capability">
-   <p class="note">Experts × layers saliency map: one dithered cube per scored <code>(layer, expert)</code> cell, capability labels run along the depth axis; brightness = measured saliency (per-label normalised). <strong>Drag to rotate · scroll to zoom · hover for values.</strong></p>
+   <p class="note">Experts × layers saliency map: one dithered cube per scored <code>(layer, expert)</code> cell, capability labels run along the depth axis; brightness = measured saliency (per-label normalised).</p>
    <div class="cap3d-wrap">
      <div class="cap3d-canvas">
        <canvas id="cap3d"
@@ -726,7 +724,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
        <div class="cap3d-vig"></div>
      </div>
      <aside class="cap3d-panel" id="cap3d-panel" aria-live="polite">
-       <p class="mut">Hover a voxel to inspect · click to pin · drag to rotate · scroll to zoom.</p>
+       <p class="mut">Hover a voxel to inspect · click to pin.</p>
      </aside>
    </div>
    <script type="application/json" id="cap3d-json">{cap3d_json}</script>
