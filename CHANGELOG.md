@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.0 — 2026-08-12
+
+Six-level atlas hierarchy (v2 §9) — traceable up and down, closing the gap
+where only the L1 ownership layer existed —
+
+- `atlas/hierarchy.py`: `AtlasLevel` (weights → units → experts → coalitions →
+  pathways → behaviour), `HierarchyMap` with up (`ancestors` / `behaviours_of`)
+  and down (`descendants` / `project_down`) traceability, and a measured
+  `prevalence = #behaviours supported` signal per contributor.
+- `build_hierarchy(model, samples)`: builds all six levels from real forwards —
+  expert/channel aggregates (L1–L3), per-layer coalitions from measured path
+  signatures (L4), cross-layer pathways (L5), and per-label success behaviours
+  (L6). Every node tagged `measured`; `validate()` enforces adjacency + no
+  dangling refs.
+- Wired into the §27 machine-readable contract: `hierarchy_map.json` is now a
+  guaranteed artifact at the enhanced evidence level and is emitted by
+  `export_run()`.
+- Tests: `test_f19_hierarchy` (8) + exported-artifact coverage in
+  `test_atlas_export`; 155 total; ruff + mypy clean.
+
 ## 0.4.0 — 2026-08-07
 
 Complete the offline-buildable blueprint phase-2 modules (§8.1/8.3/8.4, §10, Priority 4#5, §17 Control C) —

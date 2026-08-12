@@ -18,6 +18,7 @@ from typing import Any
 
 from model_atlas.atlas.coalition import coactivation_map
 from model_atlas.atlas.compress import run_compression_pipeline
+from model_atlas.atlas.hierarchy import build_hierarchy
 from model_atlas.atlas.reap import SaliencyAccumulator, run_calibration
 from model_atlas.atlas.runtime import MiniMoE
 from model_atlas.builder import build_derivative, register_derivative
@@ -174,6 +175,7 @@ def export_run(
         "layer_saliency.json",
         "plans.json",
         "compression_manifest.json",
+        "hierarchy_map.json",
     ]
 
     (run_dir / "layer_saliency.json").write_text(
@@ -190,6 +192,14 @@ def export_run(
     )
     (run_dir / "compression_manifest.json").write_text(
         compression.model_dump_json(indent=2)
+    )
+
+    # §27 hierarchy artifact: the six-level atlas map (v2 §9) built from the
+    # same measured calibration corpus — traceable up (weights→behaviour) and
+    # down (behaviour→weights).
+    hierarchy = build_hierarchy(model, corpus, top_k=_TOP_K)
+    (run_dir / "hierarchy_map.json").write_text(
+        json.dumps(hierarchy.to_dict(), indent=2, sort_keys=True)
     )
 
     if build:

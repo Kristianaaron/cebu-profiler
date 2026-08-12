@@ -33,12 +33,26 @@ def test_export_writes_parseable_run_files(tmp_path):
         "layer_saliency.json",
         "plans.json",
         "compression_manifest.json",
+        "hierarchy_map.json",
     ]
     for fname in fnames:
         assert (run_dir / fname).exists(), fname
         assert isinstance(_read_json(run_dir / fname), (list, dict))
-    n_extra = len(list(run_dir.iterdir())) - 4
-    assert n_extra == 0  # no build -> exactly the four base files
+    n_extra = len(list(run_dir.iterdir())) - len(fnames)
+    assert n_extra == 0  # no build -> exactly the five base files
+
+
+def test_export_writes_parseable_hierarchy_map(tmp_path):
+    _write_fixture_corpus(tmp_path)
+    result = export_run(
+        str(tmp_path / "out"), eval_lab_root=str(tmp_path / "eval_lab"), seed=1, keep_per_layer=3
+    )
+    run_dir = Path(result["run_dir"])
+    hm = _read_json(run_dir / "hierarchy_map.json")
+    assert hm["levels"] == ["weights", "units", "experts", "coalitions", "pathways", "behaviour"]
+    for lv in hm["levels"]:
+        assert hm["counts"][lv] > 0, f"empty level {lv}"
+    assert hm["counts"]["units"] >= hm["counts"]["experts"]
 
 
 def test_export_writes_valid_compression_manifest(tmp_path):
