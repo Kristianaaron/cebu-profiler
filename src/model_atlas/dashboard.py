@@ -650,7 +650,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .layout{{display:flex;min-height:100vh}}
  .col{{flex:1;display:flex;flex-direction:column;min-width:0}}
  nav.side{{width:200px;flex:0 0 200px;display:flex;flex-direction:column;gap:2px;background:#161a22;border-right:1px solid #262c38;padding:14px 10px;position:sticky;top:0;height:100vh;overflow-y:auto;box-sizing:border-box}}
- nav.side .tab{{display:flex;align-items:center;gap:9px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;padding:8px 10px;cursor:pointer;color:#aab3c0;border-radius:6px}}
+ nav.side .tab{{display:flex;align-items:center;gap:9px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:16px;padding:8px 10px;cursor:pointer;color:#aab3c0;border-radius:6px}}
  nav.side .tab svg{{flex:0 0 auto}}
  nav.side .tab:hover{{background:#1d2430}}
  nav.side .tab.active{{color:#7cc0ff;background:#1d2430}}
