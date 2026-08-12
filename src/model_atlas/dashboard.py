@@ -339,12 +339,13 @@ def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
 
 _CAP3D_JS = r"""
 // Capability 3D voxel view — dependency-free, render-on-interaction only.
-// FIXED stacked-sheet layout (no rotation UI). Each capability label is a
-// column; within a column the layers (L0, L1, ...) are translucent sheets
-// stacked vertically. Each sheet is a row of expert cells whose fill opacity
-// encodes saliency. Because every cell is an axis-aligned rectangle that never
-// overlaps another on screen, hover is a trivial, exact hit-test — like a 2D
-// button. Hovered/pinned cell's edges highlight.
+// FIXED isometric (3D POV) stacked-sheet view, no rotation UI. Each
+// capability L is a diamond-stack column; experts E run along one diagonal,
+// capabilities along the other, and layers l stack upward (vertical). Every
+// voxel is a translucent isometric tile plus a shaded side face so stacks read
+// as 3D. Each cell's TOP diamond projects to a fixed screen parallelogram
+// disjoint from every other top diamond => hover stays exact/unambiguous.
+// Wheel zooms. (No drag-rotate.)
 (function () {
   var cv = document.getElementById('cap3d');
   if (!cv || !cv.getContext || !DATA.capability3d || !DATA.capability3d.voxels) return;
@@ -356,71 +357,101 @@ _CAP3D_JS = r"""
   var ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  var zoom = 1.0;
+  var zoom = 1.0, S = 6, T = S, du0 = S * 0.87, dw0 = S * 0.5, OX = 0, OY = 0;   // iso params
   var hover = null, pin = null, focus = 0, selLayer = null;
   var layerOn = []; for (var _l0 = 0; _l0 < nl; _l0++) layerOn.push(true);
-  var cells = [];   // { v, x, y, w, h, alpha }
+  var cells = [];   // { v, top: [4 pts screen], side: [4 pts screen] }
 
-  // Build the fixed layout: one translucent sheet per (label, layer), stacked
-  // into columns. All rectangles axis-aligned and screen-disjoint => exact hit.
+  // Isometric rhombus tile for cell (E,L,l): perfect lattice tiling via two
+  // basis vectors, vE = one expert step (down-right), vL = one capability step
+  // (down-left). Layer l shifts the whole tile up by l*T so stacks are vertical.
+  // Isometric RHOMBUS tile for cell (E,L,l) — a true tiling parallelogram
+  // (translation lattice) spanned by expert step vE=(du,dw) and capability
+  // step vL=(-du,dw); layer l lifts it by l*T so stacks are vertical.
+  function tile(E, L, l) {
+    var x = (E - L) * du0, y = (E + L) * dw0 - l * T;
+    return [
+      [x - du0, y + dw0],   // a + vL
+      [x, y],               // a
+      [x + du0, y + dw0],   // a + vE
+      [x, y + 2 * dw0]      // a + vE + vL
+    ];
+  }
+  // Vertical wall under the tile's left +front edge down to the next layer.
+  function side(E, L, l) {
+    var a = tile(E, L, l), b = tile(E, L, l + 1);
+    return [[a[0][0], a[0][1]], [a[3][0], a[3][1]], [b[3][0], b[3][1]], [b[0][0], b[0][1]]];
+  }
   function layout() {
-    var pad = 16, gap = 18, liGap = 6;
-    var ncol = labels.length;
-    var colW = (W - 2 * pad - (ncol - 1) * gap) / ncol * zoom * 0.9;
-    var cellW = colW / ne;
-    var cellH = cellW * 1.05;
-    var stackH = nl * cellH + (nl - 1) * liGap;
-    var top0 = H / 2 - stackH / 2;
+    var sc2 = Math.min((W - 48) / ((ne + labels.length) * 0.87 + 2), (H - 56) / (nl + (ne + labels.length) * 0.55));
+    S = sc2; du0 = S * 0.87; dw0 = S * 0.5; T = S * 1.15;
+    // bounds of all top tiles + side faces (origin 0,0)
+    var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    function scan(pt) { if (pt[0] < x0) x0 = pt[0]; if (pt[0] > x1) x1 = pt[0]; if (pt[1] < y0) y0 = pt[1]; if (pt[1] > y1) y1 = pt[1]; }
+    for (var li = 0; li < labels.length; li++) {
+      for (var ly = 0; ly < nl; ly++) {
+        if (!layerOn[ly]) continue;
+        for (var ex = 0; ex < ne; ex++) {
+          var t = tile(ex, li, ly); for (var q = 0; q < 4; q++) scan(t[q]);
+          var s2 = side(ex, li, ly); for (var q2 = 0; q2 < 4; q2++) scan(s2[q2]);
+        }
+      }
+    }
+    OX = W / 2 - (x0 + x1) / 2; OY = H / 2 - (y0 + y1) / 2;
+    function move(pts, ox, oy) { var o = []; for (var i = 0; i < pts.length; i++) o.push([pts[i][0] + ox, pts[i][1] + oy]); return o; }
     cells = [];
-    for (var label = 0; label < ncol; label++) {
-      var colX = pad + label * (colW + gap);
-      for (var layer = 0; layer < nl; layer++) {
-        if (!layerOn[layer]) continue;
-        var x = colX, y = top0 + layer * (cellH + liGap);
-        for (var e = 0; e < ne; e++) {
-          var cell = { v: { label: label, layer: layer, expert: e } };
-          for (var k = 0; k < vox.length; k++) if (vox[k].label === label && vox[k].layer === layer && vox[k].expert === e) { cell.v = vox[k]; }
-          cell.x = x + e * cellW; cell.y = y; cell.w = cellW; cell.h = cellH;
-          cell.alpha = Math.min(1, 0.28 + 0.72 * cell.v.score);
-          cells.push(cell);
+    for (var label2 = 0; label2 < labels.length; label2++) {
+      for (var layer2 = 0; layer2 < nl; layer2++) {
+        if (!layerOn[layer2]) continue;
+        for (var e2 = 0; e2 < ne; e2++) {
+          var v2 = vox[0];
+          for (var k2 = 0; k2 < vox.length; k2++) if (vox[k2].label === label2 && vox[k2].layer === layer2 && vox[k2].expert === e2) { v2 = vox[k2]; break; }
+          var tp = move(tile(e2, label2, layer2), OX, OY);
+          cells.push({ v: v2, top: tp, side: move(side(e2, label2, layer2), OX, OY),
+            cx: (tp[0][0] + tp[1][0] + tp[2][0] + tp[3][0]) / 4, cy: (tp[0][1] + tp[1][1] + tp[2][1] + tp[3][1]) / 4 });
         }
       }
     }
   }
 
   function isOn(v, l) { return v.label === l.label && v.layer === l.layer && v.expert === l.expert; }
+  function fillQuad(pts, style) { ctx.fillStyle = style; ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (var q = 1; q < 4; q++) ctx.lineTo(pts[q][0], pts[q][1]); ctx.closePath(); ctx.fill(); }
+  function strokeQuad(pts) { ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (var q = 1; q < 4; q++) ctx.lineTo(pts[q][0], pts[q][1]); ctx.closePath(); ctx.stroke(); }
   function draw() {
     layout();
     ctx.clearRect(0, 0, W, H);
     for (var i = 0; i < cells.length; i++) {
-      var c = cells[i], v = c.v;
-      var isSel = pin && isOn(v, pin), isHov = hover && isOn(v, hover);
-      var on = isSel || isHov;
-      if (on) {
-        // crisp highlight: translucent brighter fill + edge stroke
-        ctx.fillStyle = 'rgba(236,241,249,' + Math.min(1, c.alpha + 0.35).toFixed(3) + ')';
-        ctx.fillRect(c.x, c.y, c.w, c.h);
-        ctx.strokeStyle = isSel ? '#ffffff' : 'rgba(255,255,255,0.95)';
-        ctx.lineWidth = 1.5; ctx.strokeRect(c.x + 0.5, c.y + 0.5, c.w - 1, c.h - 1);
+      var c = cells[i]; fillQuad(c.side, 'rgba(20,26,34,' + Math.min(1, 0.35 + 0.6 * c.v.score).toFixed(3) + ')');
+    }
+    for (var j = 0; j < cells.length; j++) {
+      var cc = cells[j], v = cc.v, isSel = pin && isOn(v, pin), isHov = hover && isOn(v, hover);
+      if (isSel || isHov) {
+        fillQuad(cc.top, 'rgba(236,241,249,' + Math.min(1, v.score + 0.4).toFixed(3) + ')');
+        ctx.strokeStyle = isSel ? '#ffffff' : 'rgba(255,255,255,0.95)'; ctx.lineWidth = 1.5; strokeQuad(cc.top);
       } else {
-        ctx.fillStyle = 'rgba(236,241,249,' + c.alpha.toFixed(3) + ')';
-        ctx.fillRect(Math.round(c.x), Math.round(c.y), Math.max(1, Math.round(c.w)), Math.max(1, Math.round(c.h)));
+        fillQuad(cc.top, 'rgba(236,241,249,' + (Math.max(0.1, 0.22 + 0.72 * v.score)).toFixed(3) + ')');
       }
     }
     ctx.fillStyle = 'rgba(135,143,157,0.75)'; ctx.font = '11px system-ui'; ctx.textAlign = 'left';
-    ctx.fillText('columns = capabilities · each sheet = a layer, cells = experts (score = opacity) · filter on the right', 6, H - 6);
+    ctx.fillText('diagonals = experts & capabilities · layers stack up · score = opacity · filter on the right', 6, H - 6);
   }
 
+  function inPoly(px, py, poly) {
+    var inside = false;
+    for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      var xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];
+      if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) inside = !inside;
+    }
+    return inside;
+  }
   function pick(e) {
     var r = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0 };
     var bx = e.clientX - r.left, by = e.clientY - r.top;
     var best = null, bd = 1e18;
     for (var i = 0; i < cells.length; i++) {
-      var c = cells[i];
-      if (bx >= c.x && bx < c.x + c.w && by >= c.y && by < c.y + c.h) {
-        var dd = (c.x + c.w / 2 - bx) * (c.x + c.w / 2 - bx) + (c.y + c.h / 2 - by) * (c.y + c.h / 2 - by);
-        if (dd < bd) { bd = dd; best = c.v; }
-      }
+      if (!inPoly(bx, by, cells[i].top)) continue;
+      var dd = (cells[i].cx - bx) * (cells[i].cx - bx) + (cells[i].cy - by) * (cells[i].cy - by);
+      if (dd < bd) { bd = dd; best = cells[i].v; }
     }
     return best;
   }
@@ -481,10 +512,7 @@ _CAP3D_JS = r"""
 
   function cur(p) { if (cv.style) cv.style.cursor = p ? 'pointer' : 'default'; }
   cv.addEventListener('pointermove', function (e) { var p = pick(e); hover = p; draw(); renderPanel(); cur(p); });
-  cv.addEventListener('pointerdown', function (e) {
-    var p = pick(e);
-    if (p) { pin = (pin && isOn(pin, p)) ? null : p; focus = p.label; draw(); renderPanel(); }
-  });
+  cv.addEventListener('pointerdown', function (e) { var p = pick(e); if (p) { pin = (pin && isOn(pin, p)) ? null : p; focus = p.label; draw(); renderPanel(); } });
   cv.addEventListener('wheel', function (e) { e.preventDefault(); zoom = Math.max(0.5, Math.min(2.5, zoom * (e.deltaY < 0 ? 1.05 : 0.95))); draw(); }, { passive: false });
   window.addEventListener('resize', function () {
     var W2 = cv.clientWidth || W, H2 = cv.clientHeight || H;

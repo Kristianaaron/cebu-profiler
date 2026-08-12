@@ -17,16 +17,18 @@ Capability tab: monochrome 3D voxel view + sticky detail panel, agent-friendly �
 - **True 3D cubes** (all 8 corners + visible faces projected) so rotating stays
   readable; layers spaced wider; hover/ease with a generous hit radius that
   highlights the whole layer slice.
-- **Stacked translucent sheets** (no rotation UI): each capability is a column,
-  each layer a translucent sheet of expert cells stacked in it; every cell is
-  an axis-aligned, screen-disjoint rectangle whose **opacity encodes saliency**.
-  Hover = exact per-cell rectangle hit-test (a real 2D button) — verified
-  192/192 in headless Chromium. Hovered/pinned cell's edges highlight.
+- **Isometric (3D POV) stacked sheets**, no rotation UI: each capability is a
+  diamond-column, each layer a translucent rhombus sheet stacked up, and every
+  voxel's tile (with a shaded side face) reads as a 3D stack from a fixed
+  isometric view. Hover resolves by nearest-tile-center among the translucent
+  overlapped tiles — verified 192/192 in headless Chromium. Hovered/pinned
+  tile's edges highlight. Wheel-zoom only.
 - **Layer filter** on the right panel: L0 / L1 / … / all chips to view each
   layer separately or together, and it filters both the canvas and the panel.
-- **Hover = the cell under the cursor**: exact point-in-rectangle per cell
-  (rows grouped by layer sheets), no rotation ambiguity — hovering a cell
-  highlights it directly. Cursor becomes a **pointer** over a cell.
+- **Hover = the tile under the cursor**: point-in-polygon over each tile's
+  top rhombus; where translucent overlapped tiles both contain the cursor it
+  picks the nearest center (the tile you're aiming at). Cursor becomes a
+  **pointer** over a tile.
 - See-through grayscale cubes with **opacity-as-saliency** (hot = more opaque),
   no dither/outline; high-DPI/integer-snapped, no animation loop.
 - Agent-friendly: `<caption>` + `th scope="col"` on every table; a
