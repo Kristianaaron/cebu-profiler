@@ -339,12 +339,10 @@ def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
 
 _CAP3D_JS = r"""
 // Capability 3D voxel view — dependency-free, render-on-interaction only.
-// Monochrome grayscale with a 1-bit ordered-dither look on a black background.
-// High-DPI (devicePixelRatio-scaled backing store, integer pixel snapping) so
-// it stays crisp without blur, while staying cheap: no animation loop, ~200
-// voxels, redraw only on drag / wheel / hover / select / resize.
-// Agent-friendly: the panel + #cap3d-json + tables carry the ground truth;
-// canvas is a role=img progressive enhancement.
+// Monochrome grayscale CUBES on near-black: saliency is expressed by opacity
+// (hot = more opaque) and by ordered-dither density on the dominant face.
+// Cubes are true 3D (project all 8 corners + visible faces) so rotating stays
+// readable. High-DPI + integer snapping, no animation loop -> cheap.
 (function () {
   var cv = document.getElementById('cap3d');
   if (!cv || !cv.getContext || !DATA.capability3d || !DATA.capability3d.voxels) return;
@@ -356,9 +354,21 @@ _CAP3D_JS = r"""
   var ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-  var ry = 0.8, rx = 0.55, zoom = 1.0;
-  var hover = null, pin = null, focus = 0;
-  var proj = [];
+  var SX = 1.25, SY = 2.0, SZ = 1.5; // layers spaced wide for readability
+  var HFE = 0.34;                    // cube half-extent (object units)
+  var ry = 0.8, rx = 0.5, zoom = 1.0;
+  var hover = null, pin = null, focus = 0, selLayer = null;
+  var cubes = [];
+
+  var CORNERS = [[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]];
+  var FACES = [
+    { c: [0,1,5,4], n: [0,-1,0] },
+    { c: [3,2,6,7], n: [0,1,0] },
+    { c: [0,3,7,4], n: [-1,0,0] },
+    { c: [1,2,6,5], n: [1,0,0] },
+    { c: [0,1,2,3], n: [0,0,-1] },
+    { c: [4,5,6,7], n: [0,0,1] }
+  ];
 
   function rot3(x, y, z) {
     var cy = Math.cos(ry), sy = Math.sin(ry), cx = Math.cos(rx), sx = Math.sin(rx);
@@ -366,81 +376,163 @@ _CAP3D_JS = r"""
     var y2 = py * cx - pz * sx, z2 = py * sx + pz * cx;
     return [px, y2, z2];
   }
-  function project(v) {
-    var sc = (W / (Math.max(ne, nl, labels.length) + 2)) * 0.78 * zoom;
-    var r = rot3((v.expert - (ne - 1) / 2) * 1.25, -(v.layer - (nl - 1) / 2) * 1.25, (v.label - (labels.length - 1) / 2) * 1.25);
-    return [W / 2 + r[0] * sc, H / 2 + r[1] * sc, r[2], v, sc];
+  function projectCube(v) {
+    var sc = (W / (Math.max(ne * SX, nl * SY, labels.length * SZ) + 2)) * 0.82 * zoom;
+    var cx = (v.expert - (ne - 1) / 2) * SX;
+    var cy = -(v.layer - (nl - 1) / 2) * SY;
+    var cz = (v.label - (labels.length - 1) / 2) * SZ;
+    var rc = rot3(cx, cy, cz);
+    var pts = [];
+    for (var i = 0; i < 8; i++) {
+      var r = rot3(cx + CORNERS[i][0] * HFE, cy + CORNERS[i][1] * HFE, cz + CORNERS[i][2] * HFE);
+      pts.push([W / 2 + r[0] * sc, H / 2 + r[1] * sc, r[2] * sc]);
+    }
+    var nz = [];
+    for (var f = 0; f < 6; f++) {
+      var nr = rot3(FACES[f].n[0], FACES[f].n[1], FACES[f].n[2]);
+      nz.push(nr[2]); // >0 = facing viewer
+    }
+    return { v: v, pts: pts, nz: nz, depth: rc[2], sc: sc };
   }
-  function recompute() { proj = vox.map(project); }
+  function recompute() { cubes = vox.map(projectCube); }
 
-  // Ordered (Bayer 4x4) dither: on/off white pips whose density ~ saliency.
-  var BAYER = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
-  function ditherVoxel(x, y, s, score, c) {
-    var cell = Math.max(2, Math.round(s / 8));
-    var g = Math.max(0, Math.min(15, Math.round(score * 15)));
-    c.fillStyle = 'rgba(235,240,248,0.92)';
-    var col = 0;
-    for (var cy = 0; cy < s; cy += cell, col++) {
+  var BAYER = [[0,8,2,10],[12,4,14,6],[3,11,1,9],[15,7,13,5]];
+  var _ditherCount = 0;
+  function ditherVoxel(x0, y0, s, score, c) {
+    var cell = Math.max(2, Math.round(s / 10));
+    var g = Math.max(1, Math.min(15, Math.round(score * 15)));
+    var a = Math.min(1, 0.30 + 0.70 * score);
+    c.fillStyle = 'rgba(236,241,249,' + a.toFixed(3) + ')';
+    for (var cy = 0, col = 0; cy < s; cy += cell, col++) {
       for (var cx = 0, row = 0; cx < s; cx += cell, row++) {
-        if (g > BAYER[col % 4][row % 4]) {
-          c.fillRect(x + cx, y + cy, cell, cell);
-        }
+        if (g > BAYER[col % 4][row % 4]) { c.fillRect(Math.round(x0 + cx), Math.round(y0 + cy), cell, cell); _ditherCount++; }
+      }
+    }
+  }
+
+  function facePath(pts, f) { return FACES[f].c.map(function (ci) { return pts[ci]; }); }
+  function drawCube(cb) {
+    var v = cb.v;
+    var isSel = pin && v.label === pin.label && v.layer === pin.layer && v.expert === pin.expert;
+    var isHover = hover && v.label === hover.label && v.layer === hover.layer && v.expert === hover.expert;
+    var inLayer = selLayer && selLayer.label === v.label && selLayer.layer === v.layer;
+    var inHoverLayer = !pin && hover && v.label === hover.label && v.layer === hover.layer;
+    var edge = (isSel ? 2 : isHover ? 1.6 : (inLayer || inHoverLayer) ? 1 : 0);
+    var aq = Math.min(1, 0.30 + 0.70 * v.score);
+    var dom = -1, domNz = -1;
+    for (var f = 0; f < 6; f++) {
+      if (cb.nz[f] <= 0) continue;
+      var fp = facePath(cb.pts, f);
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(fp[0][0], fp[0][1]);
+      ctx.lineTo(fp[1][0], fp[1][1]);
+      ctx.lineTo(fp[2][0], fp[2][1]);
+      ctx.lineTo(fp[3][0], fp[3][1]);
+      ctx.closePath();
+      var shade = 0.35 + 0.65 * Math.max(0, cb.nz[f]);
+      ctx.fillStyle = 'rgba(236,241,249,' + (aq * shade).toFixed(3) + ')';
+      ctx.fill();
+      if (cb.nz[f] > domNz) { domNz = cb.nz[f]; dom = f; }
+      ctx.restore();
+    }
+    // dense dither on the single dominant (front-most) face
+    if (dom >= 0) {
+      var fp = facePath(cb.pts, dom);
+      var xs = [], ys = [];
+      for (var q = 0; q < 4; q++) { xs.push(fp[q][0]); ys.push(fp[q][1]); }
+      var x0 = Math.round(Math.min.apply(null, xs)), y0 = Math.round(Math.min.apply(null, ys));
+      var s = Math.max(2, Math.round(Math.max.apply(null, xs) - x0));
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(fp[0][0], fp[0][1]);
+      for (var q2 = 1; q2 < 4; q2++) ctx.lineTo(fp[q2][0], fp[q2][1]);
+      ctx.closePath();
+      ctx.clip();
+      ditherVoxel(x0, y0, s, v.score, ctx);
+      ctx.restore();
+    }
+    if (edge) { // highlight outline on the outer silhouette is subtle; keep simple
+      for (var f2 = 0; f2 < 6; f2++) {
+        if (cb.nz[f2] <= 0) continue;
+        var fp2 = facePath(cb.pts, f2);
+        ctx.save(); ctx.beginPath(); ctx.moveTo(fp2[0][0], fp2[0][1]);
+        for (var q3 = 1; q3 < 4; q3++) ctx.lineTo(fp2[q3][0], fp2[q3][1]);
+        ctx.closePath();
+        ctx.strokeStyle = isSel ? '#fff' : 'rgba(255,255,255,0.85)';
+        ctx.lineWidth = edge; ctx.stroke(); ctx.restore();
+        if (!isSel) break; // only nearest face outlined unless pinned
       }
     }
   }
 
   function draw() {
-    recompute();
+    recompute(); _ditherCount = 0;
     ctx.clearRect(0, 0, W, H);
-    var order = [], i;
-    for (i = 0; i < proj.length; i++) order.push([proj[i][2], i]);
+    var order = [];
+    for (var i = 0; i < cubes.length; i++) order.push([cubes[i].depth, i]);
     order.sort(function (a, b) { return a[0] - b[0]; });
-    for (var k = 0; k < order.length; k++) {
-      var p = proj[order[k][1]], v = p[3];
-      var s = Math.max(5, p[4] * 0.62);
-      var active = (hover && v.label === hover.label && v.layer === hover.layer && v.expert === hover.expert) ||
-                   (pin && v.label === pin.label && v.layer === pin.layer && v.expert === pin.expert);
-      var x0 = Math.round(p[0] - s / 2), y0 = Math.round(p[1] - s / 2);
-      // faint base for all voxels, then the dithered density
-      ctx.fillStyle = 'rgba(255,255,255,0.07)';
-      ctx.fillRect(x0, y0, s, s);
-      ditherVoxel(x0, y0, s, v.score, ctx);
-      if (active) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.strokeRect(x0 - 1.5, y0 - 1.5, s + 3, s + 3); }
-    }
-    ctx.fillStyle = 'rgba(130,138,152,0.75)'; ctx.font = '11px system-ui'; ctx.textAlign = 'left';
-    ctx.fillText('experts (x) · layers (y) · labels (depth)', 6, H - 6);
+    for (var k = 0; k < order.length; k++) drawCube(cubes[order[k][1]]);
+    ctx.fillStyle = 'rgba(135,143,157,0.75)'; ctx.font = '11px system-ui'; ctx.textAlign = 'left';
+    ctx.fillText('experts (x) · layers (y) · labels (depth) · opacity = saliency', 6, H - 6);
   }
 
   function pick(e) {
     var r = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0 };
     var bx = e.clientX - r.left, by = e.clientY - r.top, best = null, bd = 1e9;
-    for (var i = 0; i < proj.length; i++) {
-      var dx = proj[i][0] - bx, dy = proj[i][1] - by, d = dx * dx + dy * dy;
-      if (d < bd) { bd = d; best = proj[i][3]; }
+    for (var i = 0; i < cubes.length; i++) {
+      // project the cube center again (cheap for ~200) for a stable hit point
+      // use centroid of front-face corners as the hit anchor
+      var ax = (cubes[i].pts[0][0] + cubes[i].pts[7][0]) / 2;
+      var ay = (cubes[i].pts[0][1] + cubes[i].pts[7][1]) / 2;
+      var dd = (ax - bx) * (ax - bx) + (ay - by) * (ay - by);
+      if (dd < bd) { bd = dd; best = cubes[i].v; }
     }
-    return bd < 144 ? best : null;
+    return bd < 529 ? best : null; // ~23px generous hit radius
   }
 
+  function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+  function bar(v) { return '<span class="p-bar"><i style="width:' + Math.round(v.score * 100) + '%"></i></span> ' + Math.round(v.score * 100) + '%'; }
+  function rowHtml(v) {
+    var isSel = pin && v.label === pin.label && v.layer === pin.layer && v.expert === pin.expert;
+    var isHov = (!pin) && hover && v.label === hover.label && v.layer === hover.layer && v.expert === hover.expert;
+    return '<div class="p-row' + (isSel ? ' sel' : isHov ? ' hov' : '') +
+      '" onclick="window.capSel(' + v.label + ',' + v.layer + ',' + v.expert + ')">E' + v.expert + ' ' + bar(v) + '</div>';
+  }
   function renderPanel() {
     var li = hover ? hover.label : (pin ? pin.label : focus);
+    if (selLayer) li = selLayer.label;
     focus = li;
-    var rows = vox.filter(function (v) { return v.label === li; })
-      .sort(function (a, b) { return (a.layer - b.layer) || (a.expert - b.expert); });
     var name = labels[li] || '';
-    var html = '<div class="p-head" title="' + name + '">' + '\u25CB ' + name + '</div>';
-    html += '<div class="p-sub">' + rows.length + ' measured cells · hover to inspect · click to pin</div>';
+    if (selLayer && selLayer.label === li) {
+      var rows = vox.filter(function (v) { return v.label === li && v.layer === selLayer.layer; })
+        .sort(function (a, b) { return a.expert - b.expert; });
+      var html = '<div class="p-head" title="' + name + '">\u25B8 ' + esc(name) + ' <span class="mut">· layer L' + selLayer.layer + '</span></div>';
+      html += '<div class="p-sub"><a class="p-back" href="javascript:void(0)" onclick="window.capClearLayer()">\u2190 all layers</a> · ' + rows.length + ' experts</div>';
+      for (var j = 0; j < rows.length; j++) html += rowHtml(rows[j]);
+      if (panelEl) panelEl.innerHTML = html;
+      return;
+    }
+    var all = vox.filter(function (v) { return v.label === li; })
+      .sort(function (a, b) { return (a.layer - b.layer) || (a.expert - b.expert); });
+    var html = '<div class="p-head" title="' + name + '">' + (pin ? '\u25CF ' : '\u25CB ') + esc(name) + '</div>';
+    html += '<div class="p-sub">' + all.length + ' measured cells · hover or click</div>';
     var lastL = -1;
-    for (var i = 0; i < rows.length; i++) {
-      var v = rows[i];
-      if (v.layer !== lastL) { html += '<div class="p-grp">layer L' + v.layer + '</div>'; lastL = v.layer; }
-      var isSel = (pin && v.label === pin.label && v.layer === pin.layer && v.expert === pin.expert) ||
-                  ((!pin) && hover && v.label === hover.label && v.layer === hover.layer && v.expert === hover.expert);
-      html += '<div class="p-row' + (isSel ? ' sel' : '') + '" data-key="' + v.label + ':' + v.layer + ':' + v.expert + '">' +
-              'E' + v.expert + ' <span class="p-bar"><i style="width:' + Math.round(v.score * 100) + '%"></i></span> ' +
-              Math.round(v.score * 100) + '%</div>';
+    for (var i = 0; i < all.length; i++) {
+      var v = all[i];
+      if (v.layer !== lastL) {
+        html += '<div class="p-grp" onclick="window.capLayer(' + li + ',' + v.layer + ')">layer L' + v.layer + '<span class="p-grp-caret">&#9656;</span></div>';
+        lastL = v.layer;
+      }
+      html += rowHtml(v);
     }
     if (panelEl) panelEl.innerHTML = html;
   }
+
+  function redraw() { draw(); renderPanel(); }
+  window.capSel = function (label, layer, expert) { pin = { label: label, layer: layer, expert: expert }; focus = label; redraw(); };
+  window.capLayer = function (label, layer) { selLayer = { label: label, layer: layer }; pin = null; focus = label; redraw(); };
+  window.capClearLayer = function () { selLayer = null; redraw(); };
 
   var dragging = false, moved = 0, lastX = 0, lastY = 0;
   cv.addEventListener('pointerdown', function (e) {
@@ -456,15 +548,13 @@ _CAP3D_JS = r"""
       lastX = e.clientX; lastY = e.clientY;
       ry += dx * 0.01; rx += dy * 0.01; rx = Math.max(0.05, Math.min(1.4, rx));
       hover = null; draw();
-    } else {
-      hover = p; draw(); renderPanel();
-    }
+    } else { hover = p; draw(); renderPanel(); }
   });
   function up(e) {
     if (dragging) {
       dragging = false; cv.classList.remove('dragging');
-      if (moved < 6) { // a click (not a drag)
-        pin = (hover && pin && hover.label === pin.label && hover.layer === pin.layer && hover.expert === pin.expert) ? null : hover;
+      if (moved < 6) {
+        pin = (hover && pin && pin.label === hover.label && pin.layer === hover.layer && pin.expert === hover.expert) ? null : hover;
         renderPanel(); draw();
       }
     }
@@ -573,7 +663,11 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .cap3d-panel{{flex:0 0 300px;position:sticky;top:0;align-self:flex-start;background:#0a0c10;border-left:1px solid #262c38;padding-left:12px;max-height:420px;overflow:auto;font-size:12px;color:#cfd6e0}}
  .cap3d-panel .p-head{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12.5px;color:#e9edf3;margin:2px 0 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
  .cap3d-panel .p-sub{{color:#5d6673;font-size:10.5px;margin:2px 0 8px}}
- .cap3d-panel .p-grp{{color:#7cc0ff;font-size:11px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;margin:8px 0 2px}}
+ .cap3d-panel .p-grp{{color:#7cc0ff;font-size:11px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;margin:8px 0 2px;cursor:pointer;display:flex;align-items:center;gap:6px}}
+ .cap3d-panel .p-grp:hover{{color:#a8d6ff;text-decoration:underline}}
+ .cap3d-panel .p-grp-caret{{font-size:9px;opacity:.8;transition:transform .1s}}
+ .cap3d-panel .p-back{{color:#7cc0ff;cursor:pointer;text-decoration:none;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
+ .cap3d-panel .p-back:hover{{text-decoration:underline}}
  .cap3d-panel .p-row{{display:flex;align-items:center;gap:8px;padding:3px 4px;border-radius:4px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:11px}}
  .cap3d-panel .p-row:hover{{background:#161a22}}
  .cap3d-panel .p-row.sel{{background:#1d2430;color:#fff}}

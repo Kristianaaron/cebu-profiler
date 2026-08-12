@@ -12,7 +12,14 @@ Capability tab: monochrome 3D voxel view + sticky detail panel, agent-friendly â
   only** (no animation loop) and **devicePixelRatio-scaled with integer pixel
   snapping**, so it is crisp/high-res and stays compute-light on laptops.
 - **Sticky right panel** updates on hover/select: shows the focused capability,
-  per-layer expert rows with a density bar, and truncates long text.
+  per-layer expert rows with a density bar, and truncates long text. Clicking a
+  **layer row opens that layer's detail view** (per-expert rows, w/ back link).
+- **True 3D cubes** (all 8 corners + visible faces projected) so rotating stays
+  readable; layers spaced wider; hover/ease with a generous hit radius that
+  highlights the whole layer slice.
+- Monochrome grayscale with **dense ordered dither + opacity-as-saliency**
+  (hot = more opaque) on the dominant face; high-DPI/integer-snapped, no
+  animation loop.
 - Agent-friendly: `<caption>` + `th scope="col"` on every table; a
   `<script type="application/json" id="cap3d-json">` structured block; panel is
   `aria-live`; the canonical table remains the ground truth.
