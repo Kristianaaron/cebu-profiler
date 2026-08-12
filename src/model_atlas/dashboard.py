@@ -445,21 +445,8 @@ _CAP3D_JS = r"""
       var isSel = pin && isOn(v, pin), isHov = hover && isOn(v, hover);
       var alpha = Math.max(0.05, 0.14 + 0.7 * v.score);
       if (isSel || isHov) {
-        // bright, high-alpha fill (raised gamma) + a hot glowing edge
-        ctx.save();
-        fillQuad(top, 'rgba(255,' + (isSel ? '244,232' : '246,236') + ',' + aa(Math.min(1, alpha + 0.7)) + ')');
-        // outer halo
-        ctx.strokeStyle = isSel ? 'rgba(255,160,90,0.5)' : 'rgba(150,210,255,0.5)';
-        ctx.lineWidth = 7;
-        ctx.shadowColor = isSel ? 'rgba(255,170,80,1)' : 'rgba(150,210,255,1)';
-        ctx.shadowBlur = 20;
-        strokeQuad(top);
-        // hot core border
-        ctx.strokeStyle = isSel ? 'rgba(255,214,160,0.95)' : 'rgba(255,255,255,0.95)';
-        ctx.lineWidth = 2.4;
-        ctx.shadowBlur = 10;
-        strokeQuad(top);
-        ctx.restore();
+        // whole-square gamma lift when active — no border
+        fillQuad(top, 'rgba(255,250,244,' + aa(Math.min(1, alpha + 0.7)) + ')');
       } else {
         fillQuad(top, 'rgba(216,228,246,' + aa(alpha) + ')');
       }
