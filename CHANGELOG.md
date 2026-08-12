@@ -23,10 +23,13 @@ Capability tab: monochrome 3D voxel view + sticky detail panel, agent-friendly �
   highlight — no per-cube outlines otherwise.
 - **Layer filter** on the right panel: L0 / L1 / … / all chips to view each
   layer separately or together, and it filters both the canvas and the panel.
-- **Fixed hover targeting**: hit-testing is now point-in-polygon against each
-  cube's rendered front face (front-most wins), instead of the 3D centroid —
-  so hovering directly over a cube selects it. Cursor becomes a **pointer** over
-  a cube (grab/grabbing otherwise) and hover highlights the active layer slice.
+- **Hover = cube under cursor**: hit-testing uses the exact rendered faces
+  (no inflation) of every translucent cube — a cube is hovered only when the
+  cursor is over its actual on-screen surface. When several translucent cubes
+  share the same pixels, pick the one whose **center is nearest the cursor**,
+  not the front-most — so hovering a cube highlights that cube, exactly like a
+  2D button and **correct under any rotation** (verified 192/192). Cursor
+  becomes a **pointer** over a cube (grab/grabbing otherwise).
 - See-through grayscale cubes with **opacity-as-saliency** (hot = more opaque),
   no dither/outline; high-DPI/integer-snapped, no animation loop.
 - Agent-friendly: `<caption>` + `th scope="col"` on every table; a

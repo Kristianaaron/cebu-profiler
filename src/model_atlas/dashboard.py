@@ -400,7 +400,8 @@ _CAP3D_JS = r"""
         vispolys.push(FACES[f].c.map(function (ci) { return pts[ci]; }));
       }
     }
-    return { v: v, pts: pts, nz: nz, dom: dom, vis: vis, vispolys: vispolys, depth: rc[2], sc: sc };
+    return { v: v, pts: pts, nz: nz, dom: dom, vis: vis, vispolys: vispolys, depth: rc[2], sc: sc,
+      cx: W / 2 + rc[0] * sc, cy: H / 2 + rc[1] * sc };
   }
   function recompute() {
     cubes = [];
@@ -464,28 +465,23 @@ _CAP3D_JS = r"""
     }
     return inside;
   }
-  // Enlarge a face polygon ~12% about its centroid for a forgiving hit area.
-  function padPoly(poly) {
-    var cx = 0, cy = 0;
-    for (var i = 0; i < poly.length; i++) { cx += poly[i][0]; cy += poly[i][1]; }
-    cx /= poly.length; cy /= poly.length;
-    return poly.map(function (p) { return [cx + (p[0] - cx) * 1.12, cy + (p[1] - cy) * 1.12]; });
-  }
+  // Hit-test uses the exact rendered face (no inflation) so the hover effect
+  // fires only on the cube under the cursor's precise location.
   function pick(e) {
     var r = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0 };
     var bx = e.clientX - r.left, by = e.clientY - r.top;
-    var best = null, bestDepth = -1e9;
-    // A cube's on-screen surface IS the union of its visible faces, and its
-    // visible faces share no interior, so any point over a cube is inside
-    // exactly one of its visible faces. Test all of them; front-most = max depth.
+    var best = null, bd = 1e18;
+    // A cube is hovered only when the cursor is over its actual rendered face
+    // (union of visible faces, no inflation). If several translucent cubes
+    // occupy the same pixels, pick the one whose center is nearest the cursor
+    // — the cube the user is aiming at — so hovering a cube highlights it
+    // directly, exactly like a 2D button, and stays correct under rotation.
     for (var i = 0; i < cubes.length; i++) {
-      var cb = cubes[i], vs = cb.vispolys;
-      for (var f = 0; f < vs.length; f++) {
-        if (inPoly(bx, by, padPoly(vs[f]))) {
-          if (cb.depth > bestDepth) { bestDepth = cb.depth; best = cb.v; }
-          break; // one face per cube is enough
-        }
-      }
+      var cb = cubes[i], vs = cb.vispolys, hit = false;
+      for (var f = 0; f < vs.length && !hit; f++) { if (inPoly(bx, by, vs[f])) hit = true; }
+      if (!hit) continue;
+      var dd = (cb.cx - bx) * (cb.cx - bx) + (cb.cy - by) * (cb.cy - by);
+      if (dd < bd) { bd = dd; best = cb.v; }
     }
     return best;
   }
