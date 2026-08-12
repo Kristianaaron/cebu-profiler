@@ -27,11 +27,11 @@ Capability tab: monochrome 3D voxel view + sticky detail panel, agent-friendly �
   <0.25 (relative per label). Capability top-scores are normalised per label so
   table and panel agree; fixed `${…}` escaping across the capability/contrast/
   coalition tables so values render.
-- **Interactive canvas**: drag to rotate (yaw/pitch, pitch clamped 0.06–1.5)
-  and scroll to zoom (clamp 0.4×–3×) over the live grid/vignette. The lattice
-  is a true 3D yaw+pitch projection; the default is the clean front view
-  (0 overlap, hover exact 363/363), and during rotation overlapping cells
-  resolve to the topmost under the cursor.
+- **Cubes with ordered-dither shading** (matches the `dither cubes` reference):
+  each voxel is a 3D cube (top + two visible sides) whose faces carry a
+  Bayer ordered-dither in monochrome on the dark grid; dither density raises
+  with saliency and light source (top brightest) for the dithered-cube look.
+  Hover brightens ("gamma") the cube under the cursor; drag/zoom preserved.
 - **Grid + vignette behind the canvas** (`#07070a` 48px grid + radial vignette
   fading the edges, beneath the right panel, o-cina recipe); the connecting
   sheet-outline was removed so cells read as separate panels.

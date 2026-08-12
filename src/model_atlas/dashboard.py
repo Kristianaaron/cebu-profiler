@@ -431,33 +431,48 @@ _CAP3D_JS = r"""
   function fillQuad(pts, style) { ctx.fillStyle = style; ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (var q = 1; q < 4; q++) ctx.lineTo(pts[q][0], pts[q][1]); ctx.closePath(); ctx.fill(); }
   function strokeQuad(pts) { ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (var q = 1; q < 4; q++) ctx.lineTo(pts[q][0], pts[q][1]); ctx.closePath(); ctx.stroke(); }
   function aa(v4) { return Math.max(0, Math.min(1, v4)).toFixed(3); }
+  var BAYER = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+  // Force a translucent dark base then an ordered-dither of light dots whose
+  // density encodes a shade/level (dithered-cube look, monochrome on the grid).
+  function ditherFace(poly, level, base) {
+    ctx.save();
+    ctx.beginPath(); ctx.moveTo(poly[0][0], poly[0][1]); for (var q = 1; q < 4; q++) ctx.lineTo(poly[q][0], poly[q][1]); ctx.closePath(); ctx.clip();
+    var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9, k;
+    for (k = 0; k < 4; k++) { if (poly[k][0] < x0) x0 = poly[k][0]; if (poly[k][0] > x1) x1 = poly[k][0]; if (poly[k][1] < y0) y0 = poly[k][1]; if (poly[k][1] > y1) y1 = poly[k][1]; }
+    ctx.fillStyle = 'rgba(22,26,34,' + aa(base) + ')';
+    ctx.fillRect(Math.floor(x0), Math.floor(y0), Math.ceil(x1 - x0), Math.ceil(y1 - y0));
+    var s = Math.max(3, Math.round((x1 - x0) * 0.12));
+    var g = Math.max(1, Math.min(15, Math.round(level * 15)));
+    ctx.fillStyle = 'rgba(208,216,228,' + aa(Math.min(1, 0.25 + level * 0.75)) + ')';
+    var col = 0;
+    for (var yy = Math.floor(y0); yy < y1; yy += s, col++) {
+      var row = 0;
+      for (var xx = Math.floor(x0); xx < x1; xx += s, row++) {
+        if (g > BAYER[col & 3][row & 3]) ctx.fillRect(xx, yy, s + 0.5, s + 0.5);
+      }
+    }
+    ctx.restore();
+  }
   function draw() {
     layout();
     ctx.clearRect(0, 0, W, H);   // transparent canvas -> grid/vignette behind shows through
-    // faint translucent sheet wash per (capability, layer) — no connecting outline
-    for (var g = 0; g < cells.length;) {
-      var gl = cells[g].v.label, gy = cells[g].v.layer, g0 = g;
-      while (g < cells.length && cells[g].v.label === gl && cells[g].v.layer === gy) g++;
-      var f = cells[g0], l = cells[g - 1];
-      var panel = [[f.top[0][0], f.top[0][1]], [l.top[1][0], l.top[1][1]], [l.top[2][0], l.top[2][1]], [f.top[3][0], f.top[3][1]]];
-      fillQuad(panel, 'rgba(140,165,210,' + aa(0.05 + 0.08 * f.v.score) + ')');
-    }
-    // painter-sort cells back-to-front, then translucent cell panels (opacity=saliency)
+    // painter-sort cells back-to-front, then draw each voxel as a dithered cube
     var order = cells.slice();
     order.sort(function (a, b) { return (a.cy - b.cy) || (a.v.layer - b.v.layer); });
     for (var i = 0; i < order.length; i++) {
-      var c = order[i], v = c.v, top = c.top;
+      var c = order[i], v = c.v, top = c.top, body = T * 0.72;
+      var yv = [[top[0][0], top[0][1] + body], [top[1][0], top[1][1] + body], [top[2][0], top[2][1] + body], [top[3][0], top[3][1] + body]];
+      var fl = [top[3], top[0], yv[0], yv[3]];   // front-left face
+      var fr = [top[1], top[2], yv[2], yv[1]];   // front-right face
+      var hot = 0.30 + 0.7 * v.score;
       var isSel = pin && isOn(v, pin), isHov = hover && isOn(v, hover);
-      var alpha = Math.max(0.05, 0.14 + 0.7 * v.score);
-      if (isSel || isHov) {
-        // whole-square gamma lift when active — no border
-        fillQuad(top, 'rgba(255,250,244,' + aa(Math.min(1, alpha + 0.7)) + ')');
-      } else {
-        fillQuad(top, 'rgba(216,228,246,' + aa(alpha) + ')');
-      }
+      var boost = (isSel || isHov) ? 0.35 : 0;
+      ditherFace(fr, (0.45 + boost) * hot, 0.5);                 // darker side
+      ditherFace(fl, (0.68 + boost) * hot, 0.5);                 // mid front
+      ditherFace(top, (0.95 + boost) * hot, 0.5);                // bright top
     }
-    ctx.fillStyle = 'rgba(140,160,200,0.8)'; ctx.font = '11px system-ui'; ctx.textAlign = 'left';
-    ctx.fillText('diagonals = experts & capabilities · layers stack up · score = opacity · drag to rotate · scroll to zoom · filter on the right', 6, H - 6);
+    ctx.fillStyle = 'rgba(150,160,180,0.85)'; ctx.font = '11px system-ui'; ctx.textAlign = 'left';
+    ctx.fillText('experts & capabilities along the two diagonals · layers stack up · drag to rotate · scroll to zoom · dither = saliency', 6, H - 6);
   }
 
   function inPoly(px, py, poly) {
