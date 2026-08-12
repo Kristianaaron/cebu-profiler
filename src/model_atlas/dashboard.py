@@ -436,6 +436,17 @@ _CAP3D_JS = r"""
     var order = cells.slice();
     order.sort(function (a, b) { return a.depth - b.depth; });
     for (var i = 0; i < order.length; i++) drawCube(order[i]);
+    // subtle floating layer labels (L0, L1, ...) anchored by each layer's centroid
+    var lp = [], la;
+    for (la = 0; la < nl; la++) lp.push({ x: 0, y: 0, n: 0 });
+    for (la = 0; la < cells.length; la++) { var cc = cells[la]; lp[cc.v.layer].x += cc.cx; lp[cc.v.layer].y += cc.cy; lp[cc.v.layer].n++; }
+    ctx.font = '10.5px system-ui'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    for (la = 0; la < nl; la++) {
+      if (!lp[la].n) continue;
+      ctx.fillStyle = 'rgba(140,160,190,0.5)';
+      ctx.fillText('L' + la, lp[la].x / lp[la].n - 34, lp[la].y / lp[la].n);
+    }
+    ctx.textBaseline = 'alphabetic';
     ctx.fillStyle = 'rgba(150,160,180,0.85)'; ctx.font = '11px system-ui'; ctx.textAlign = 'left';
     ctx.fillText('experts (x) · layers (y) · capabilities (z) · dither = saliency · drag to rotate · scroll to zoom', 6, H - 6);
   }
@@ -633,19 +644,19 @@ def render_dashboard(data: dict[str, Any]) -> str:
  nav.side .tab{{display:flex;align-items:center;gap:9px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:14px;padding:8px 10px;cursor:pointer;color:#aab3c0;border-radius:6px}}
  nav.side .tab svg{{flex:0 0 auto}}
  nav.side .tab:hover{{background:#1d2430}}
- nav.side .tab.active{{color:#7cc0ff;background:#1d2430}}
+ nav.side .tab.active{{color:#d7dfe8;background:#1d2430}}
  main.main{{flex:1;padding:22px 26px}}
  .panel{{display:none}} .panel.active{{display:block}}
  table{{border-collapse:collapse;width:100%;font-size:13px;margin-top:8px}}
  th,td{{text-align:left;padding:6px 10px;border-bottom:1px solid #222937}}
  th{{color:#8a94a6;font-weight:600}}
  .chip{{display:inline-block;background:#1d2430;border:1px solid #2a3342;border-radius:4px;padding:2px 8px;margin:2px;font-size:12px}}
- .green{{color:#6fe3a1}} .amber{{color:#ffcf6b}} .red{{color:#ff7b7b}}
+ .green{{color:#c3cdd6}} .amber{{color:#8f99a4}} .red{{color:#515a65}}
  .note{{color:#8a94a6;font-size:12px}}
  .panel h3{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:13px;color:#aab3c0;margin:18px 0 6px}}
  .navsec{{color:#5d6673;font-size:10.5px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;margin:14px 10px 4px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
- .navlink{{display:block;margin:14px 10px 0;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;color:#7cc0ff;text-decoration:none;padding:6px 0;border-top:1px solid #262c38}}
- .navlink:hover{{color:#a8d6ff}}
+ .navlink{{display:block;margin:14px 10px 0;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;color:#d7dfe8;text-decoration:none;padding:6px 0;border-top:1px solid #262c38}}
+ .navlink:hover{{color:#eef2f6}}
  .stat{{display:inline-block;background:#1d2430;border:1px solid #2a3342;border-radius:6px;padding:10px 14px;margin:4px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
  .stat .k{{color:#8a94a6;font-size:11px;display:block}} .stat .v{{font-size:18px;color:#d5dbe3}}
  .cap3d-wrap{{position:relative;display:flex;gap:12px;align-items:stretch;border:1px solid #262c38;border-radius:8px;padding:10px;
@@ -654,36 +665,40 @@ def render_dashboard(data: dict[str, Any]) -> str:
    background-size:48px 48px,48px 48px}}
  .cap3d-canvas{{position:relative;flex:1;min-width:0}}
  canvas#cap3d{{width:100%;aspect-ratio:680/420;height:auto;display:block;touch-action:none;cursor:default;border-radius:6px;background:transparent}}
- .cap3d-controls{{position:absolute;top:8px;left:8px;z-index:3;display:flex;align-items:center;gap:6px;background:rgba(10,13,19,0.7);border:1px solid #262c38;border-radius:8px;padding:4px 6px}}
- .cap3d-controls button{{width:26px;height:26px;line-height:1;font-size:17px;color:#e9edf3;background:#12161d;border:1px solid #2a3342;border-radius:6px;cursor:pointer;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
- .cap3d-controls button:hover{{border-color:#7cc0ff;color:#7cc0ff}}
- .cap3d-controls .cspread{{display:flex;align-items:center;gap:5px;color:#8a94a6;font-size:11px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;margin:0 4px}}
- .cap3d-controls input[type=range]{{width:120px;accent-color:#7cc0ff}}
+ .cap3d-controls{{position:absolute;top:6px;left:6px;z-index:3;display:flex;align-items:center;gap:4px;background:rgba(10,13,19,0.7);border:1px solid #3a4250;border-radius:6px;padding:3px 4px}}
+ .cap3d-controls button{{width:19px;height:19px;display:inline-flex;align-items:center;justify-content:center;padding:0;color:#cfd6e0;background:#12161d;border:1px solid #3a4250;border-radius:4px;cursor:pointer}}
+ .cap3d-controls button:hover{{border-color:#59636f;color:#fff;background:#1a1f28}}
+ .cap3d-controls .cspread{{display:flex;align-items:center;gap:4px;color:#8a94a6;font-size:9.5px;letter-spacing:.03em;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;margin:0 2px}}
+ .cap3d-controls input[type=range]{{-webkit-appearance:none;appearance:none;width:90px;height:14px;background:transparent;cursor:pointer}}
+ .cap3d-controls input[type=range]::-webkit-slider-runnable-track{{height:1px;background:#3a4250;border-radius:1px}}
+ .cap3d-controls input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;appearance:none;width:8px;height:8px;border-radius:50%;background:#cfd6e0;border:none;margin-top:-3.5px}}
+ .cap3d-controls input[type=range]::-moz-range-track{{height:1px;background:#3a4250;border:none}}
+ .cap3d-controls input[type=range]::-moz-range-thumb{{width:8px;height:8px;border:none;border-radius:50%;background:#cfd6e0}}
  .cap3d-vig{{position:absolute;inset:0;pointer-events:none;border-radius:6px;background:radial-gradient(ellipse 72% 68% at 50% 48%, transparent 42%, rgba(7,7,10,0.5) 74%, #07070a 100%)}}
  canvas#cap3d.dragging{{cursor:grabbing}}
  .cap3d-panel{{flex:0 0 300px;align-self:stretch;background:#0a0c10;border-left:1px solid #262c38;padding-left:12px;overflow-y:auto;font-size:12px;color:#cfd6e0}}
  .cap3d-panel .p-head{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12.5px;color:#e9edf3;margin:2px 0 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
  .cap3d-panel .p-sub{{color:#5d6673;font-size:10.5px;margin:2px 0 8px}}
- .cap3d-panel .p-grp{{color:#7cc0ff;font-size:11px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;margin:8px 0 2px;cursor:pointer;display:flex;align-items:center;gap:6px}}
- .cap3d-panel .p-grp:hover{{color:#a8d6ff;text-decoration:underline}}
+ .cap3d-panel .p-grp{{color:#d7dfe8;font-size:11px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;margin:8px 0 2px;cursor:pointer;display:flex;align-items:center;gap:6px}}
+ .cap3d-panel .p-grp:hover{{color:#eef2f6;text-decoration:underline}}
  .cap3d-panel .p-grp-caret{{font-size:9px;opacity:.8;transition:transform .1s}}
- .cap3d-panel .p-back{{color:#7cc0ff;cursor:pointer;text-decoration:none;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
+ .cap3d-panel .p-back{{color:#d7dfe8;cursor:pointer;text-decoration:none;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
  .cap3d-panel .p-back:hover{{text-decoration:underline}}
  .cap3d-panel .p-filt{{display:flex;align-items:center;gap:4px;border-bottom:1px solid #262c38;padding-bottom:8px;margin-bottom:8px}}
  .cap3d-panel .p-filt-l{{color:#5d6673;font-size:10px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;margin-right:2px;text-transform:uppercase;letter-spacing:.06em}}
  .cap3d-panel .p-chip{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:10.5px;color:#8a94a6;background:#12161d;border:1px solid #2a3342;border-radius:999px;padding:2px 9px;cursor:pointer}}
  .cap3d-panel .p-chip.on{{color:#0a0c10;background:#e9edf3;border-color:#e9edf3}}
- .cap3d-panel .p-chip:hover{{border-color:#7cc0ff;color:#7cc0ff}}
+ .cap3d-panel .p-chip:hover{{border-color:#d7dfe8;color:#d7dfe8}}
  .cap3d-panel .p-row{{display:flex;align-items:center;gap:8px;padding:3px 4px;border-radius:4px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:11px}}
  .cap3d-panel .p-row:hover{{background:#161a22}}
  .cap3d-panel .p-row.sel{{background:#1d2430;color:#fff}}
  .cap3d-panel .p-bar{{flex:0 0 42px;height:5px;background:#1a1f28;border-radius:3px;overflow:hidden}}
  .cap3d-panel .p-bar i{{display:block;height:100%;background:#e9edf3}}
  .cap3d-panel .p-tier{{flex:0 0 auto;margin-left:auto;font-size:9.5px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;text-transform:uppercase;letter-spacing:.04em;padding:1px 5px;border-radius:3px;border:1px solid currentColor;opacity:.9}}
- .cap3d-panel .p-tier.strong{{color:#8fe3a0}}
- .cap3d-panel .p-tier.good{{color:#9fc4ff}}
- .cap3d-panel .p-tier.moderate{{color:#e2cf7f}}
- .cap3d-panel .p-tier.weak{{color:#7d8593}}
+ .cap3d-panel .p-tier.strong{{color:#e8edf3}}
+ .cap3d-panel .p-tier.good{{color:#c3ccd6}}
+ .cap3d-panel .p-tier.moderate{{color:#98a2ad}}
+ .cap3d-panel .p-tier.weak{{color:#5b6470}}
 </style></head><body>
 <div class="layout">
 <nav class="side">{tab_html}</nav>
@@ -702,8 +717,8 @@ def render_dashboard(data: dict[str, Any]) -> str:
          role="img"
          aria-label="3D voxel saliency map: x-axis = expert, y-axis = layer, depth = capability label; voxel brightness (grayscale ordered dither) = measured saliency. Interact or read the panel and tables for exact values."></canvas>
        <div class="cap3d-controls">
-         <button id="czoomout" title="zoom out">−</button>
-         <button id="czoomin" title="zoom in">＋</button>
+         <button id="czoomout" title="zoom out"><svg viewBox="0 0 12 12" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M2.5 6h7"/></svg></button>
+         <button id="czoomin" title="zoom in"><svg viewBox="0 0 12 12" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M6 2.5v7M2.5 6h7"/></svg></button>
          <label class="cspread">layers
            <input id="cspread" type="range" min="1" max="4" step="0.1" value="1" title="spread the layers apart to hover each expert">
          </label>
