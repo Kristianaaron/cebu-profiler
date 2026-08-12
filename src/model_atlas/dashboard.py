@@ -339,16 +339,25 @@ def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
 
 _CAP3D_JS = r"""
 // Capability 3D voxel view — dependency-free, render-on-interaction only.
-// No animation loop (so it stays cool on a laptop): draws once, then on
-// drag / wheel / resize. Agent-friendly: the tables + #cap3d-json carry the
-// ground truth; this canvas is a progressive enhancement (role=img).
+// Monochrome grayscale with a 1-bit ordered-dither look on a black background.
+// High-DPI (devicePixelRatio-scaled backing store, integer pixel snapping) so
+// it stays crisp without blur, while staying cheap: no animation loop, ~200
+// voxels, redraw only on drag / wheel / hover / select / resize.
+// Agent-friendly: the panel + #cap3d-json + tables carry the ground truth;
+// canvas is a role=img progressive enhancement.
 (function () {
   var cv = document.getElementById('cap3d');
   if (!cv || !cv.getContext || !DATA.capability3d || !DATA.capability3d.voxels) return;
-  var ctx = cv.getContext('2d');
+  var panelEl = document.getElementById('cap3d-panel');
   var V = DATA.capability3d, labels = V.labels, nl = V.n_layers, ne = V.n_experts, vox = V.voxels;
-  var W = cv.width, H = cv.height;
-  var ry = 0.8, rx = 0.55, zoom = 1.0, hoverI = -1;
+  var dpr = (window.devicePixelRatio || 1);
+  var W = cv.clientWidth || 680, H = cv.clientHeight || 420;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  var ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  var ry = 0.8, rx = 0.55, zoom = 1.0;
+  var hover = null, pin = null, focus = 0;
   var proj = [];
 
   function rot3(x, y, z) {
@@ -357,79 +366,124 @@ _CAP3D_JS = r"""
     var y2 = py * cx - pz * sx, z2 = py * sx + pz * cx;
     return [px, y2, z2];
   }
-  var span = Math.max(ne, nl, labels.length) + 2;
-  var scaleNow = function () { return (W / span) * 0.78 * zoom; };
-
   function project(v) {
-    var sc = scaleNow();
+    var sc = (W / (Math.max(ne, nl, labels.length) + 2)) * 0.78 * zoom;
     var r = rot3((v.expert - (ne - 1) / 2) * 1.25, -(v.layer - (nl - 1) / 2) * 1.25, (v.label - (labels.length - 1) / 2) * 1.25);
-    return [W / 2 + r[0] * sc, H / 2 + r[1] * sc, r[2], v];
+    return [W / 2 + r[0] * sc, H / 2 + r[1] * sc, r[2], v, sc];
   }
   function recompute() { proj = vox.map(project); }
 
-  function fillColour(score, depth) {
-    var t = Math.max(0, Math.min(1, score));
-    var h = 230 - 210 * t;
-    var l = 54 - Math.abs(depth) * 14;
-    return 'hsl(' + Math.round(h) + ',85%,' + Math.round(l) + '%)';
+  // Ordered (Bayer 4x4) dither: on/off white pips whose density ~ saliency.
+  var BAYER = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+  function ditherVoxel(x, y, s, score, c) {
+    var cell = Math.max(2, Math.round(s / 8));
+    var g = Math.max(0, Math.min(15, Math.round(score * 15)));
+    c.fillStyle = 'rgba(235,240,248,0.92)';
+    var col = 0;
+    for (var cy = 0; cy < s; cy += cell, col++) {
+      for (var cx = 0, row = 0; cx < s; cx += cell, row++) {
+        if (g > BAYER[col % 4][row % 4]) {
+          c.fillRect(x + cx, y + cy, cell, cell);
+        }
+      }
+    }
   }
+
   function draw() {
     recompute();
     ctx.clearRect(0, 0, W, H);
-    var sc = scaleNow();
-    var order = proj.map(function (p, i) { return [p[2], i]; }).sort(function (a, b) { return a[0] - b[0]; });
-    // depth-sorted: draw far voxels first (painter's order)
+    var order = [], i;
+    for (i = 0; i < proj.length; i++) order.push([proj[i][2], i]);
+    order.sort(function (a, b) { return a[0] - b[0]; });
     for (var k = 0; k < order.length; k++) {
-      var p = proj[order[k][1]];
-      var s = Math.max(2, sc * 0.62);
-      // dark base (volume) offset toward the viewer's lower-right
-      ctx.fillStyle = 'rgba(10,12,16,0.65)';
-      ctx.fillRect(p[0] - s / 2 + s * 0.28, p[1] - s / 2 + s * 0.28, s, s);
-      // top face (colour by score, brightness by depth)
-      ctx.fillStyle = fillColour(p[3].score, p[2]);
-      ctx.fillRect(p[0] - s / 2, p[1] - s / 2, s, s);
-      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(p[0] - s / 2, p[1] - s / 2, s, s);
-      if (hoverI === order[k][1]) {
-        ctx.strokeStyle = '#fff'; ctx.strokeRect(p[0] - s / 2 - 1, p[1] - s / 2 - 1, s + 2, s + 2);
-      }
+      var p = proj[order[k][1]], v = p[3];
+      var s = Math.max(5, p[4] * 0.62);
+      var active = (hover && v.label === hover.label && v.layer === hover.layer && v.expert === hover.expert) ||
+                   (pin && v.label === pin.label && v.layer === pin.layer && v.expert === pin.expert);
+      var x0 = Math.round(p[0] - s / 2), y0 = Math.round(p[1] - s / 2);
+      // faint base for all voxels, then the dithered density
+      ctx.fillStyle = 'rgba(255,255,255,0.07)';
+      ctx.fillRect(x0, y0, s, s);
+      ditherVoxel(x0, y0, s, v.score, ctx);
+      if (active) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.strokeRect(x0 - 1.5, y0 - 1.5, s + 3, s + 3); }
     }
-    // axis hints (light, informative)
-    ctx.fillStyle = 'rgba(150,158,174,0.7)'; ctx.font = '11px system-ui';
-    ctx.textAlign = 'left'; ctx.fillText('experts (x) / layers (y) / labels (depth)', 8, H - 6);
-    ctx.textAlign = 'right';
-    for (var l = 0; l < Math.min(nl, 4); l++) {
-      var lc = project({ expert: Math.floor(ne / 2), layer: l, label: 0, score: 1 });
-      ctx.fillText('L' + l, lc[0], lc[1] - 6);
-    }
-    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(130,138,152,0.75)'; ctx.font = '11px system-ui'; ctx.textAlign = 'left';
+    ctx.fillText('experts (x) · layers (y) · labels (depth)', 6, H - 6);
   }
 
-  cv.addEventListener('pointerdown', function (e) { dragging = true; lastX = e.clientX; lastY = e.clientY; cv.classList.add('dragging'); cv.setPointerCapture(e.pointerId); });
+  function pick(e) {
+    var r = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0 };
+    var bx = e.clientX - r.left, by = e.clientY - r.top, best = null, bd = 1e9;
+    for (var i = 0; i < proj.length; i++) {
+      var dx = proj[i][0] - bx, dy = proj[i][1] - by, d = dx * dx + dy * dy;
+      if (d < bd) { bd = d; best = proj[i][3]; }
+    }
+    return bd < 144 ? best : null;
+  }
+
+  function renderPanel() {
+    var li = hover ? hover.label : (pin ? pin.label : focus);
+    focus = li;
+    var rows = vox.filter(function (v) { return v.label === li; })
+      .sort(function (a, b) { return (a.layer - b.layer) || (a.expert - b.expert); });
+    var name = labels[li] || '';
+    var html = '<div class="p-head" title="' + name + '">' + '\u25CB ' + name + '</div>';
+    html += '<div class="p-sub">' + rows.length + ' measured cells · hover to inspect · click to pin</div>';
+    var lastL = -1;
+    for (var i = 0; i < rows.length; i++) {
+      var v = rows[i];
+      if (v.layer !== lastL) { html += '<div class="p-grp">layer L' + v.layer + '</div>'; lastL = v.layer; }
+      var isSel = (pin && v.label === pin.label && v.layer === pin.layer && v.expert === pin.expert) ||
+                  ((!pin) && hover && v.label === hover.label && v.layer === hover.layer && v.expert === hover.expert);
+      html += '<div class="p-row' + (isSel ? ' sel' : '') + '" data-key="' + v.label + ':' + v.layer + ':' + v.expert + '">' +
+              'E' + v.expert + ' <span class="p-bar"><i style="width:' + Math.round(v.score * 100) + '%"></i></span> ' +
+              Math.round(v.score * 100) + '%</div>';
+    }
+    if (panelEl) panelEl.innerHTML = html;
+  }
+
+  var dragging = false, moved = 0, lastX = 0, lastY = 0;
+  cv.addEventListener('pointerdown', function (e) {
+    dragging = true; moved = 0; lastX = e.clientX; lastY = e.clientY;
+    if (cv.setPointerCapture) cv.setPointerCapture(e.pointerId);
+    cv.classList.add('dragging');
+  });
   cv.addEventListener('pointermove', function (e) {
+    var p = pick(e);
     if (dragging) {
-      ry += (e.clientX - lastX) * 0.01; rx += (e.clientY - lastY) * 0.01;
-      rx = Math.max(0.05, Math.min(1.4, rx)); lastX = e.clientX; lastY = e.clientY; draw();
+      var dx = e.clientX - lastX, dy = e.clientY - lastY;
+      moved += Math.abs(dx) + Math.abs(dy);
+      lastX = e.clientX; lastY = e.clientY;
+      ry += dx * 0.01; rx += dy * 0.01; rx = Math.max(0.05, Math.min(1.4, rx));
+      hover = null; draw();
     } else {
-      // hover pick: nearest voxel in screen space (cheap on this small set)
-      var bx = e.offsetX, by = e.offsetY, best = -1, bd = 1e9;
-      for (var i = 0; i < proj.length; i++) {
-        var dx = proj[i][0] - bx, dy = proj[i][1] - by, d = dx * dx + dy * dy;
-        if (d < bd) { bd = d; best = i; }
-      }
-      if (best !== hoverI) { hoverI = best; draw(); }
-      var v = proj[best] ? proj[best][3] : null;
-      cv.title = v ? (labels[v.label] + ' · L' + v.layer + 'E' + v.expert + ' · saliency ' + v.score) : '';
+      hover = p; draw(); renderPanel();
     }
   });
-  function endDrag(e) { dragging = false; cv.classList.remove('dragging'); }
-  cv.addEventListener('pointerup', endDrag); cv.addEventListener('pointercancel', endDrag);
-  cv.addEventListener('wheel', function (e) { e.preventDefault(); zoom *= (e.deltaY < 0 ? 1.08 : 0.92); zoom = Math.max(0.4, Math.min(3, zoom)); draw(); }, { passive: false });
-  window.addEventListener('resize', function () { recompute(); draw(); });
+  function up(e) {
+    if (dragging) {
+      dragging = false; cv.classList.remove('dragging');
+      if (moved < 6) { // a click (not a drag)
+        pin = (hover && pin && hover.label === pin.label && hover.layer === pin.layer && hover.expert === pin.expert) ? null : hover;
+        renderPanel(); draw();
+      }
+    }
+  }
+  cv.addEventListener('pointerup', up);
+  cv.addEventListener('pointercancel', function () { dragging = false; cv.classList.remove('dragging'); });
+  cv.addEventListener('wheel', function (e) {
+    e.preventDefault(); zoom *= (e.deltaY < 0 ? 1.08 : 0.92); zoom = Math.max(0.4, Math.min(3, zoom)); draw();
+  }, { passive: false });
+  window.addEventListener('resize', function () {
+    var W2 = cv.clientWidth || W, H2 = cv.clientHeight || H;
+    cv.width = Math.round(W2 * dpr); cv.height = Math.round(H2 * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); W = W2; H = H2; draw();
+  });
 
-  var dragging = false, lastX = 0, lastY = 0;
-  try { draw(); } catch (e) { /* keep the page usable if 2D context is restricted */ }
+  var hi = vox[0];
+  for (var vi = 1; vi < vox.length; vi++) if (vox[vi].score > hi.score) hi = vox[vi];
+  focus = hi ? hi.label : 0;
+  draw(); renderPanel();
 })();
 """
 
@@ -513,16 +567,18 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .navlink:hover{{color:#a8d6ff}}
  .stat{{display:inline-block;background:#1d2430;border:1px solid #2a3342;border-radius:6px;padding:10px 14px;margin:4px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
  .stat .k{{color:#8a94a6;font-size:11px;display:block}} .stat .v{{font-size:18px;color:#d5dbe3}}
- .cap3d-wrap{{position:relative;background:#0a0c10;border:1px solid #262c38;border-radius:8px;padding:10px 10px 6px}}
- canvas#cap3d{{width:100%;height:auto;display:block;touch-action:none;cursor:grab;border-radius:6px;background:radial-gradient(circle at 50% 40%,#12161d,#0a0c10)}}
+ .cap3d-wrap{{position:relative;display:flex;gap:12px;align-items:flex-start;background:#05070a;border:1px solid #262c38;border-radius:8px;padding:10px}}
+ canvas#cap3d{{flex:1;min-width:0;width:100%;aspect-ratio:680/420;height:auto;display:block;touch-action:none;cursor:grab;border-radius:6px;background:#000}}
  canvas#cap3d.dragging{{cursor:grabbing}}
- .cap3d-legend{{display:flex;align-items:center;gap:8px;color:#8a94a6;font-size:11px;margin-top:6px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
- .cap3d-legend .ramp{{flex:1;height:8px;border-radius:4px;background:linear-gradient(90deg,#3b82f6,#eab308,#ef4444)}}
- .float-table{{margin-top:12px;background:#12161d;border:1px solid #262c38;border-radius:8px;padding:10px 14px}}
- .float-table h3{{margin:0 0 6px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;color:#aab3c0}}
- .float-table table{{margin-top:0}}
- th[scope]{{color:#8a94a6;font-weight:600}}
- table caption{{caption-side:top;text-align:left;color:#5d6673;font-size:11px;padding:2px 0 4px}}
+ .cap3d-panel{{flex:0 0 300px;position:sticky;top:0;align-self:flex-start;background:#0a0c10;border-left:1px solid #262c38;padding-left:12px;max-height:420px;overflow:auto;font-size:12px;color:#cfd6e0}}
+ .cap3d-panel .p-head{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12.5px;color:#e9edf3;margin:2px 0 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+ .cap3d-panel .p-sub{{color:#5d6673;font-size:10.5px;margin:2px 0 8px}}
+ .cap3d-panel .p-grp{{color:#7cc0ff;font-size:11px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;margin:8px 0 2px}}
+ .cap3d-panel .p-row{{display:flex;align-items:center;gap:8px;padding:3px 4px;border-radius:4px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:11px}}
+ .cap3d-panel .p-row:hover{{background:#161a22}}
+ .cap3d-panel .p-row.sel{{background:#1d2430;color:#fff}}
+ .cap3d-panel .p-bar{{flex:0 0 42px;height:5px;background:#1a1f28;border-radius:3px;overflow:hidden}}
+ .cap3d-panel .p-bar i{{display:block;height:100%;background:#e9edf3}}
 </style></head><body>
 <div class="layout">
 <nav class="side">{tab_html}</nav>
@@ -536,10 +592,13 @@ def render_dashboard(data: dict[str, Any]) -> str:
  <div class="panel" id="panel-capability">
    <p class="note">3D voxel view: one voxel per scored <code>(layer, expert)</code> cell, capability labels run along the depth axis; colour = measured saliency (per-label normalised). <strong>Drag to rotate · scroll to zoom · hover for values.</strong> The tables below are the canonical, agent-readable form — no vision needed to read the data.</p>
    <div class="cap3d-wrap">
-     <canvas id="cap3d" width="680" height="420" role="img" aria-label="3D voxel saliency map: x-axis = expert, y-axis = layer, depth = capability label; voxel colour = measured saliency. Exact values are in the tables below."></canvas>
-     <div class="cap3d-legend">low <span class="ramp"></span> high</div>
+     <canvas id="cap3d"
+       role="img"
+       aria-label="3D voxel saliency map: x-axis = expert, y-axis = layer, depth = capability label; voxel brightness (grayscale ordered dither) = measured saliency. Interact or read the panel and tables for exact values."></canvas>
+     <aside class="cap3d-panel" id="cap3d-panel" aria-live="polite">
+       <p class="mut">Hover a voxel to inspect · click to pin · drag to rotate · scroll to zoom.</p>
+     </aside>
    </div>
-   <div class="float-table"><h3>Capability labels</h3><table id="t-cap3d-labels"></table></div>
    <script type="application/json" id="cap3d-json">{cap3d_json}</script>
    <table id="t-capability"></table>
  </div>
@@ -572,15 +631,6 @@ def render_dashboard(data: dict[str, Any]) -> str:
      return `<td>${{s}}</td>`}}).join(''); return `<tr>${{tds}}</tr>`;}}).join("");}}
  function cols(headers){{return "<thead><tr>"+headers.map(h=>`<th scope="col">${{h}}</th>`).join("")+"</tr></thead>";}}
  function fill(id, headers, rows){{document.getElementById(id).innerHTML = "<table><caption>"+(headers.join(' · '))+"</caption>"+cols(headers)+el(null,rows)+"</table>";}}
-
- // Floating capability-labels panel (canonical, agent-readable).
- fill('t-cap3d-labels', ['capability label','top layer/expert','score','voxels'],
-   DATA.capability3d.labels.map((lab,li)=>{{
-     const vx = DATA.capability3d.voxels.filter(v=>v.label===li).sort((a,b)=>b.score-a.score);
-     const top = vx[0] ? `L$x{{vx[0].layer}}E$x{{vx[0].expert}}` : '—';
-     return {{'capability label':lab, 'top layer/expert': top, 'score': vx[0] ? vx[0].score : '—', 'voxels': vx.length}};
-   }}));
-
 
  fill('t-capability', ['label','top layer/expert (score)'],
    DATA.capability.map(r=>({{label:r.label, top:r.top.map(x=>`L$x{{x.layer}}E$x{{x.expert}} ($x{{x.score}})`).join(' · ')}})));

@@ -2,19 +2,22 @@
 
 ## 0.8.2 — 2026-08-12
 
-Capability tab: interactive 3D voxel view + agent-friendly semantics —
+Capability tab: monochrome 3D voxel view + sticky detail panel, agent-friendly —
 
 - `_capability_voxels`: compact per-(label, layer, expert) voxel payload
   (score normalised per label; bounded by geometry).
-- Vanilla, dependency-free 3D voxel canvas (no three.js): drag-to-rotate,
-  wheel-zoom, hover tooltip. **Render-on-interaction only** — no animation
-  loop, ~200 voxels, so it stays compute-light on laptops.
-- Agent-friendly: tables now emit `<caption>` + `th scope="col"`; a
-  `<script type="application/json" id="cap3d-json">` block exposes the raw
-  structured data, and the floating labels table + canonical table carry the
-  ground truth (canvas is role=img progressive enhancement).
-- Tests: test_f14 asserts the voxel payload; dashboard JS validated in node
-  (syntax + runtime: 192 voxels drawn, tables render).
+- Vanilla, dependency-free 3D voxel canvas (no three.js): **monochrome
+  grayscale with a 1-bit Bayer ordered-dither look** on a near-black canvas;
+  drag-to-rotate, wheel-zoom, hover, click-to-pin. **Render-on-interaction
+  only** (no animation loop) and **devicePixelRatio-scaled with integer pixel
+  snapping**, so it is crisp/high-res and stays compute-light on laptops.
+- **Sticky right panel** updates on hover/select: shows the focused capability,
+  per-layer expert rows with a density bar, and truncates long text.
+- Agent-friendly: `<caption>` + `th scope="col"` on every table; a
+  `<script type="application/json" id="cap3d-json">` structured block; panel is
+  `aria-live`; the canonical table remains the ground truth.
+- Tests: test_f14 asserts the voxel payload; JS validated in node (syntax +
+  runtime: 192 voxels dithered, panel rows/groups render).
 
 ## 0.8.1 — 2026-08-12
 
