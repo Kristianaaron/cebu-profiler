@@ -281,6 +281,57 @@ def export_run(
     )
     evidence.append("planning_maps.json")
 
+    # --- V3 fidelity-first artifacts (analyzers + candidate graph + corpus) ---
+    from model_atlas.analysis import build_corpus_semantic_map
+    from model_atlas.atlas.v3_pipeline import run_v3_pipeline, v3_run_to_jsonable
+    from model_atlas.candidates import CandidateGraph, CandidateNode, CandidateStage
+    from model_atlas.schemas.coverage import EvidenceGate
+
+    v3run = run_v3_pipeline(model, corpus, seed=seed)
+    (run_dir / "v3_run.json").write_text(
+        json.dumps(v3_run_to_jsonable(v3run), indent=2, sort_keys=True)
+    )
+    evidence.append("v3_run.json")
+
+    semantic = build_corpus_semantic_map(model, corpus, top_k=_TOP_K, gate=EvidenceGate())
+    (run_dir / "v3_corpus_evidence.json").write_text(
+        json.dumps(semantic.model_dump(mode="json"), indent=2, sort_keys=True)
+    )
+    evidence.append("v3_corpus_evidence.json")
+
+    g = CandidateGraph(source_teacher_id=f"teacher-{arch_name}")
+    g.add(
+        CandidateNode(
+            candidate_id="teacher",
+            name="BF16 teacher",
+            stage=CandidateStage.P0_REFERENCE,
+            predicted=False,
+            deployed=True,
+        )
+    )
+    g.add(
+        CandidateNode(
+            candidate_id="mk-exl3",
+            name="EXL3 global allocation",
+            parent_ids=["teacher"],
+            stage=CandidateStage.P4_EXL3,
+            predicted=True,
+        )
+    )
+    g.add(
+        CandidateNode(
+            candidate_id="mk-exl3-nvfp4",
+            name="+NVFP4 substitution",
+            parent_ids=["mk-exl3"],
+            stage=CandidateStage.P6_SM121_ALLOCATION,
+            predicted=True,
+        )
+    )
+    (run_dir / "v3_candidate_graph.json").write_text(
+        json.dumps(g.model_dump(mode="json"), indent=2, sort_keys=True)
+    )
+    evidence.append("v3_candidate_graph.json")
+
     manifest: dict[str, Any] = {
         "schema_version": _SCHEMA_VERSION,
         "atlas_run_id": run_id,

@@ -22,6 +22,14 @@ from model_atlas.schemas.atlas_trace import (
     RoutedSelection,
     TracePayload,
 )
+from model_atlas.schemas.coverage import (
+    CapacityCoverage,
+    CoverageReport,
+    CoverageStatus,
+    CoverageThresholds,
+    EvidenceGate,
+    ExplicitOverride,
+)
 from model_atlas.schemas.evidence import (
     CausalValidation,
     EvidenceClaim,
@@ -61,6 +69,12 @@ __all__ = [
     "RepresentationStorage",
     "RoutedSelection",
     "TracePayload",
+    "CapacityCoverage",
+    "CoverageReport",
+    "CoverageStatus",
+    "CoverageThresholds",
+    "EvidenceGate",
+    "ExplicitOverride",
     "CausalValidation",
     "EvidenceClaim",
     "EvidenceGrade",

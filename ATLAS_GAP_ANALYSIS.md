@@ -399,3 +399,30 @@ Owner: MA = `model-atlas`, EL = `eval-lab`. Milestone = recommended F-stage from
 6. §31 compliance — 27 rules, mostly PAR(design) or MISS; no current code enforces the discipline.
 
 *End of gap analysis. Stopping for review per contract §30.*
+
+## 15. Atlas v3 phase status (2026-08-13)
+
+The v3 fidelity-first implementation instruction + GLM-5.2 blueprint have been
+implemented against the synthetic MiniMoE. The previously-missing first-class
+analyzers, system modules, and integration surfaces now exist:
+
+| v3 area | Now in repo |
+|---|---|
+| Fidelity-first analyzers | SharedRepresentationAnalyzer, SpectralQualityAnalyzer, ConditionalSensitivityModel, RoutingConsistencyGuard, GlobalBitBudgetOptimizer, QuantizationInteractionModel, FixedGridRefiner, ResidualCorrectionPlanner, NVFP4SuitabilityAnalyzer, KVMemoryOptimizer, StructuralFallbackPlanner (`analysis/`) |
+| INSUFFICIENT_EVIDENCE gate | `schemas/coverage.py` — destructive actions blocked on under-observed capacity unless explicitly overridden; rare-specialist vs redundant distinguished |
+| Candidate graph / lineage | `candidates/` — immutable DAG, predicted-vs-measured, operator+provenance, per-tensor repr map, memory breakdown, routing stability, corpus hotspots; predictions never deployable |
+| Per-rank memory/KV ledger | `analysis/kv_memory.py` (`MemoryLedger`, `plan_kv_budget`) |
+| Pareto engine (v3) | `experiments/pareto_v3.py` — nondominated frontier, knee as scored region, neighbor deltas w/ marginal quality/GiB |
+| Corpus-semantic bidirectional | `analysis/corpus_semantic.py` + quality-delta projection |
+| Canonical pipeline | `atlas/v3_pipeline.py` orchestrating all analyzers |
+| Dashboard surfaces | Researcher section: V3 Analyzers / Candidate Graph / Corpus Evidence tabs |
+| CLI | `analyze`, `v3-pareto`, `v3-candidates`, `v3-corpus` |
+| Output contract | §27 extended with 9 v3 artifacts; `export_run` emits them |
+| Tests | `test_f22_v3` (13) + `test_f23_v3_system` (6); 189 total; ruff + mypy (`src`) clean |
+
+Still gated on real hardware/weights (unchanged from v2): NVFP4 SM121 kernel
+path measurement, EXL3 materialization, BF16-parent authoritative rankings, and
+two-Spark runtime profiling. All decision logic is model-agnostic and runs on
+the synthetic MiniMoE today.
+
+*End of gap analysis (updated for Atlas v3).*

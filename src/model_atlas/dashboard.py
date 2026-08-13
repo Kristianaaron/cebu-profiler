@@ -16,6 +16,7 @@ from typing import Any
 from model_atlas.atlas.hierarchy import build_hierarchy
 from model_atlas.atlas.pathways import path_stats
 from model_atlas.atlas.reap import (
+    CalibrationSample,
     SaliencyAccumulator,
     make_synthetic_corpus,
     run_calibration,
@@ -27,6 +28,7 @@ from model_atlas.compression import expert_response_curve, get_backend_registry
 from model_atlas.evaluation import detect_leakage, evaluate_heldout, promote_allowed
 from model_atlas.planning import SearchInputs, generate_candidates
 from model_atlas.registry.architectures import get_registry
+from model_atlas.schemas.evidence import EvidenceKind
 from model_atlas.schemas.ontology import CapabilityLabel, SuccessState
 
 SEED = 0
@@ -45,6 +47,9 @@ _ICONS: dict[str, str] = {
     "candidate": '<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
     "heldout": '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1 1 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
     "maps": '<polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21 3 6"/><polyline points="3 6 9 9 15 6 21 9"/><line x1="9" x2="9" y1="9" y2="18"/>',
+    "v3": '<circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><path d="M2 12h20"/>',
+    "candidates": '<path d="M6 3h12l-2 2H8z"/><path d="M6 21h12l-2-2H8z"/><path d="M5 7v10M19 7v10"/><circle cx="12" cy="12" r="3"/>',
+    "corpus": '<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>',
     "hierarchy": '<path d="M8 6h13M8 12h13M8 18h13"/><circle cx="4" cy="6" r="2"/><circle cx="4" cy="12" r="2"/><circle cx="4" cy="18" r="2"/>',
     "reality": '<path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><circle cx="12" cy="12" r="6"/>',
 }
@@ -374,7 +379,71 @@ def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
         "hierarchy": hierarchy_payload,
         "reality": reality_payload,
         "ecosystem": ecosystem_payload,
+        "v3": _v3_pipeline_payload(model, corpus, seed),
+        "candidates_graph": _candidate_graph_payload(model, corpus, seed),
+        "corpus": _corpus_payload(model, corpus, seed),
     }
+
+def _candidate_graph_payload(model: MiniMoE, corpus: list[CalibrationSample], seed: int) -> dict[str, Any]:
+    """Demonstration candidate graph with predicted-vs-measured discipline."""
+    from model_atlas.candidates import (
+        CandidateGraph,
+        CandidateMetricSet,
+        CandidateNode,
+        CandidateStage,
+        OperatorKind,
+    )
+
+    g = CandidateGraph(source_teacher_id=f"teacher-{model.arch.name}")
+    g.add(
+        CandidateNode(
+            candidate_id="teacher",
+            name="BF16 teacher",
+            stage=CandidateStage.P0_REFERENCE,
+            predicted=False,
+            deployed=True,
+            quality_vector=CandidateMetricSet(quality_retention=1.0, evidence_kind=EvidenceKind.MEASURED),
+        )
+    )
+    g.add(
+        CandidateNode(
+            candidate_id="mk-exl3",
+            name="EXL3 global allocation",
+            parent_ids=["teacher"],
+            stage=CandidateStage.P4_EXL3,
+            predicted=True,
+            operators=[OperatorKind.GLOBAL_BIT_BUDGET, OperatorKind.EXL3_EXPRESS],
+            quality_vector=CandidateMetricSet(quality_retention=0.98, evidence_kind=EvidenceKind.PREDICTED),
+        )
+    )
+    g.add(
+        CandidateNode(
+            candidate_id="mk-exl3-nvfp4",
+            name="+NVFP4 substitution",
+            parent_ids=["mk-exl3"],
+            stage=CandidateStage.P6_SM121_ALLOCATION,
+            predicted=True,
+            operators=[OperatorKind.NVFP4_SUITABILITY],
+            quality_vector=CandidateMetricSet(quality_retention=0.95, evidence_kind=EvidenceKind.PREDICTED),
+        )
+    )
+    return g.model_dump(mode="json")
+
+def _corpus_payload(model: MiniMoE, corpus: list[CalibrationSample], seed: int) -> dict[str, Any]:
+    from model_atlas.analysis import build_corpus_semantic_map, project_corpus_delta
+    from model_atlas.schemas.coverage import EvidenceGate
+
+    report = build_corpus_semantic_map(model, corpus, top_k=2, gate=EvidenceGate())
+    project_corpus_delta(report, candidate_id="mk-exl3", per_sample_delta={0: -0.05, 1: -0.03})
+    return report.model_dump(mode="json")
+
+def _v3_pipeline_payload(model: MiniMoE, corpus: list[CalibrationSample], seed: int) -> dict[str, Any]:
+    """Run the canonical v3 pipeline and emit a JSON-safe payload for the
+    V3 dashboard surface. Predictions are never styled as measured."""
+    from model_atlas.atlas.v3_pipeline import run_v3_pipeline, v3_run_to_jsonable
+
+    run = run_v3_pipeline(model, corpus, seed=seed)
+    return v3_run_to_jsonable(run)
 
 
 _CAP3D_JS = r"""
@@ -778,6 +847,14 @@ def render_dashboard(data: dict[str, Any]) -> str:
                 {"id": "reality", "title": "Real-bytes"},
             ],
         },
+        {
+            "section": "Researcher",
+            "tabs": [
+                {"id": "v3", "title": "V3 Analyzers"},
+                {"id": "candidates", "title": "Candidate Graph"},
+                {"id": "corpus", "title": "Corpus Evidence"},
+            ],
+        },
     ]
     nav_html = []
     for group in nav:
@@ -958,6 +1035,31 @@ def render_dashboard(data: dict[str, Any]) -> str:
     <h3>Residual repair</h3><table id="t-residual"></table>
     <h3>Distillation targets</h3><table id="t-distill"></table>
  </div>
+ <div class="panel" id="panel-v3">
+   <p class="note">V3 fidelity-first analyzers: spectral / shared-structure / conditional-sensitivity / routing-consistency / global EXL3 bit-budget / NVFP4 suitability / quant-interaction / KV+system ledger / structural fallback, wired by the canonical pipeline. <b>Predictions are never styled as measured.</b></p>
+   <div id="v3-stages"></div>
+   <h3>V3 canonical pipeline stages</h3><div id="v3-stage-list"></div>
+   <h3>Spectral</h3><table id="t-spectral"></table>
+   <h3>Shared structure</h3><table id="t-shared"></table>
+   <h3>Conditional sensitivity</h3><table id="t-cond"></table>
+   <h3>Routing consistency</h3><div id="v3-routing"></div>
+   <h3>Global EXL3 bit budget</h3><table id="t-bitmaps"></table>
+   <h3>NVFP4 suitability</h3><table id="t-nvfp4"></table>
+   <h3>KV / system ledger</h3><div id="t-kv"></div>
+   <h3>Structural fallback</h3><table id="t-fallback"></table>
+   <h3>Pareto frontier</h3><div id="t-pareto"></div>
+ </div>
+ <div class="panel" id="panel-candidates">
+   <p class="note">Candidate graph: immutable lineage, predicted-vs-measured status, operators + provenance, memory breakdown, routing stability, corpus hotspots. Predictions can never be deployable.</p>
+   <table id="t-candidates"></table>
+ </div>
+ <div class="panel" id="panel-corpus">
+   <p class="note">Corpus ↔ model bidirectional evidence: semantic clusters, per-cluster expert coverage, expert→activating-clusters, and teacher-relative quality deltas projected onto clusters. Insufficient-evidence clusters are blocked from auto-compression.</p>
+   <h3>Semantic clusters</h3><table id="t-clusters"></table>
+   <h3>Cluster × expert coverage</h3><table id="t-cluster-coverage"></table>
+   <h3>Expert → activating clusters</h3><table id="t-expert-clusters"></table>
+   <h3>Quality deltas projected onto clusters</h3><table id="t-corpus-deltas"></table>
+ </div>
  </main>
 </div>
 </div>
@@ -1041,6 +1143,61 @@ def render_dashboard(data: dict[str, Any]) -> str:
 
  {_CAP3D_JS}
  {_CONTRAST_JS}
+
+ // ---- V3 analyzer surfaces (measured/predicted discipline) ----
+ (function(){{
+   var v = DATA.v3; if(!v) return;
+   var stages = document.getElementById('v3-stage-list'); if(stages) stages.innerHTML = v.stages_run.map(s=>`<span class='chip'>${{s}} <span class=mute>(${{v.evidence[s]||'measured'}})</span></span>`).join('');
+   var sr = document.getElementById('v3-stages'); if(sr) sr.innerHTML = `<span class='stat'><span class='k'>stages</span><span class='v'>${{v.stages_run.length}}</span></span>` +
+     `<span class='stat'><span class='k'>routing identity</span><span class='v'>${{v.routing_consistency_passed?'pass':'FAIL'}}</span></span>`;
+   var sp = v.spectral && v.spectral.rows || [];
+   var spMap = sp.slice(0, 40).map(r=>({{'layer':r.layer,'expert':r.expert,'tensor':r.tensor,'eff rank':r.effective_rank,'energy top3':r.energy_ratio_top,'heavy tail':r.heavy_tail,'uniqueness':r.spectral_uniqueness}}));
+   fill('t-spectral', Object.keys(spMap[0]||{{}}), spMap);
+   var sh = v.shared_structure && v.shared_structure.rows || [];
+   var shMap = sh.slice(0,20).map(r=>({{'expert':r.expert,'shared ratio':r.shared_energy_ratio,'unique ratio':r.unique_energy_ratio,'proj savings':r.projected_storage_savings}}));
+   fill('t-shared', Object.keys(shMap[0]||{{}}), shMap);
+   var cs = v.conditional_sensitivity && v.conditional_sensitivity.rows || [];
+   var csMap = cs.filter(r=>r.expert===0).map(r=>({{'layer':r.layer,'expert':r.expert,'upstream noise':r.upstream_noise,'recon error':r.reconstruction_error}}));
+   fill('t-cond', Object.keys(csMap[0]||{{}}), csMap);
+   document.getElementById('t-kv').innerHTML = v.kv_plan ? `<span class='stat'><span class='k'>recommended KV</span><span class='v'>${{v.kv_plan.recommended_format}}</span></span>` +
+     `<span class='stat'><span class='k'>headroom GiB</span><span class='v'>${{(v.kv_plan.headroom_bytes/1073741824).toFixed(2)}}</span></span>` +
+     `<span class='stat'><span class='k'>ctx target</span><span class='v'>${{v.kv_plan.context_target_tokens}}</span></span>` : 'no kv plan';
+   var bm = [];
+   Object.entries(v.bit_maps||{{}}).forEach(function(entry){{ var k=entry[0], o=entry[1]; bm.push({{'budget GiB':k,'assignments':(o&&o.assignments||[]).length,'mean bpw': o&&o.mean_bpw||0}}); }});
+   fill('t-bitmaps', ['budget GiB','assignments','mean bpw'], bm);
+   var nv = v.nvfp4 && v.nvfp4.rows || [];
+   var nvMap = nv.slice(0,30).map(r=>({{'layer':r.layer,'expert':r.expert,'recon err':r.reconstruction_error,'router impact':r.routing_impact,'accepted':r.accepted?'yes':'no','recovery':r.recovery_kind}}));
+   fill('t-nvfp4', Object.keys(nvMap[0]||{{}}), nvMap);
+   var fb = v.structural_fallback || [];
+   fill('t-fallback', ['reduction %','preserved routing'], fb.map(r=>({{'reduction %':r.reduction_percent,'preserved routing':r.preserved_routing_destinations?'yes':'no','blocked':(r.blocked_capacity||[]).length}})));
+   var pf = v.pareto && v.pareto.points || [];
+   document.getElementById('t-pareto').innerHTML = `<span class='stat'><span class='k'>frontier</span><span class='v'>${{(v.pareto&&v.pareto.frontier_ids||[]).length}}</span></span>` +
+     `<span class='stat'><span class='k'>knee region</span><span class='v'>${{(v.pareto&&v.pareto.knee_region||[]).length}}</span></span>` +
+     '<table><caption>frontier / knee</caption><thead><tr><th>candidate</th><th>quality</th><th>resident GiB</th><th>decode</th><th>frontier</th><th>knee</th></tr></thead><tbody>' +
+     pf.map(pt=>`<tr><td>${{pt.candidate_id}}</td><td>${{pt.values.quality}}</td><td>${{pt.values.resident_gib}}</td><td>${{pt.values.decode_tps}}</td><td>${{pt.frontier?'yes':'no'}}</td><td>${{(v.pareto.knee_region||[]).includes(pt.candidate_id)?'knee':''}}</td></tr>`).join('') + '</tbody></table>';
+ }})();
+
+ // ---- Candidate graph surface (predicted vs measured) ----
+ (function(){{
+   var cg = DATA.candidates_graph || {{nodes:{{}}}};
+   var nodes = Object.values(cg.nodes||{{}});
+   fill('t-candidates', ['candidate','stage','predicted','deployable','operators','quality','resident GiB'],
+     nodes.map(n=>({{'candidate':n.candidate_id,'stage':n.stage,'predicted':n.predicted?'yes':'no','deployable':n.deployed?'yes':'no',
+       'operators':(n.operators||[]).join(',')||'-','quality': n.quality_vector&&n.quality_vector.quality_retention!=null?n.quality_vector.quality_retention:'-',
+       'resident GiB': n.memory_breakdown?Object.values(n.memory_breakdown||{{}}).reduce((a,b)=>a+(b||0),0)/1073741824:0 }})));
+ }})();
+
+ // ---- Corpus evidence surface ----
+ (function(){{
+   var cs = DATA.corpus || {{clusters:[],cluster_expert_coverage:[],expert_activation:[],deltas:[]}};
+   fill('t-clusters', ['cluster','domain','samples','observations'], cs.clusters.map(c=>({{'cluster':c.cluster_id,'domain':c.domain,'samples':c.sample_ids.length,'observations':c.observations}})));
+   var cc = cs.cluster_expert_coverage||[];
+   fill('t-cluster-coverage', ['cluster','layer','expert','routed','freq','status'], cc.slice(0,40).map(r=>({{'cluster':r.cluster_id,'layer':r.layer,'expert':r.expert,'routed':r.routed_count,'freq':r.activation_frequency,'status':r.status}})));
+   fill('t-expert-clusters', ['layer','expert','activating clusters','unique coverage'],
+     cs.expert_activation.map(e=>({{'layer':e.layer,'expert':e.expert,'activating clusters':(e.activating_clusters||[]).join(',')||'-','unique coverage':e.unique_coverage}})) );
+   fill('t-corpus-deltas', ['cluster','candidate','quality delta','regression'], cs.deltas.map(d=>({{'cluster':d.cluster_id,'candidate':d.candidate_id,'quality delta':d.quality_delta,'regression':d.regression?'yes':'no'}})) );
+ }})();
+
  document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{{
    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
    document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));

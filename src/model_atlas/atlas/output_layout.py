@@ -63,6 +63,19 @@ ATLAS_RUN_FILES: frozenset[str] = frozenset(
         "warnings.json",
         "atlas_summary.json",
         "reproducibility_command.sh",
+        "v3_run.json",
+        "v3_candidate_graph.json",
+        "v3_corpus_evidence.json",
+        "shared_representation.json",
+        "spectral_quality.json",
+        "conditional_sensitivity.json",
+        "routing_consistency.json",
+        "global_bit_budget.json",
+        "nvfp4_suitability.json",
+        "quant_interaction.json",
+        "kv_ledger.json",
+        "structural_fallback.json",
+        "pareto_frontier.json",
     }
 )
 
@@ -113,6 +126,15 @@ def expected_run_files(evidence_level: EvidenceLevel) -> frozenset[str]:
             "compression_manifest.json",
             "hierarchy_map.json",
             "planning_maps.json",
+            "v3_run.json",
+            "v3_candidate_graph.json",
+            "v3_corpus_evidence.json",
+            "shared_representation.json",
+            "spectral_quality.json",
+            "routing_consistency.json",
+            "global_bit_budget.json",
+            "kv_ledger.json",
+            "pareto_frontier.json",
         }
     if _level_at_least(EvidenceLevel.CAUSAL_ATLAS):
         base |= {

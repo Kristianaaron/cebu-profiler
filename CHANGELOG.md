@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.0.0 — 2026-08-13
+
+Atlas v3 fidelity-first architecture (per the v3 implementation instruction +
+GLM-5.2 blueprint) —
+
+- New `analysis/` analyzers (all evidence-disciplined, never mutate weights):
+  - `SharedRepresentationAnalyzer` (KLT/PCA-style shared-vs-unique energy),
+    `SpectralQualityAnalyzer` (effective rank / energy / heavy tail / uniqueness),
+    `ConditionalSensitivityModel` (upstream-conditional sensitivity, MixQuant-style),
+    `RoutingConsistencyGuard` (top-k / rank / boundary / JS divergence gate, VSRAQ-style),
+    `GlobalBitBudgetOptimizer` (GEMQ-style EXL3 allocation per system budget),
+    `QuantizationInteractionModel` (additive+pairwise surrogate with confidence certificate),
+    `FixedGridRefiner` (ReQuant-style fixed-storage refinement),
+    `ResidualCorrectionPlanner` (+bpw vs residual-correction vs NVFP4/FP8 at matched memory),
+    `NVFP4SuitabilityAnalyzer` (tolerance + routing-impact + QAD/CKA-QAD recovery flag),
+    `KVMemoryOptimizer` + per-rank `MemoryLedger` (weights/runtime/KV/OS/headroom),
+    `StructuralFallbackPlanner` (5–20% fold-in variants, evidence-gated).
+- New `schemas/coverage.py`: `INSUFFICIENT_EVIDENCE` gate — absence of activation is
+  not evidence of irrelevance; destructive actions on under-observed capacity are
+  blocked unless an explicit auditable override is recorded. Rare-specialist
+  capacity is distinguished from redundant capacity.
+- New `candidates/` graph: immutable candidate lineage with parent→child DAG,
+  predicted-vs-measured status, operator + provenance, per-tensor representation
+  map, memory breakdown, routing stability, corpus hotspots. Predictions can never
+  be deployable; derived measured candidates from a deployable parent are blocked.
+- New `experiments/pareto_v3.py`: nondominated frontier, **knee as a scored
+  region**, neighbor deltas (fidelity/compact moves) with marginal quality/GiB —
+  predictions and measured points are never conflated.
+- `analysis/corpus_semantic.py`: bidirectional corpus↔model map (cluster→experts,
+  expert→activating clusters) with per-cluster coverage statuses and teacher-relative
+  quality-delta projection onto clusters.
+- `atlas/v3_pipeline.py`: canonical fidelity-first orchestrator streaming all analyzers.
+- Dashboard: new **Researcher** nav section with **V3 Analyzers / Candidate Graph /
+  Corpus Evidence** tabs over measured data; prediction-vs-measured labels on every
+  surface.
+- CLI: `analyze`, `v3-pareto`, `v3-candidates`, `v3-corpus` subcommands.
+- §27 output contract extended with `v3_run.json`, `v3_candidate_graph.json`,
+  `v3_corpus_evidence.json`, `shared_representation.json`, `spectral_quality.json`,
+  `routing_consistency.json`, `global_bit_budget.json`, `kv_ledger.json`,
+  `pareto_frontier.json`; `export_run` emits the v3 artifacts.
+- Tests: `test_f22_v3` (13) + `test_f23_v3_system` (6) + export/dashboard updates;
+  189 total; ruff + mypy (`src`) clean.
+
+# Changelog
+
 ## 0.8.3 — 2026-08-13
 
 Success−Failure tab readability pass —

@@ -8,13 +8,19 @@ from pathlib import Path
 import typer
 
 from model_atlas import __version__
+from model_atlas.analysis import (
+    build_corpus_semantic_map,
+)
 from model_atlas.atlas.export import export_run
 from model_atlas.atlas.reap import make_synthetic_corpus, run_calibration
 from model_atlas.atlas.runtime import build_mini_moe
+from model_atlas.atlas.v3_pipeline import run_v3_pipeline
+from model_atlas.candidates import CandidateGraph, CandidateNode, CandidateStage
 from model_atlas.census.census import build_manifest
 from model_atlas.checkpoint.source_manifest import load_manifest
 from model_atlas.checkpoint.structural_graph import build_structural_graph
 from model_atlas.dashboard import write_dashboard
+from model_atlas.experiments.pareto_v3 import restrict_frontier
 from model_atlas.planning.memory_planner import GIB, assess
 from model_atlas.planning.realbytes import account_manifest, plan_candidates, report
 from model_atlas.registry.architectures import get_registry
@@ -220,6 +226,134 @@ def plan(
         print(f"  - {f}")
     if not result.safe:
         raise typer.Exit(1)
+
+
+@app.command()
+def analyze(
+    arch: str = typer.Option("k3-mini", "--arch"),
+    seed: int = typer.Option(0, "--seed"),
+    samples: int = typer.Option(12, "--samples"),
+    seq_len: int = typer.Option(6, "--seq-len"),
+) -> None:
+    """Run fidelity-first v3 analyzers: spectral/shared/conditional/routing/
+    bit-budget/NVFP4/KV/fallback over a synthetic model."""
+    spec = get_registry().get(arch)
+    if spec.needs_source_measurement:
+        print(f"{arch}: requires measured tensor sizes; use synthetic arch like k3-mini")
+        raise typer.Exit(1)
+    model = build_mini_moe(spec, seed=seed)
+    corpus = make_synthetic_corpus(
+        n_samples=samples, seq_len=seq_len, vocab=spec.vocabulary_size or 1000, seed=seed
+    )[0]
+    run = run_v3_pipeline(model, corpus, seed=seed)
+    print(f"v3 analyzers on {arch} (seed {seed}):")
+    print(f"  stages: {', '.join(run.stages_run)}")
+    print(
+        "  routing-consistency identity gate: "
+        f"{'PASS' if run.routing_consistency_passed else 'FAIL'}"
+    )
+    nv = run.nvfp4
+    print(f"  nvfp4 candidates accepted: {getattr(nv, 'accepted_count', 0) if nv else 0}")
+    pf = run.pareto
+    print(f"  pareto frontier: {', '.join(getattr(pf, 'frontier_ids', []) if pf else [])}")
+
+
+@app.command("v3-pareto")
+def v3_pareto(
+    arch: str = typer.Option("k3-mini", "--arch"),
+    seed: int = typer.Option(0, "--seed"),
+) -> None:
+    """Compute the v3 Pareto frontier + knee region over an idealized candidate sweep."""
+    from model_atlas.experiments.pareto_v3 import FrontierPoint
+
+    pts = [
+        FrontierPoint(
+            candidate_id="A",
+            values={
+                "quality": 0.99, "resident_gib": 214.0, "decode_tps": 21.0, "context": 256000,
+            },
+        ),
+        FrontierPoint(
+            candidate_id="B",
+            values={"quality": 0.995, "resident_gib": 196.0, "decode_tps": 26.0, "context": 384000},
+        ),
+        FrontierPoint(
+            candidate_id="C",
+            values={"quality": 0.96, "resident_gib": 150.0, "decode_tps": 33.0, "context": 720000},
+        ),
+        FrontierPoint(
+            candidate_id="D",
+            values={"quality": 0.97, "resident_gib": 160.0, "decode_tps": 30.0, "context": 700000},
+        ),
+    ]
+    r = restrict_frontier(pts)
+    print("v3 pareto:")
+    print(f"  frontier: {', '.join(r.frontier_ids)}")
+    print(f"  knee region: {', '.join(r.knee_region)}")
+    for cid, deltas in r.neighbor_deltas.items():
+        for d in deltas:
+            print(
+                f"  {cid} -> {d.direction} {d.candidate_id}: "
+                f"dQ {d.dquality} dGiB {d.dresident_gib} dQ/GiB {d.quality_per_gib}"
+            )
+
+
+@app.command("v3-candidates")
+def v3_candidates() -> None:
+    """Print the v3 candidate graph lineage + predicted/measured discipline."""
+    g = CandidateGraph(source_teacher_id="teacher")
+    g.add(
+        CandidateNode(
+            candidate_id="teacher",
+            name="BF16 teacher",
+            stage=CandidateStage.P0_REFERENCE,
+            predicted=False,
+            deployed=True,
+        )
+    )
+    g.add(
+        CandidateNode(
+            candidate_id="mk-exl3",
+            name="EXL3 global allocation",
+            parent_ids=["teacher"],
+            stage=CandidateStage.P4_EXL3,
+            predicted=True,
+        )
+    )
+    g.add(
+        CandidateNode(
+            candidate_id="mk-exl3-nvfp4",
+            name="+NVFP4 substitution",
+            parent_ids=["mk-exl3"],
+            stage=CandidateStage.P6_SM121_ALLOCATION,
+            predicted=True,
+        )
+    )
+    print("v3 candidate graph:")
+    for node in g.nodes.values():
+        status = "deployable" if node.deployed else ("predicted" if node.predicted else "measured")
+        print(f"  {node.candidate_id}: {node.name} [{status}] parents={node.parent_ids}")
+
+
+@app.command("v3-corpus")
+def v3_corpus(
+    arch: str = typer.Option("k3-mini", "--arch"),
+    seed: int = typer.Option(0, "--seed"),
+    samples: int = typer.Option(12, "--samples"),
+) -> None:
+    """Build the corpus-semantic bidirectional map + coverage gate."""
+    from model_atlas.schemas.coverage import EvidenceGate
+
+    spec = get_registry().get(arch)
+    model = build_mini_moe(spec, seed=seed)
+    corpus = make_synthetic_corpus(
+        n_samples=samples, seq_len=6, vocab=spec.vocabulary_size or 1000, seed=seed
+    )[0]
+    rep = build_corpus_semantic_map(model, corpus, top_k=2, gate=EvidenceGate())
+    print("v3 corpus evidence:")
+    print(f"  clusters: {', '.join(c.cluster_id for c in rep.clusters)}")
+    print(f"  insufficient-evidence cluster-cells: {len(rep.insufficient_clusters)}")
+    print(f"  per-cluster rows: {len(rep.cluster_expert_coverage)}")
 
 
 def main() -> None:

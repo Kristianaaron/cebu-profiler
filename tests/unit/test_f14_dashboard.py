@@ -44,10 +44,20 @@ def test_render_dashboard_is_self_contained_html():
     # collapses to its intrinsic 300x150 size and the cells render invisibly.
     assert "canvas#cap3d{width:100%" in html
     assert "canvas#cap3d-contrast{width:100%" in html
-    # embedded JSON payload parses
+    # embedded JSON payload parses (const DATA = {...}; then JS follows)
     start = html.index("const DATA = ") + len("const DATA = ")
-    end = html.index(";", start)
-    embedded = json.loads(html[start:end])
+    i = start
+    depth = 0
+    while i < len(html):
+        ch = html[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    embedded = json.loads(html[start : i + 1])
     assert embedded["meta"]["arch"] == "k3-mini"
 
 

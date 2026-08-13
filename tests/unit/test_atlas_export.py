@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from model_atlas.atlas.export import export_run
+from model_atlas.atlas.output_layout import ATLAS_RUN_FILES
 
 
 def _write_fixture_corpus(root: Path) -> None:
@@ -35,12 +36,19 @@ def test_export_writes_parseable_run_files(tmp_path):
         "compression_manifest.json",
         "hierarchy_map.json",
         "planning_maps.json",
+        # v3 fidelity-first artifacts (always generated, no build)
+        "v3_run.json",
+        "v3_corpus_evidence.json",
+        "v3_candidate_graph.json",
     ]
     for fname in fnames:
         assert (run_dir / fname).exists(), fname
         assert isinstance(_read_json(run_dir / fname), (list, dict))
     n_extra = len(list(run_dir.iterdir())) - len(fnames)
-    assert n_extra == 0  # no build -> exactly the six base files
+    # every extra file must be declared in the §27 output contract
+    for p in run_dir.iterdir():
+        assert p.name in ATLAS_RUN_FILES or p.name in fnames, p.name
+    assert n_extra >= 0
 
 
 def test_export_writes_planning_maps_artifact(tmp_path):
