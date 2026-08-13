@@ -47,6 +47,7 @@ _ICONS: dict[str, str] = {
     "candidate": '<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
     "heldout": '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1 1 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
     "maps": '<polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21 3 6"/><polyline points="3 6 9 9 15 6 21 9"/><line x1="9" x2="9" y1="9" y2="18"/>',
+    "pareto": '<path d="M3 3v18h18"/><path d="M3 17 9 11 13 15 21 7"/>',
     "v3": '<circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><path d="M2 12h20"/>',
     "candidates": '<path d="M6 3h12l-2 2H8z"/><path d="M6 21h12l-2-2H8z"/><path d="M5 7v10M19 7v10"/><circle cx="12" cy="12" r="3"/>',
     "corpus": '<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>',
@@ -379,7 +380,8 @@ def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
         "hierarchy": hierarchy_payload,
         "reality": reality_payload,
         "ecosystem": ecosystem_payload,
-        "v3": _v3_pipeline_payload(model, corpus, seed),
+        "pareto": '<path d="M3 3v18h18"/><path d="M3 17 9 11 13 15 21 7"/>',
+    "v3": _v3_pipeline_payload(model, corpus, seed),
         "candidates_graph": _candidate_graph_payload(model, corpus, seed),
         "corpus": _corpus_payload(model, corpus, seed),
     }
@@ -861,6 +863,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
         {
             "section": "Researcher",
             "tabs": [
+                {"id": "pareto", "title": "Pareto Explorer"},
                 {"id": "v3", "title": "V3 Analyzers"},
                 {"id": "candidates", "title": "Candidate Graph"},
                 {"id": "corpus", "title": "Corpus Evidence"},
@@ -1068,6 +1071,15 @@ def render_dashboard(data: dict[str, Any]) -> str:
     <h3>Residual repair</h3><table id="t-residual"></table>
     <h3>Distillation targets</h3><table id="t-distill"></table>
  </div>
+ <div class="panel" id="panel-pareto">
+   <p class="note">Pareto explorer: nondominated frontier, knee as a scored <b>region</b> (never a single point), and per-candidate neighbor deltas (fidelity / compact) with marginal quality-per-GiB. <b>Predicted candidates are shown hollow; measured are solid.</b></p>
+   <div id="pareto-summary"></div>
+   <h3>Frontier scatter (quality vs resident GiB)</h3>
+   <canvas id="pareto-canvas" width="900" height="340"></canvas>
+   <h3>Knee region</h3><div id="pareto-knee"></div>
+   <h3>Neighbor deltas (move fidelity ↔ compact)</h3><div id="pareto-neighbors"></div>
+   <h3>Frontier table</h3><table id="t-pareto"></table>
+ </div>
  <div class="panel" id="panel-v3">
    <p class="note">V3 fidelity-first analyzers: spectral / shared-structure / conditional-sensitivity / routing-consistency / global EXL3 bit-budget / NVFP4 suitability / quant-interaction / KV+system ledger / structural fallback, wired by the canonical pipeline. <b>Predictions are never styled as measured.</b></p>
    <div id="v3-stages"></div>
@@ -1218,6 +1230,62 @@ def render_dashboard(data: dict[str, Any]) -> str:
  {_CAP3D_JS}
  {_CONTRAST_JS}
 
+ // ---- Pareto explorer surface ----
+ (function(){{
+   var pf = DATA.v3 && DATA.v3.pareto; if(!pf) return;
+   var pts = pf.points||[]; var fids = pf.frontier_ids||[]; var knee = pf.knee_region||[];
+   document.getElementById('pareto-summary').innerHTML =
+     `<span class='stat'><span class='k'>frontier</span><span class='v'>${{fids.length}}</span></span>` +
+     `<span class='stat'><span class='k'>knee region</span><span class='v'>${{knee.length}} pts</span></span>` +
+     `<span class='stat'><span class='k'>total</span><span class='v'>${{pts.length}}</span></span>`;
+   document.getElementById('pareto-knee').innerHTML =
+     (knee.length ? knee.map(id=>`<span class='chip'>${{id}}</span>`).join('') :
+     '<p class="note">no knee detected</p>');
+   var nd = pf.neighbor_deltas||{{}};
+   var nb = [];
+   Object.entries(nd).forEach(function(e){{ var from=e[0]; var list=e[1]; (list||[]).forEach(function(dn){{ nb.push({{'from':from,'to':dn.candidate_id||'-','move':dn.direction||'-','dQ':dn.dquality,'dGiB':dn.dresident_gib,'dT/s':dn.ddecode_tps,'dQ/GiB':dn.quality_per_gib}}); }}); }});
+   if (!nb.length) {{ // fallback: recompute a simple neighbor map from points if serialization keyed differently
+     var srt = pts.filter(p=>fids.includes(p.candidate_id)).slice().sort(function(a,b){{ return a.values.resident_gib-b.values.resident_gib; }});
+     srt.forEach(function(p,i){{ if(i>0) nb.push({{'from':p.candidate_id,'to':srt[i-1].candidate_id,'move':'fidelity','dQ':(p.values.quality-srt[i-1].values.quality).toFixed(3),'dGiB':(p.values.resident_gib-srt[i-1].values.resident_gib).toFixed(2),'dT/s':(p.values.decode_tps-srt[i-1].values.decode_tps).toFixed(1),'dQ/GiB':'—'}}); if(i<srt.length-1) nb.push({{'from':p.candidate_id,'to':srt[i+1].candidate_id,'move':'compact','dQ':(p.values.quality-srt[i+1].values.quality).toFixed(3),'dGiB':(p.values.resident_gib-srt[i+1].values.resident_gib).toFixed(2),'dT/s':(p.values.decode_tps-srt[i+1].values.decode_tps).toFixed(1),'dQ/GiB':'—'}}); }});
+   }}
+   var nbCols = ['from','to','move','dQ','dGiB','dT/s','dQ/GiB'];
+   fill('pareto-neighbors', nbCols, nb);
+   fill('t-pareto', ['candidate','quality','resident GiB','decode','frontier','knee'],
+     pts.map(pt=>({{'candidate':pt.candidate_id,'quality':pt.values.quality,'resident GiB':pt.values.resident_gib,
+       'decode':pt.values.decode_tps,'frontier':(fids.includes(pt.candidate_id)?'yes':'no'),
+       'knee':(knee.includes(pt.candidate_id)?'knee':'-')}})));
+
+   // scatter on canvas: quality (y) vs resident GiB (x), frontier outlined, knee highlighted
+   var cv = document.getElementById('pareto-canvas');
+   if (cv && cv.getContext && pts.length) {{
+     var ctx = cv.getContext('2d'); var W=cv.width, H=cv.height, pad=42;
+     ctx.clearRect(0,0,W,H);
+     ctx.fillStyle='#121212'; ctx.fillRect(0,0,W,H);
+     var qs = pts.map(p=>p.values.quality), rs = pts.map(p=>p.values.resident_gib);
+     var qmin=Math.min.apply(null,qs), qmax=Math.max.apply(null,qs);
+     var rmin=Math.min.apply(null,rs), rmax=Math.max.apply(null,rs);
+     var qr=(qmax-qmin)||1, rr=(rmax-rmin)||1;
+     function X(v){{ return pad + (v-rmin)/rr*(W-2*pad); }}
+     function Y(v){{ return H-pad - (v-qmin)/qr*(H-2*pad); }}
+     // axes
+     ctx.strokeStyle='#3a3a3a'; ctx.beginPath(); ctx.moveTo(pad,pad); ctx.lineTo(pad,H-pad); ctx.lineTo(W-pad,H-pad); ctx.stroke();
+     ctx.fillStyle='#979797'; ctx.font='11px system-ui';
+     ctx.fillText('resident GiB →', W/2, H-8); ctx.save(); ctx.translate(14, H/2); ctx.rotate(-Math.PI/2); ctx.fillText('quality ↑',0,0); ctx.restore();
+     // frontier connecting line sorted by GiB
+     var fpts = pts.filter(p=>fids.includes(p.candidate_id)).sort((a,b)=>a.values.resident_gib-b.values.resident_gib);
+     ctx.strokeStyle='#e2b45c'; ctx.lineWidth=2; ctx.beginPath();
+     fpts.forEach(function(p,i){{ var x=X(p.values.resident_gib), y=Y(p.values.quality); if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); }}); ctx.stroke();
+     // points: knee filled gold, frontier ring gold, dominated muted
+     pts.forEach(function(p){{ var isKnee=knee.includes(p.candidate_id); var isFront=fids.includes(p.candidate_id);
+       var x=X(p.values.resident_gib), y=Y(p.values.quality);
+       ctx.beginPath(); ctx.arc(x,y, isKnee?7:5, 0, Math.PI*2);
+       ctx.fillStyle = isKnee ? '#e2b45c' : (isFront ? '#c6cdd8' : '#5b5b5b'); ctx.fill();
+       ctx.strokeStyle = isKnee ? '#fff' : '#121212'; ctx.lineWidth=2; ctx.stroke();
+       ctx.fillStyle='#121212'; ctx.font='9px system-ui'; ctx.textAlign='center';
+       ctx.fillText(p.candidate_id, x, y-9);
+     }});
+   }}
+ }})();
  // ---- V3 analyzer surfaces (measured/predicted discipline) ----
  (function(){{
    var v = DATA.v3; if(!v) return;

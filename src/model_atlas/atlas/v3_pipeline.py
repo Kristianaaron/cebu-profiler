@@ -139,20 +139,29 @@ def run_v3_pipeline(
     stages.append("structural_fallback")
 
     # 9. Pareto over a small synthetic candidate family (idealized numbers for
-    #    demonstration on the minature; real measured numbers replace these)
+    #    demonstration on the minature; real measured numbers replace these).
+    #    Sized so the nondominated frontier has several points -> the explorer's
+    #    scatter, knee band, and neighbor-delta views are meaningfully populated.
     from model_atlas.experiments.pareto_v3 import FrontierPoint
 
     candidates = []
-    for i, size_gb in enumerate((0.25, 0.3, 0.35)):
-        base = 1.0 - i * 0.02
+    family = (
+        (0.250, 0.945, 24.0, 600000),  # compact: low GiB, low quality
+        (0.275, 0.950, 23.5, 560000),
+        (0.300, 0.960, 22.0, 480000),
+        (0.350, 0.985, 21.0, 360000),
+        (0.375, 0.990, 20.5, 320000),
+        (0.400, 0.995, 19.5, 260000),  # fidelity: high GiB, high quality
+    )
+    for i, (size_gb, q, decode, ctx) in enumerate(family):
         candidates.append(
             FrontierPoint(
                 candidate_id=f"mk-{i}",
                 values={
-                    "quality": round(base, 3),
+                    "quality": q,
                     "resident_gib": size_gb,
-                    "decode_tps": round(20.0 + i * 2.0, 1),
-                    "context": 32000 + i * 4000,
+                    "decode_tps": decode,
+                    "context": ctx,
                 },
             )
         )
