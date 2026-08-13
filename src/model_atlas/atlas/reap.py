@@ -194,6 +194,19 @@ class ContrastAccumulator:
         rows.sort(key=lambda r: r[2], reverse=True)
         return rows[:topk]
 
+    def cell_saliency(
+        self,
+        label: CapabilityLabel,
+        layer: int,
+        expert: int,
+        pos: SuccessState,
+        neg: SuccessState,
+        stage: TrajectoryStage | None = None,
+    ) -> tuple[float, float]:
+        """Raw (pos_saliency, neg_saliency) for one cell, unfolded across stages."""
+        cell = self._folded_pairs(label, stage).get((layer, expert), {})
+        return cell.get(pos.value, 0.0), cell.get(neg.value, 0.0)
+
     def participates(
         self,
         label: CapabilityLabel,

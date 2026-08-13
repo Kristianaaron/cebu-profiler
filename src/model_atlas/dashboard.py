@@ -106,7 +106,9 @@ def _contrast_voxels(model: MiniMoE, contrast: Any) -> dict[str, Any]:
     """Signed success−failure saliency per (layer, expert), per capability label.
 
     delta = pos_saliency − neg_saliency; positive favours success, negative
-    favours failure. Normalised per label for a diverging display.
+    favours failure. Normalised per label for a diverging display. ``pos`` /
+    ``neg`` are the raw mean saliencies on successful vs failed runs (the two
+    components Δ is derived from).
     """
     labels = [lbl.value for lbl in list(CapabilityLabel)[:12]]
     n_layers = len(model.layers)
@@ -121,7 +123,19 @@ def _contrast_voxels(model: MiniMoE, contrast: Any) -> dict[str, Any]:
         for lay in range(n_layers):
             for e in range(n_exp):
                 d = by_cell.get((lay, e), 0.0)
-                voxels.append({"label": li, "layer": lay, "expert": e, "delta": round(d / mx, 3)})
+                pos, neg = contrast.cell_saliency(
+                    label, lay, e, SuccessState.SUCCESS, SuccessState.FAILURE
+                )
+                voxels.append(
+                    {
+                        "label": li,
+                        "layer": lay,
+                        "expert": e,
+                        "delta": round(d / mx, 3),
+                        "pos": round(pos, 4),
+                        "neg": round(neg, 4),
+                    }
+                )
     return {"labels": labels, "n_layers": n_layers, "n_experts": n_exp, "voxels": voxels}
 
 
@@ -617,12 +631,12 @@ _CONTRAST_JS = r"""
   cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
   var ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  var hover = null, cells = [], PAD = 16, CELLH = 32, LOOM = 8, TOP0 = 120, COLPER = 4, COLPAD = 150, GAPW = 18, ROWGAP = 14;
+  var hover = null, cells = [], colHeads = [], PAD = 16, CELLH = 32, LOOM = 8, TOP0 = 120, COLPER = 4, COLPAD = 150, GAPW = 18, ROWGAP = 14;
 
   function layout() {
     var cw = cv.clientWidth || W, chh = cv.clientHeight || H;
     if (cw !== W || chh !== H) { W = cw; H = chh; cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); }
-    var pad = 16, gap = 18, rowGap = 12, loom = 8;
+    var pad = 16, gap = 18, rowGap = 28, loom = 8;
     var ncolPer = 4, nrows = Math.ceil(labels.length / ncolPer);
     var colW = (W - 2 * pad - (ncolPer - 1) * gap) / ncolPer;
     var cellW = colW / ne;
@@ -632,10 +646,12 @@ _CONTRAST_JS = r"""
     var top0 = (H - totalH) / 2;
     PAD = pad; CELLH = cellH; LOOM = loom; TOP0 = top0; COLPER = ncolPer; COLPAD = colW; GAPW = gap; ROWGAP = rowGap;
     cells = [];
+    colHeads = [];
     for (var li = 0; li < labels.length; li++) {
       var colIdx = li % ncolPer, rowIdx = Math.floor(li / ncolPer);
       var cx = pad + colIdx * (colW + gap);
       var cy = top0 + rowIdx * (stackH + rowGap);
+      colHeads.push({ x: cx, w: colW, y: cy, label: labels[li] });
       for (var ly = 0; ly < nl; ly++) {
         var cellY = cy + ly * (cellH + loom);
         for (var e = 0; e < ne; e++) {
@@ -653,27 +669,44 @@ _CONTRAST_JS = r"""
     for (var i = 0; i < cells.length; i++) {
       var c = cells[i], d = c.v.delta, s = Math.min(1, Math.abs(d)), active = hover && isOn(hover, c.v);
       var x = c.x, y = c.y, w = c.w, h = c.h;
+      var txtCol = 'rgba(235,240,246,0.95)';
       if (d > 0.12) {            // success-favoured: bright filled tile
         ctx.fillStyle = 'rgba(218,226,238,' + (0.10 + 0.62 * s).toFixed(3) + ')';
         ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
         if (active) { ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.8; ctx.strokeRect(x, y, w, h); }
+        txtCol = 'rgba(245,249,252,0.98)';
       } else if (d < -0.12) {    // failure-favoured: faint outline
         if (active) { ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.8; }
         else { ctx.strokeStyle = 'rgba(150,160,175,' + (0.30 + 0.55 * s).toFixed(3) + ')'; ctx.lineWidth = 1 + s; }
         ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
-      } else {                   // neutral
-        ctx.fillStyle = 'rgba(200,210,224,' + (0.05 + 0.10 * s).toFixed(3) + ')';
+        txtCol = 'rgba(196,204,214,0.9)';
+      } else {                   // neutral: no strong success/failure lean
+        ctx.fillStyle = 'rgba(200,210,224,' + (0.06 + 0.12 * s).toFixed(3) + ')';
         ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
         if (active) { ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.8; ctx.strokeRect(x, y, w, h); }
+        txtCol = 'rgba(196,204,214,0.9)';
+      }
+      if (w >= 22 && h >= 16) {  // room for the value
+        ctx.fillStyle = txtCol; ctx.font = '9px "JetBrains Mono",ui-monospace,monospace';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText((d >= 0 ? '+' : '') + (Math.round(Math.abs(d) * 100) / 100).toFixed(2), x + w / 2, y + h / 2 + 0.5);
+        ctx.textBaseline = 'alphabetic';
       }
     }
-    ctx.fillStyle = 'rgba(150,160,180,0.85)'; ctx.font = '10.5px system-ui';
-    ctx.textAlign = 'left'; ctx.fillText('\u25A0 filled = success-favoured   \u25A1 outlined = failure-favoured   brightness = |\u0394|', PAD, H - 8);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    for (var hh = 0; hh < colHeads.length; hh++) {
+      var ch = colHeads[hh];
+      ctx.fillStyle = 'rgba(205,213,223,0.95)'; ctx.font = '500 10px system-ui';
+      ctx.fillText(ch.label, ch.x + ch.w / 2, ch.y - 7);
+    }
     ctx.textAlign = 'right';
     for (var L = 0; L < nl; L++) {
       ctx.fillStyle = 'rgba(150,160,180,0.9)'; ctx.font = '11px system-ui';
       ctx.fillText('L' + L, PAD - 8, TOP0 + L * (CELLH + LOOM) + CELLH / 2);
     }
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(150,160,180,0.9)'; ctx.font = '10px system-ui';
+    ctx.fillText('saliency leans to:  \u25A0 SUCCESS (filled)   \u25A1 FAILURE (outlined);   number = \u0394   (brightness = |\u0394|)', PAD, H - 6);
   }
   function pick(e) {
     var r = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0, width: W, height: H };
@@ -684,15 +717,25 @@ _CONTRAST_JS = r"""
   function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
   function renderPanel() {
     var v = hover; var html = '';
-    if (!v) { if (panelEl) panelEl.innerHTML = '<p class="p-sub">Hover a cell to inspect the success vs failure contrast.</p>'; return; }
+    if (!v) { if (panelEl) panelEl.innerHTML = '<p class="p-sub">Hover a tile: it shows how that expert\u2019s routing for that capability leans on successful vs failed runs (\u0394).</p>'; return; }
     var d = v.delta;
     var kind = d > 0.12 ? 'success-favoured' : d < -0.12 ? 'failure-favoured' : 'neutral';
     var sign = d >= 0 ? '+' : '';
+    var dec;
+    if (d > 0.12) dec = 'This expert lights up mainly on SUCCESSFUL runs of this capability \u2014 its routing is tied to good outcomes.';
+    else if (d < -0.12) dec = 'This expert lights up mainly on FAILED runs \u2014 routing here goes with failures.';
+    else dec = 'About as involved in successes as failures \u2014 no strong lean.';
     html += '<div class="p-head" title="' + esc(labels[v.label]) + '">\u25B8 ' + esc(labels[v.label]) + ' <span class="mut">· L' + v.layer + ' / E' + v.expert + '</span></div>';
     html += '<div class="p-sub">' + (labels[v.label] || '') + ' · layer L' + v.layer + ' · expert E' + v.expert + '</div>';
-    html += '<div style="margin:10px 0;font-size:20px;font-weight:700;font-family:JetBrains Mono,monospace">delta ' + sign + (Math.round(d * 1000) / 1000) + '</div>';
-    html += '<div class="p-sub" style="color:#e9edf3">' + kind + (v.label >= 0 ? '' : '') + '</div>';
-    html += '<div class="p-sub" style="color:#979797">\u0394 = success saliency \u2212 failure saliency (normalised per capability). Filled = leans toward successful runs; outlined = leans toward failures.</div>';
+    html += '<div style="margin:10px 0;font-size:20px;font-weight:700;font-family:JetBrains Mono,monospace">\u0394 ' + sign + (Math.round(d * 1000) / 1000) + ' <span class="mut" style="font-size:11px;font-weight:400">(' + kind + ')</span></div>';
+    function cell(v, key) { return (v && v[key] != null) ? v[key].toFixed(3) : '\u2013'; }
+    html += '<table style="width:100%;border-collapse:collapse;margin:4px 0 8px">'
+      + '<tr><td class="p-sub" style="padding:2px 0;color:#b9c0ca">success saliency</td><td class="p-sub" style="text-align:right;font-family:JetBrains Mono,monospace;color:#e9edf3">' + cell(v,'pos') + '</td></tr>'
+      + '<tr><td class="p-sub" style="padding:2px 0;color:#b9c0ca">failure saliency</td><td class="p-sub" style="text-align:right;font-family:JetBrains Mono,monospace;color:#e9edf3">' + cell(v,'neg') + '</td></tr>'
+      + '<tr><td class="p-sub" style="padding:2px 0;color:#b9c0ca">\u0394 = success \u2212 failure</td><td class="p-sub" style="text-align:right;font-family:JetBrains Mono,monospace;color:#e9edf3">' + sign + (Math.round(d * 1000) / 1000) + '</td></tr>'
+      + '</table>';
+    html += '<div class="p-sub" style="color:#d7d7d7;line-height:1.5">' + dec + '</div>';
+    html += '<div class="p-sub" style="color:#838383">Saliency = this expert\u2019s average routing strength for that capability. \u0394 is normalised per capability (+1.00 = strongest success lean in the capability).</div>';
     if (panelEl) panelEl.innerHTML = html + '<div style="height:12px"></div>';
   }
   function redraw() { draw(); renderPanel(); }
@@ -776,7 +819,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  th{{color:#979797;font-weight:600}}
  .chip{{display:inline-block;background:#262626;border:1px solid #353535;border-radius:4px;padding:2px 8px;margin:2px;font-size:12px}}
  .cap-tbl-head{{display:flex;justify-content:flex-end;align-items:center;gap:8px;margin:14px 0 20px}}
- #cap-sort{{background:#121519;color:#aeb5bf;border:1px solid #343a42;border-radius:6px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;padding:4px 24px 4px 10px;cursor:pointer}}
+ #cap-sort{{appearance:none;-webkit-appearance:none;-moz-appearance:none;background:#121519 url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='10'%20height='6'%20viewBox='0%200%2010%206'%3E%3Cpath%20d='M1%201l4%204%204-4'%20stroke='%2386909e'%20stroke-width='1.6'%20fill='none'%20stroke-linecap='round'%20stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 12px center;color:#aeb5bf;border:1px solid #343a42;border-radius:6px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;padding:4px 26px 4px 10px;cursor:pointer}}
  #cap-sort option{{background:#121519;color:#b6bdc7}}
  .cap-sort-lbl{{color:#7d848e;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:11px;text-transform:uppercase;letter-spacing:.06em}}
  .cap-more-wrap{{display:flex;justify-content:center;margin:8px 0 2px}}
@@ -809,6 +852,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
    background-size:48px 48px,48px 48px}}
  .cap3d-canvas{{position:relative;flex:1;min-width:0}}
  canvas#cap3d{{width:100%;aspect-ratio:680/420;height:auto;display:block;touch-action:none;cursor:default;border-radius:6px;background:transparent}}
+ canvas#cap3d-contrast{{width:100%;aspect-ratio:680/420;height:auto;display:block;touch-action:none;cursor:default;border-radius:6px;background:transparent}}
  .cap3d-controls{{position:absolute;top:6px;left:6px;z-index:3;display:flex;align-items:center;gap:4px;background:rgba(14,14,14,0.7);border:1px solid #444444;border-radius:6px;padding:3px 4px}}
  .cap3d-controls button{{width:19px;height:19px;display:inline-flex;align-items:center;justify-content:center;padding:0;color:#d7d7d7;background:#171717;border:1px solid #444444;border-radius:4px;cursor:pointer}}
  .cap3d-controls button:hover{{border-color:#646464;color:#fff;background:#202020}}
@@ -876,7 +920,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
    <script type="application/json" id="cap3d-json">{cap3d_json}</script>
    <div class="cap-tbl-head">
      <label class="cap-sort-lbl" for="cap-sort">sort</label>
-     <select id="cap-sort" title="sort"><option value="strength">strongest → weakest</option><option value="score">score</option><option value="name">category</option></select>
+     <select id="cap-sort" title="sort"><option value="strength">strong → weak</option><option value="score">score</option><option value="name">category</option></select>
      <button id="cap-filter-btn" title="filter domains">Filter <span id="cap-fcount"></span></button>
    </div>
    <div class="cap-tray-bd" id="cap-tray-bd"></div>
@@ -885,7 +929,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
    <div class="cap-more-wrap"><button id="cap-more">Load more</button></div>
  </div>
  <div class="panel" id="panel-contrast">
-   <p class="note">Success − Failure: for each expert cell, how much its saliency is tied to successful vs failed runs (Δ = success − failure saliency, normalised per capability). Bright filled tiles lean success; outlined lean failure.</p>
+   <p class="note">Success − Failure: how each expert cell\u2019s <b>saliency</b> (average routing strength for a capability) splits across successful vs failed runs. Δ = success-saliency − failure-saliency (normalised per capability): a bright filled tile = that expert mostly lights up on <b>successful</b> runs; an outlined tile = it mostly lights up on <b>failed</b> runs; near-neutral = about equally involved. The number inside each tile is Δ; hover any tile for the exact success/failure values.</p>
    <div class="cap3d-wrap">
      <div class="cap3d-canvas">
        <canvas id="cap3d-contrast"

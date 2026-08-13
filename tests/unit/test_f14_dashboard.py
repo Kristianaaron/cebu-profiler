@@ -12,6 +12,14 @@ def test_build_dashboard_data_has_sections():
     assert "voxels" in data["capability3d"] and data["capability3d"]["voxels"]
     assert data["capability3d"]["labels"]
     assert data["contrast"]
+    assert "voxels" in data["contrast3d"] and data["contrast3d"]["voxels"]
+    # each contrast cell exposes its raw success/failure components plus Δ
+    vox = data["contrast3d"]["voxels"][0]
+    assert {"delta", "pos", "neg"} <= set(vox)
+    assert all(
+        0.0 <= v["pos"] <= 1.0 and 0.0 <= v["neg"] <= 1.0
+        for v in data["contrast3d"]["voxels"]
+    )
     assert data["coalitions"]
     assert data["paths"]
     assert data["compression"]
@@ -32,6 +40,10 @@ def test_render_dashboard_is_self_contained_html():
     assert html.startswith("<!doctype html>")
     assert "Atlas Lab" in html
     assert html.rstrip().endswith("</html>")
+    # both 3D canvases must carry an explicit responsive size rule; a bare canvas
+    # collapses to its intrinsic 300x150 size and the cells render invisibly.
+    assert "canvas#cap3d{width:100%" in html
+    assert "canvas#cap3d-contrast{width:100%" in html
     # embedded JSON payload parses
     start = html.index("const DATA = ") + len("const DATA = ")
     end = html.index(";", start)

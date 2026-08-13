@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.3 — 2026-08-13
+
+Success−Failure tab readability pass —
+
+- `ContrastAccumulator.cell_saliency(label, layer, expert, pos, neg)` exposes
+  the raw per-cell mean saliencies on successful vs failed runs; `_contrast_voxels`
+  now emits `pos`/`neg` alongside `delta` so the panel shows the actual
+  components, not just the derived number.
+- Contrast canvas gets per-capability **column headers** with more row spacing,
+  cell text colour by polarity (bright on success-favoured filled tiles), and
+  the hover panel adds a plain-language finding ("routing tied to good
+  outcomes" vs "goes with failures") plus a success/failure saliency table.
+- Fix: `canvas#cap3d-contrast` gets an explicit responsive `width:100%` +
+  `aspect-ratio` rule so it never collapses to the intrinsic 300×150 canvas size
+  (mirrors the capability canvas).
+- Tests: test_f14 asserts raw pos/neg bounds and the responsive canvas rules;
+  170 total; ruff + mypy (`src`) clean.
+
 ## 0.8.2 — 2026-08-12
 
 Capability tab: monochrome 3D voxel view + sticky detail panel, agent-friendly —
