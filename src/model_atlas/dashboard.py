@@ -684,12 +684,13 @@ _CAP3D_JS = r"""
 
 
 _CONTRAST_JS = r"""
-// Success−Failure view — dependency-free, render-on-interaction only.
+// Success−Failure view — green/red hashed tiles, click-to-pin, no empty state.
 // Each (label, layer, expert) cell encodes success−failure saliency:
-//   * bright FILLED tile  -> success-favoured (learning pulls for successes)
-//   * faint OUTLINE only  -> failure-favoured (route matters for failures)
-//   * brightness/opacity  = |delta| magnitude (strength of the contrast)
-// divergence is per-label normalised. Hover shows the exact values.
+//   * GREEN tile  -> success-favoured (routing pulls for successes)
+//   * RED tile    -> failure-favoured (routing matters for failures)
+//   * grey        -> neutral; colour depth = |delta|
+// Hover details + click-to-pin; the right panel always shows a default cell
+// (strongest |delta| in the focused capability) so there is never an empty state.
 (function () {
   var cv = document.getElementById('cap3d-contrast');
   if (!cv || !cv.getContext || !DATA.contrast3d || !DATA.contrast3d.voxels) return;
@@ -700,7 +701,7 @@ _CONTRAST_JS = r"""
   cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
   var ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  var hover = null, cells = [], colHeads = [], PAD = 16, CELLH = 32, LOOM = 8, TOP0 = 120, COLPER = 4, COLPAD = 150, GAPW = 18, ROWGAP = 14;
+  var hover = null, pin = null, focus = 0, cells = [], colHeads = [], PAD = 16, CELLH = 32, LOOM = 8, TOP0 = 120, COLPER = 4, COLPAD = 150, GAPW = 18, ROWGAP = 14;
 
   function layout() {
     var cw = cv.clientWidth || W, chh = cv.clientHeight || H;
@@ -732,30 +733,32 @@ _CONTRAST_JS = r"""
     }
   }
   function isOn(a, b) { return a.label === b.label && a.layer === b.layer && a.expert === b.expert; }
-    function draw() {
+  function draw() {
     layout();
     ctx.clearRect(0, 0, W, H);
     for (var i = 0; i < cells.length; i++) {
       var c = cells[i], d = c.v.delta, s = Math.min(1, Math.abs(d)), active = hover && isOn(hover, c.v);
       var x = c.x, y = c.y, w = c.w, h = c.h;
       var txtCol = 'rgba(235,240,246,0.95)';
-      if (d > 0.12) {            // success-favoured: bright filled tile
-        ctx.fillStyle = 'rgba(218,226,238,' + (0.10 + 0.62 * s).toFixed(3) + ')';
+      var fillA = 0.08 + 0.65 * s;
+      var isPinned = pin && isOn(pin, c.v);
+      if (d > 0.12) {
+        ctx.fillStyle = 'rgba(74,222,128,' + fillA.toFixed(3) + ')';
         ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
-        if (active) { ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.8; ctx.strokeRect(x, y, w, h); }
+        if (active || isPinned) { ctx.strokeStyle = '#ffffff'; ctx.lineWidth = isPinned?2.2:1.8; ctx.strokeRect(x, y, w, h); }
         txtCol = 'rgba(245,249,252,0.98)';
-      } else if (d < -0.12) {    // failure-favoured: faint outline
-        if (active) { ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.8; }
-        else { ctx.strokeStyle = 'rgba(150,160,175,' + (0.30 + 0.55 * s).toFixed(3) + ')'; ctx.lineWidth = 1 + s; }
-        ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
-        txtCol = 'rgba(196,204,214,0.9)';
-      } else {                   // neutral: no strong success/failure lean
-        ctx.fillStyle = 'rgba(200,210,224,' + (0.06 + 0.12 * s).toFixed(3) + ')';
+      } else if (d < -0.12) {
+        ctx.fillStyle = 'rgba(248,113,113,' + fillA.toFixed(3) + ')';
         ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
-        if (active) { ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.8; ctx.strokeRect(x, y, w, h); }
-        txtCol = 'rgba(196,204,214,0.9)';
+        if (active || isPinned) { ctx.strokeStyle = '#ffffff'; ctx.lineWidth = isPinned?2.2:1.8; ctx.strokeRect(x, y, w, h); }
+        txtCol = 'rgba(250,250,252,0.98)';
+      } else {
+        ctx.fillStyle = 'rgba(200,210,224,' + (0.10 + 0.20 * s).toFixed(3) + ')';
+        ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h));
+        if (active || isPinned) { ctx.strokeStyle = '#ffffff'; ctx.lineWidth = isPinned?2.2:1.8; ctx.strokeRect(x, y, w, h); }
+        txtCol = 'rgba(205,213,223,0.95)';
       }
-      if (w >= 22 && h >= 16) {  // room for the value
+      if (w >= 22 && h >= 16) {
         ctx.fillStyle = txtCol; ctx.font = '9px "JetBrains Mono",ui-monospace,monospace';
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
         ctx.fillText((d >= 0 ? '+' : '') + (Math.round(Math.abs(d) * 100) / 100).toFixed(2), x + w / 2, y + h / 2 + 0.5);
@@ -775,7 +778,7 @@ _CONTRAST_JS = r"""
     }
     ctx.textAlign = 'left';
     ctx.fillStyle = 'rgba(150,160,180,0.9)'; ctx.font = '10px system-ui';
-    ctx.fillText('saliency leans to:  \u25A0 SUCCESS (filled)   \u25A1 FAILURE (outlined);   number = \u0394   (brightness = |\u0394|)', PAD, H - 6);
+    ctx.fillText('green \u25A0 leans SUCCESS, red \u25A0 leans FAILURE, grey \u2014 neutral; number = \u0394 (colour depth = |\u0394|)', PAD, H - 6);
   }
   function pick(e) {
     var r = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0, width: W, height: H };
@@ -785,8 +788,13 @@ _CONTRAST_JS = r"""
   }
   function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
   function renderPanel() {
-    var v = hover; var html = '';
-    if (!v) { if (panelEl) panelEl.innerHTML = '<p class="p-sub">Hover a tile: it shows how that expert\u2019s routing for that capability leans on successful vs failed runs (\u0394).</p>'; return; }
+    var v = hover || pin;
+    var html = '';
+    if (!v) {
+      var all = []; for (var ai = 0; ai < vox.length; ai++) if (vox[ai].label === focus) all.push(vox[ai]);
+      all.sort(function(a,b){ return Math.abs(b.delta)-Math.abs(a.delta); });
+      v = all[0] || vox[0];
+    }
     var d = v.delta;
     var kind = d > 0.12 ? 'success-favoured' : d < -0.12 ? 'failure-favoured' : 'neutral';
     var sign = d >= 0 ? '+' : '';
@@ -794,7 +802,9 @@ _CONTRAST_JS = r"""
     if (d > 0.12) dec = 'This expert lights up mainly on SUCCESSFUL runs of this capability \u2014 its routing is tied to good outcomes.';
     else if (d < -0.12) dec = 'This expert lights up mainly on FAILED runs \u2014 routing here goes with failures.';
     else dec = 'About as involved in successes as failures \u2014 no strong lean.';
-    html += '<div class="p-head" title="' + esc(labels[v.label]) + '">\u25B8 ' + esc(labels[v.label]) + ' <span class="mut">· L' + v.layer + ' / E' + v.expert + '</span></div>';
+    var pinnedNow = pin && isOn(pin, v);
+    var hdrIcon = pinnedNow ? '\u25CF ' : '\u25CB ';
+    html += '<div class="p-head" title="' + esc(labels[v.label]) + '">' + hdrIcon + esc(labels[v.label]) + ' <span class="mut">· L' + v.layer + ' / E' + v.expert + (pinnedNow ? ' · pinned' : '') + '</span></div>';
     html += '<div class="p-sub">' + (labels[v.label] || '') + ' · layer L' + v.layer + ' · expert E' + v.expert + '</div>';
     html += '<div style="margin:10px 0;font-size:20px;font-weight:700;font-family:JetBrains Mono,monospace">\u0394 ' + sign + (Math.round(d * 1000) / 1000) + ' <span class="mut" style="font-size:11px;font-weight:400">(' + kind + ')</span></div>';
     function cell(v, key) { return (v && v[key] != null) ? v[key].toFixed(3) : '\u2013'; }
@@ -805,10 +815,11 @@ _CONTRAST_JS = r"""
       + '</table>';
     html += '<div class="p-sub" style="color:#d7d7d7;line-height:1.5">' + dec + '</div>';
     html += '<div class="p-sub" style="color:#838383">Saliency = this expert\u2019s average routing strength for that capability. \u0394 is normalised per capability (+1.00 = strongest success lean in the capability).</div>';
-    if (panelEl) panelEl.innerHTML = html + '<div style="height:12px"></div>';
+    if (panelEl) panelEl.innerHTML = html + '<div class="p-sub" style="color:#60666e;margin-top:-2px">' + (pin ? 'Pinned cell \u2014 click any tile to re-pin, click the same tile or the ring to unpin.' : 'Default cell (strongest |\u0394| in this capability) \u2014 hover or click a tile to inspect it.') + '</div>';
   }
   function redraw() { draw(); renderPanel(); }
   cv.addEventListener('pointermove', function (e) { hover = pick(e); redraw(); });
+  cv.addEventListener('click', function (e) { var p = pick(e); pin = (p && pin && isOn(pin, p)) ? null : (p || pin); if (!p && !pin) pin = null; redraw(); });
   if (cv.style) cv.style.cursor = 'default';
   draw(); renderPanel();
 })();
@@ -930,6 +941,28 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .cap3d-canvas{{position:relative;flex:1;min-width:0}}
  canvas#cap3d{{width:100%;aspect-ratio:680/420;height:auto;display:block;touch-action:none;cursor:default;border-radius:6px;background:transparent}}
  canvas#cap3d-contrast{{width:100%;aspect-ratio:680/420;height:auto;display:block;touch-action:none;cursor:default;border-radius:6px;background:transparent}}
+ #contrast-list-wrap{{margin-top:18px}}
+ .c-panel{{background:#101316;border:1px solid #2e2e2e;border-radius:8px;margin-bottom:10px;overflow:hidden}}
+ .c-panel .c-head{{display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;user-select:none}}
+ .c-panel .c-head:hover{{background:#161a1e}}
+ .c-panel.open .c-caret{{transform:rotate(90deg)}}
+ .c-caret{{color:#6b7280;font-size:10px;transition:transform .12s;width:10px;text-align:center}}
+ .c-cap{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:13px;color:#e9edf3}}
+ .c-body{{display:none;padding:2px 14px 12px}}
+ .c-panel.open .c-body{{display:block}}
+ .c-row{{display:flex;align-items:center;gap:10px;padding:6px 0;border-top:1px dashed #23282e}}
+ .c-row:first-of-type{{border-top:none}}
+ .c-cell{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:#c6cdd8;min-width:52px}}
+ .c-bar{{flex:1;height:8px;background:#1c2127;border-radius:4px;overflow:hidden}}
+ .c-fill{{display:block;height:100%}}
+ .success .c-fill{{background:#4ade80}} .failure .c-fill{{background:#f87171}} .neutral .c-fill{{background:#64748b}}
+ .c-d{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;font-weight:600;width:64px;text-align:right}}
+ .success .c-d{{color:#4ade80}} .failure .c-d{{color:#f87171}} .neutral .c-d{{color:#cbd5e1}}
+ .c-tag{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:9.5px;text-transform:uppercase;letter-spacing:.05em;padding:2px 7px;border-radius:999px;border:1px solid currentColor}}
+ .success .c-tag{{color:#4ade80}} .failure .c-tag{{color:#f87171}} .neutral .c-tag{{color:#94a3b8}}
+ .c-more{{border-top:1px solid #23282e;padding-top:8px;text-align:center}}
+ .c-more button{{background:transparent;border:1px solid #3a3a3a;color:#cfd6e0;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;padding:4px 14px;border-radius:6px;cursor:pointer}}
+ .c-more button:hover{{border-color:#6b6b6b;color:#fff}}
  .cap3d-controls{{position:absolute;top:6px;left:6px;z-index:3;display:flex;align-items:center;gap:4px;background:rgba(14,14,14,0.7);border:1px solid #444444;border-radius:6px;padding:3px 4px}}
  .cap3d-controls button{{width:19px;height:19px;display:inline-flex;align-items:center;justify-content:center;padding:0;color:#d7d7d7;background:#171717;border:1px solid #444444;border-radius:4px;cursor:pointer}}
  .cap3d-controls button:hover{{border-color:#646464;color:#fff;background:#202020}}
@@ -1016,7 +1049,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
      </div>
      <aside class="cap3d-panel" id="cap3d-panel-contrast" aria-live="polite"></aside>
    </div>
-   <table id="t-contrast"></table></div>'''
+   <div id="contrast-list-wrap"></div></div>
  <div class="panel" id="panel-coalition"><p class="note">Co-routed expert pairs (count) at layer 0 (measured).</p><table id="t-coalition"></table></div>
  <div class="panel" id="panel-path"><p class="note">Most frequent cross-layer route signatures with success rate (measured).</p><table id="t-path"></table></div>
  <div class="panel" id="panel-hierarchy"><p class="note">Six-level atlas hierarchy (v2 §9): L1 weights → L2 units → L3 experts → L4 coalitions → L5 pathways → L6 behaviour, traceable up and down. Per-level node counts are measured; the example shows how many lower-level components realise the first behaviour (and the peak shared-channel prevalence — how load-bearing).</p><div id="hier-stats"></div><table id="t-hierarchy"></table></div>
@@ -1113,8 +1146,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
    countSel();
  }})();
  renderCap();
- fill('t-contrast', ['label','top success−failure (delta)'],
-   DATA.contrast.map(r=>({{label:r.label, top:r.top.map(x=>`L${{x.layer}}E${{x.expert}} (${{x.delta}})`).join(' · ')}})));
+
  fill('t-coalition', ['pair','coactivity'], DATA.coalitions.map(r=>({{pair:`L0E${{r.pair[0]}} / L0E${{r.pair[1]}}`, coactivity:r.coactivity}})));
  fill('t-path', ['count','success rate','signature'], DATA.paths.map(r=>({{count:r.count, 'success rate':r.success_rate, signature:r.signature.map(s=>s.join(',')).join(' | ')}})));
  fill('t-compression', ['layer/expert','format','bits','recon','drift','repair'],
@@ -1140,6 +1172,48 @@ def render_dashboard(data: dict[str, Any]) -> str:
  fill('t-reality', ['envelope','keep','precision','bpw','stored','resident A','resident B','risk'],
    DATA.reality.candidates.map(r=>({{'envelope':r.envelope+' GiB','keep':(r.keep*100)+'%','precision':r.precision,
      'bpw':r.bpw,'stored':r.stored,'resident A':r.resident_a,'resident B':r.resident_b, 'risk':r.risk}})));
+
+ // ---- Success−Failure lazy list (accordion) ----
+ function dKind(d){{ return d>0.12?'success' : d<-0.12?'failure' : 'neutral'; }}
+ function dText(d){{ return (d>=0?'+':'')+(Math.round(Math.abs(d)*1000)/1000); }}
+ function rowHTML(x){{
+   var k = dKind(x.delta);
+   var pct = Math.min(100, Math.abs(x.delta)*100);
+   return "<div class='c-row " + k + "'><span class='c-cell'>L" + x.layer + " E" + x.expert + "</span>"
+     + "<span class='c-bar'><span class='c-fill' style='width:'+Math.max(3,Math.round(pct))+'%'></span></span>"
+     + "<span class='c-tag'>" + (k==='neutral' ? 'balanced' : k) + "</span>"
+     + "<span class='c-d'>" + dText(x.delta) + "</span></div>";
+ }}
+ var CONTR_ROW_BATCH = 3;
+ function contrRows(r){{ return ((r&&r.top)||[]).slice().sort(function(a,b){{ return Math.abs(b.delta)-Math.abs(a.delta); }}); }}
+ function renderContrastBody(pan, rows, limit){{
+   var bb = pan.querySelector('.c-body'); bb.dataset.rendered = '1';
+   bb.innerHTML = rows.slice(0, limit).map(rowHTML).join('');
+   if (rows.length > limit){{
+     var more = document.createElement('div'); more.className = 'c-more';
+     more.innerHTML = '<button type="button">Load more (' + (rows.length-limit) + ')</button>';
+     bb.appendChild(more);
+     more.querySelector('button').addEventListener('click', function(){{ renderContrastBody(pan, rows, rows.length); }});
+   }}
+ }}
+ function buildContrastList(){{
+   var wrap = document.getElementById('contrast-list-wrap');
+   if (!wrap) return;
+   var panels = [];
+   DATA.contrast.forEach(function(r){{
+     var div = document.createElement('div'); div.className = 'c-panel closed';
+     div.innerHTML = "<div class='c-head'><span class='c-caret'>\u25B6</span><span class='c-cap'></span></div><div class='c-body'></div>";
+     div.querySelector('.c-cap').textContent = r.label + '   \u00B7   ' + r.top.length + ' cells';
+     div.querySelector('.c-head').addEventListener('click', function(){{
+       var opened = div.classList.toggle('open');
+       if (opened && !div.querySelector('.c-body').dataset.rendered) renderContrastBody(div, contrRows(r), CONTR_ROW_BATCH);
+     }});
+     panels.push(div);
+   }});
+   wrap.innerHTML = '';
+   panels.forEach(function(d){{ wrap.appendChild(d); }});
+ }}
+ buildContrastList();
 
  {_CAP3D_JS}
  {_CONTRAST_JS}
