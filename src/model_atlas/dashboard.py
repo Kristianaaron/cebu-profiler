@@ -893,7 +893,6 @@ def render_dashboard(data: dict[str, Any]) -> str:
 <style>
  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
  body{{font-family:'Inter',ui-sans-serif,system-ui,sans-serif;margin:0;background:#121212;color:#dcdcdc}}
- header{{padding:18px 24px;background:#1b1b1b;border-bottom:1px solid #2e2e2e}}
  h1{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;letter-spacing:-0.01em;font-size:18px;margin:0}}
  .sub{{color:#979797;font-size:12px;margin-top:4px}}
  .layout{{display:flex;min-height:100vh}}
@@ -1004,8 +1003,6 @@ def render_dashboard(data: dict[str, Any]) -> str:
 <div class="layout">
 <nav class="side">{tab_html}</nav>
 <div class="col">
-<header><h1>Atlas Profile Platform — model-atlas</h1>
-<div class="sub">{data["meta"]["arch"]} · {data["meta"]["layers"]} layers · {data["meta"]["experts"]} experts · top-{data["meta"]["top_k"]} · seed {data["meta"]["seed"]} — synthetic miniature MoE; all values measured by the F3–F13 runtime. Two surfaces: <em>Profiling</em> (how the model routes &amp; what components carry) and <em>Quantization &amp; Fit</em> (how to shrink it + real-bytes envelopes).</div></header>
 <main class="main">
  <div class="panel" id="panel-summary">
    <p>End-to-end parent→derivative Atlas over a genuine synthetic mini-MoE. Everything below is computed by the same measured code paths as the test suite. This is the <strong>Atlas Profile Platform</strong>: use <em>Profiling</em> to understand the model, <em>Quantization &amp; Fit</em> to shrink/score it, and the <strong>Eval Harness</strong> link (bottom of the nav) for independent benchmarking.</p>
