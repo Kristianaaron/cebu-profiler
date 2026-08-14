@@ -51,7 +51,14 @@ def fit_plan(
     source_cfg = json.loads((Path(checkpoint_dir) / "config.json").read_text())
     budget_gib = window_physical_gib
     if budget_gib is None:
-        budget_gib = (measured_per_node_gib or DEFAULT_WINDOW_GIB) - OS_HEADROOM_GIB
+        if measured_per_node_gib is not None:
+            # measured PHYSICAL capacity -> subtract headroom once to get usable
+            budget_gib = measured_per_node_gib - OS_HEADROOM_GIB
+        else:
+            # DEFAULT_WINDOW_GIB is already a usable window budget (no reserve)
+            budget_gib = DEFAULT_WINDOW_GIB
+    elif measured_per_node_gib is None and window_physical_gib is None:
+        budget_gib = DEFAULT_WINDOW_GIB
     budget_bytes = int(budget_gib * (1024**3))
     out: dict[int, WidthFits] = {}
     for w in widths:

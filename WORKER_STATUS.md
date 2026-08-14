@@ -5,7 +5,7 @@ _Updated 2026-08-14 (round 3, coherent rewrite — no stale overclaims)._
 ## Mission / current state
 
 Implement the real GLM-5.2 two-DGX-Spark experiment capability. Round 3 added a
-**full loadable uniform-width derivative materializer** (all sparse layers x all
+**structurally-complete uniform-width derivative exporter** (all sparse layers x all
 experts, transactional/resumable/streamed) + a **measured size plan** from the
 464.8 GB census, and corrected every second-review finding. Two irreducible
 gates remain and are honestly reported (see Blockers): (i) no runtime-loadable ModelOpt-NVFP4
@@ -35,7 +35,7 @@ current availability is a separate live gate).
   `RealActivationHook` measures ONLY with an explicit real-corpus run id
   (offline replay never); `TorchScoringResult` rejects MEASURED with synthetic or
   missing provenance. Verified under `.venv-exec` (torch) + repo venv.
-- **F (loadable materializer, NEW)** — `loader.py` `materialize_uniform_width`:
+- **F (structural exporter, NEW)** — `loader.py` `materialize_uniform_width`: produces a STRUCTURALLY-COMPLETE tree (index+config rebuilt, quant assets preserved, exact validation, real resume/bounded-IO). `runtime_loadable` stays False (installed stack cannot decode ModelOpt-NVFP4).
   all sparse layers x all experts, uniform width `W` (multiple of 16, verified fail-closed on non-multiples
   fail-closed), expert-specific channel selections only when width == W, every
   non-target tensor copied verbatim, SAFETENSORS index + `config.json`
@@ -76,7 +76,7 @@ P3–7 · `9a164e9` review-fix 1 · (round-3 commit, below).
 
 ## Current status — two irreducible gates
 
-1. **Loadable decode path (schema/runtime blocker, demonstrated from installed
+1. **Runtime-Loadable decode path (schema/runtime blocker, demonstrated from installed
    source)**: vllm 0.21 + transformers 5.9.0 here expose NO ModelOpt NVFP4
    decoder (no `modelopt` quant_method mapping — verified: `modelopt-aware
    path present: False`; `nvfp4 modules in vllm quant: []`; `compressed_tensors`

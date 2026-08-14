@@ -75,20 +75,15 @@ print('runtime_loadable', res.runtime_loadable)   # False (no ModelOpt decoder h
 PY
 ```
 
-## 3. The ONLY valid runbook start: a fully materialized, loadable, in-envelope derivative
+## 3. The ONLY valid runbook start: a fully materialized structural-complete derivative + a ModelOpt-capable loader
 
-**Gate CLOSED until all three hold:**
-1. a **loadable** derivative checkpoint is materialized at `<= target envelope`
-   (per-rank ledger `fits == True` on the measured allocatable capacity after
-   production occupancy), with full tensor names/shapes/quant metadata, index and
-   config;
-2. it is **held-out evaluated** on the immutable harness (MEASURED quality
-   deltas);
-3. it passes a **runtime canary** (cold/warm/prefill/decode measured).
-
-Until then no vllm launch / full forward is issued. The 503 GB source cannot fit
-2×~120 GB and single-node `from_pretrained` is infeasible, so there is **no route
-that skips this gate**.
+The exporter always sets `runtime_loadable=False` because the installed stack
+cannot decode ModelOpt NVFP4. The execution gate stays CLOSED until BOTH hold:
+1. a **structurally-complete** derivative checkpoint is materialized at `<=
+   target envelope` (index+config rebuilt, exact-validation passed);
+2. an authoritative backend probe proves a ModelOpt-capable loader can decode/run
+   it — until then no vllm launch / full forward is issued. No route skips this
+   gate.
 
 ### 3a. When the gate is open — two-node vllm serving of the LOADED derivative
 

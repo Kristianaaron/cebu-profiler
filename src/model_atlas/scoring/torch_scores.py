@@ -138,36 +138,41 @@ def causal_ablation_scores(
     baseline_output: Any,
     ablated_output: Any,
     *,
-    epsilon: float = 1e-6,
+    epsilon: float | None = None,
 ) -> dict[int, float]:
-    """Genuine baseline-vs-ablated-output ablation contribution per channel.
+    """Genuine per-channel ablation contribution.
 
-    This is a REAL difference of outputs under an ablation, not a proxy. It
-    requires actual ablated outputs (e.g. the expert output with one channel
-    zeroed) and returns the per-channel relative contribution.
+    `baseline_output`: [num_tokens, hidden] (the reference expert output).
+    `ablated_output`: [num_channels, num_tokens, hidden], where channel `c`'s
+    slice holds the expert output with that channel ablated (zeroed).
 
-    Returns {channel: delta}, calling on a single fixed 1-D reference. For a
-    proper per-channel ablation each channel needs its own ablated output; the
-    caller passes the concatenated deltas and we normalize over channels.
-
-    `baseline_output` / `ablated_output`: [n_channels] or [num_tokens, n_channels];
-    if 1-D, each position is one channel's baseline-vs-ablated delta.
+    Each channel `c` is scored by a documented reduction: the mean over tokens
+    of the L2 norm of the per-token difference `baseline[t] - ablated[c,t]`.
+    Scores are normalized across channels; if every delta is zero the result is
+    all-zero (epsilon is NEVER used to fabricate mass). Removed the old
+    same-shape hidden-position interpretation.
     """
     b = baseline_output.detach().float()
     a = ablated_output.detach().float()
-    if b.shape != a.shape:
+    if b.ndim != 2:
+        raise ValueError(f"baseline must be 2-D [tokens, hidden], got {tuple(b.shape)}")
+    if a.ndim != 3:
         raise ValueError(
-            f"baseline/ablated output shape mismatch: {b.shape} vs {a.shape}"
+            f"ablated must be 3-D [channels, tokens, hidden], got {tuple(a.shape)}"
         )
-    delta = (b - a).abs()  # absolute change under ablation
-    # reduce tokens if 2-D (mean over token dim)
-    if delta.dim() > 1:
-        delta = delta.mean(dim=0)
-    contrib = delta  # do NOT add epsilon; zero-delta must stay all-zero
-    denom = float(contrib.sum())
+    n_chan, n_tok, hidden = a.shape
+    if b.shape != (n_tok, hidden):
+        raise ValueError(
+            f"trailing baseline {tuple(b.shape)} != ablated trailing "
+            f"{(n_tok, hidden)}"
+        )
+    # per-channel delta = mean over tokens of ||baseline[t]-ablated[c,t]||
+    d = (b.unsqueeze(0) - a).norm(dim=2)  # [channels, tokens]
+    score = d.mean(dim=1)  # [channels] per-channel reduction
+    denom = float(score.sum())
     if denom <= 0:
-        return {c: 0.0 for c in range(int(contrib.numel()))}
-    flat = contrib.tolist()
+        return {c: 0.0 for c in range(n_chan)}  # all-zero stays zero
+    flat = score.tolist()
     return {c: float(v) / denom for c, v in enumerate(flat)}
 
 
@@ -213,26 +218,31 @@ class RealActivationHook:
         self._run_id: str | None = None
         self._hook_ref: Any | None = None
 
+    def _snapshot_measured(self) -> None:
+        """Bind the exact run id active at capture time so a later run-id change
+        cannot relabel old evidence."""
+        self._measured = bool(self._run_id is not None)
+        self._measured_run_id = self._run_id if self._measured else None
+
     def __call__(self, module: Any, inp: Any, out: Any) -> None:
-        """Forward-hook body: store intermediate activation + router logits."""
-        self.z_activation = out
-        self.has_captured = True
+        """Forward-hook body: store activation and snapshot measured under the
+        active run id (so an attached real forward is measurable)."""
+        self._store(out)
 
     def capture(self, z_activation: Any, router_logits: Any | None = None) -> None:
-        """Record an activation + router. `is_measured` is True ONLY when this
-        capture occurred while a real-corpus run id was already bound; a stale
-        offline capture taken before binding is never measurable."""
-        import time  # noqa: F401
+        """Record an activation + router; snapshots measured state now. An
+        offline capture taken before binding stays unmeasured forever."""
+        self._store(z_activation, router_logits)
 
+    def _store(self, z_activation: Any, router_logits: Any | None = None) -> None:
         self.z_activation = z_activation
         self.router_logits = router_logits
         self.has_captured = True
-        # capture snapshots the active run_id at capture time
-        self._measured = bool(self._run_id is not None)
+        self._snapshot_measured()
 
     def mark_real_corpus(self, run_id: str) -> None:
-        """Bind a real-corpus run id. Only captures made AFTER this binding are
-        measurable (the snapshot in `capture` enforces ordering)."""
+        """Bind a real-corpus run id for FUTURE captures; existing captures keep
+        the run id that was active at their capture time."""
         if not run_id:
             raise ValueError("run_id required to mark real-corpus provenance")
         self._run_id = run_id
@@ -248,10 +258,11 @@ class RealActivationHook:
             self._hook_ref = None
 
     def is_measured(self) -> bool:
-        """Only true if a capture happened UNDER an active real-corpus run id."""
-        return bool(getattr(self, "_measured", False) and self._run_id)
+        """True only for a capture that occurred under an active real run id
+        (the run id bound at capture time is used, not the current one)."""
+        return bool(getattr(self, "_measured", False) and self._measured_run_id)
 
     def evidence_provenance(self) -> str:
         if self.is_measured():
-            return f"real_corpus_forward run_id={self._run_id}"
+            return f"real_corpus_forward run_id={self._measured_run_id}"
         return "not-measured"

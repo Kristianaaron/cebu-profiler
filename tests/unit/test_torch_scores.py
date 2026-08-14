@@ -38,17 +38,27 @@ def test_flexmoe_retains_all_experts():
 
 
 def test_causal_ablation_genuine_diff_and_shape_check():
-    b = torch.tensor([1.0, 1.0, 1.0])
-    a = torch.tensor([1.0, 0.0, 0.5])  # ablated: channel1 fully, channel2 half
+    # baseline [tokens, hidden]; ablated [channels, tokens, hidden]
+    b = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]])
+    # channel0 ablated fully (all hidden 0), channel1 half (0.5), channel2 none
+    a = torch.tensor([[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                      [[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]],
+                      [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]])
     out = causal_ablation_scores(b, a)
     assert abs(sum(out.values()) - 1.0) < 1e-6
-    # channel1 (delta=1) > channel2 (delta=0.5) > channel0 (delta=0)
-    assert out[1] > out[2] > out[0]
-    # shape mismatch fails closed
+    # delta per channel = ||b-a||_2 per token: ch0=sqrt(3), ch1=sqrt(3*0.25),
+    # ch2=0 -> ch0 > ch1 > ch2(=0)
+    assert out[0] > out[1] > out[2]
+    assert abs(out[2]) < 1e-9
+    # shape/ndim mismatch fails closed
     with pytest.raises(ValueError):
-        causal_ablation_scores(torch.ones(2), torch.ones(3))
-    # zero-delta must not fabricate nonzero contributions (epsilon must not add)
-    z = causal_ablation_scores(torch.zeros(2), torch.zeros(2))
+        causal_ablation_scores(torch.ones(2), torch.ones(3))  # non-2D baseline
+    with pytest.raises(ValueError):
+        causal_ablation_scores(torch.ones(2, 2), torch.ones(2, 2))  # ablated not 3D
+    with pytest.raises(ValueError):
+        causal_ablation_scores(torch.ones(2, 3), torch.ones(2, 4, 3))  # token mismatch
+    # zero-delta stays all-zero (no fabricated mass)
+    z = causal_ablation_scores(torch.zeros(2, 3), torch.zeros(2, 2, 3))
     assert all(abs(v) < 1e-9 for v in z.values())
 
 
@@ -83,6 +93,37 @@ def test_real_hook_missing_run_id_raises():
     hook = RealActivationHook(0, 0)
     with pytest.raises(ValueError):
         hook.mark_real_corpus("")
+
+
+def test_attached_hook_measures_and_run_id_change_does_not_relabel():
+    """Round-5 #8: __call__ (attached forward) snapshots measured under the
+    active run id; changing run id after capture cannot relabel old evidence."""
+    class _Mod:
+        def __init__(self) -> None:
+            self.hook = None  # noqa: ANN001
+
+        def register_forward_hook(self, fn):
+            self.hook = fn
+            return object()
+
+    m = _Mod()
+    hook = RealActivationHook(0, 0)
+    hook.mark_real_corpus("run1")
+    hook.attach(m)
+    # simulate an attached real forward driving __call__
+    m.hook(m, None, torch.ones(2, 4))
+    assert hook.is_measured() is True
+    assert "run1" in hook.evidence_provenance()
+    # change run id after capture -> old evidence keeps run1, still measured
+    hook.mark_real_corpus("run2")
+    assert hook.is_measured() is True
+    assert "run1" in hook.evidence_provenance()
+
+    # offline capture before any binding stays unmeasured even after binding
+    h2 = RealActivationHook(0, 0)
+    h2.capture(torch.ones(2, 4))
+    h2.mark_real_corpus("runX")
+    assert h2.is_measured() is False
 
 
 def test_score_result_measured_rejected_for_synthetic():
