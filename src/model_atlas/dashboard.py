@@ -43,6 +43,7 @@ _ICONS: dict[str, str] = {
     "contrast": '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
     "coalition": '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>',
     "path": '<circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/>',
+    "structure": '<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h10"/>',
     "compression": '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
     "candidate": '<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
     "heldout": '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1 1 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
@@ -884,8 +885,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
                 {"id": "capability", "title": "Experts"},
                 {"id": "contrast", "title": "Success\u2212Failure"},
                 {"id": "coalition", "title": "Expert Pairings"},
-                {"id": "path", "title": "Paths"},
-                {"id": "hierarchy", "title": "Hierarchy"},
+                {"id": "structure", "title": "Structure"},
                 {"id": "maps", "title": "Planning Maps"},
             ],
         },
@@ -1052,6 +1052,10 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .coal-legend .sw.on{{background:#4b4b4b;border:1px solid #6e6e6e}} .coal-legend .sw.mid{{background:#303030;border:1px solid #4a4a4a}} .coal-legend .sw.dim{{background:#1d1d1d;border:1px solid #2c2c2c}}
  .coal-legend .ln{{height:14px;width:6px;border-radius:1px;display:inline-block;vertical-align:middle}}
  .coal-legend .ln.lo{{background:#3f6212}} .coal-legend .ln.md{{background:#94cc1c}} .coal-legend .ln.hi{{background:#22c55e}} .coal-legend .ln.cr{{background:#f97316}}
+ .struct-sec{{margin-top:18px;padding:14px 16px;background:#151515;border:1px solid #2a2a2a;border-radius:10px}}
+ .struct-sec h3{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:13.5px;color:#eee;margin:0 0 2px;letter-spacing:-0.01em}}
+ .struct-sec .g-note{{color:#979797;font-size:11.5px;margin:0 0 10px}}
+ .struct-sec table{{margin-top:6px}}
  .cap3d-controls{{position:absolute;top:6px;left:6px;z-index:3;display:flex;align-items:center;gap:4px;background:rgba(14,14,14,0.7);border:1px solid #444444;border-radius:6px;padding:3px 4px}}
  .cap3d-controls button{{width:19px;height:19px;display:inline-flex;align-items:center;justify-content:center;padding:0;color:#d7d7d7;background:#171717;border:1px solid #444444;border-radius:4px;cursor:pointer}}
  .cap3d-controls button:hover{{border-color:#646464;color:#fff;background:#202020}}
@@ -1148,8 +1152,20 @@ def render_dashboard(data: dict[str, Any]) -> str:
      </div>
    </div>
  </div>
- <div class="panel" id="panel-path"><p class="note">Most frequent cross-layer route signatures with success rate (measured).</p><table id="t-path"></table></div>
- <div class="panel" id="panel-hierarchy"><p class="note">Six-level atlas hierarchy (v2 §9): L1 weights → L2 units → L3 experts → L4 expert pairings → L5 pathways → L6 behaviour, traceable up and down. Per-level node counts are measured; the example shows how many lower-level components realise the first behaviour (and the peak shared-channel prevalence — how load-bearing).</p><div id="hier-stats"></div><table id="t-hierarchy"></table></div>
+ <div class="panel" id="panel-structure">
+   <p class="note">How the model's experts are <b>organised and connected</b> — measured, end-to-end. This panel combines two views: the <b>hierarchy</b> (six levels, L1 weights → L6 behaviour) and the <b>paths</b> (the most frequent cross-layer route signatures that realise behaviour). Both come from real forwards: node counts, per-behaviour projections, and route signatures are all measured on the synthetic runtime.</p>
+   <div class="struct-sec">
+     <h3>Hierarchy — 6 levels</h3>
+     <div class="g-note">How component concepts stack: weights → units → experts → expert pairings → pathways → behaviour.</div>
+     <div id="hier-stats"></div>
+     <table id="t-hierarchy"></table>
+   </div>
+   <div class="struct-sec">
+     <h3>Paths — most frequent cross-layer routes</h3>
+     <div class="g-note">The route signatures that fire most often, with the fraction that ended in a successful run.</div>
+     <table id="t-path"></table>
+   </div>
+ </div>
  <div class="panel" id="panel-compression"><p class="note">Per-expert compression response (int4 vs int8), reconstruction error + output drift (measured math).</p><table id="t-compression"></table></div>
  <div class="panel" id="panel-candidate"><p class="note">Derivative candidates: kept experts/layer, resident bytes per node, go/no-go fit, held-out retention.</p><table id="t-candidate"></table></div>
  <div class="panel" id="panel-heldout"><p class="note">Per-capability held-out retention (derivative vs source), measured.</p><table id="t-heldout"></table></div>
