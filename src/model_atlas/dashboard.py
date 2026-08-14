@@ -1056,6 +1056,25 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .struct-sec h3{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:13.5px;color:#eee;margin:0 0 2px;letter-spacing:-0.01em}}
  .struct-sec .g-note{{color:#979797;font-size:11.5px;margin:0 0 10px}}
  .struct-sec table{{margin-top:6px}}
+ table.map-heat{{border-collapse:separate;border-spacing:2px;width:auto;margin:4px 0}}
+ table.map-heat td{{padding:0}}
+ table.map-heat caption{{caption-side:top;text-align:left;color:#8a8a8a;font-size:11px;margin-bottom:2px}}
+ .oc{{width:22px;height:22px;border-radius:4px;background:#1d1d1d;font-size:9px;color:#fff;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',ui-monospace,monospace}}
+ .oc.hatch{{background-image:repeating-linear-gradient(45deg,rgba(0,0,0,0.35) 0 4px,rgba(255,255,255,0.12) 4px 8px)}}
+ .ch-heat{{border-collapse:separate;border-spacing:1px}}
+ .ch-heat td{{padding:1px}}
+ .ch{{width:12px;height:12px;border-radius:2px}}
+ .router-box,.distill-box{{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px;background:#161616;border:1px solid #2a2a2a;border-radius:8px;margin:4px 0 10px}}
+ .rslot{{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:26px;border-radius:50%;background:#2c3e50;border:1px solid #3e5a77;color:#e0e8f0;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;font-weight:600}}
+ .rslot.bias{{box-shadow:0 0 0 2px #6ccfff inset}}
+ .rslot.drop{{background:#5f1f1f;border-color:#a33;color:#ffd9d9}}
+ .rn{{width:100%;color:#8a8a8a;font-size:11px;font-family:'JetBrains Mono',ui-monospace,monospace;margin-top:2px}}
+ .dcell,.rcell{{display:inline-flex;align-items:center;justify-content:center;border-radius:99px;background:#1e3a5f;border:1px solid #3a6ea5;color:#d7e6f5;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;font-weight:600}}
+ .dcell.lane{{background:#274b6b;border-color:#4f83b0}}
+ .dcell.layer{{background:#1d5b4e;border-color:#3c8a75}}
+ .rcell{{background:#3a2a16;border:1px solid #8a6a2f;color:#f5e3c3}}
+ .rcell.bias{{background:#4d2e1e;border-color:#a07140}}
+ .rcell.out{{background:#3d1f2b;border-color:#8a3f5f}}
  .cap3d-controls{{position:absolute;top:6px;left:6px;z-index:3;display:flex;align-items:center;gap:4px;background:rgba(14,14,14,0.7);border:1px solid #444444;border-radius:6px;padding:3px 4px}}
  .cap3d-controls button{{width:19px;height:19px;display:inline-flex;align-items:center;justify-content:center;padding:0;color:#d7d7d7;background:#171717;border:1px solid #444444;border-radius:4px;cursor:pointer}}
  .cap3d-controls button:hover{{border-color:#646464;color:#fff;background:#202020}}
@@ -1173,6 +1192,18 @@ def render_dashboard(data: dict[str, Any]) -> str:
     <div><span class="stat"><span class="k">source</span><span class="v" id="rl-source"></span></span><span class="stat"><span class="k">measured GiB</span><span class="v" id="rl-total"></span></span></div>
     <table id="t-reality"></table></div>
  <div class="panel" id="panel-maps"><p class="note">§25 planning artifacts. Channel/tile maps are grounded in <em>measured</em> channel-uniqueness (v2 §8.3); node-ownership from the census placement; router-repair preserves expert↔router index coupling (v2 §31:18); overflow/residual/distillation derive from measured saliency. Removal-impact fields are estimates pending causal traces.</p>
+    <h3>Expert residency &amp; overflow (node A / node B / NVMe tier)</h3>
+    <div class="g-note">Each cell is one expert (L0 L2 rows, E0&#8211;E7 columns): solid = resident on this node, hatched = stored but overflowed to NVMe (non-resident).</div>
+    <div id="residency-heat"></div>
+    <h3>Channel keep-map (32 channels × expert, measured)</h3>
+    <div class="g-note">Bright cells = channel kept at its measured importance; dark = pruned. One row per expert, channels 0&#8211;31.</div>
+    <div id="channel-heat"></div>
+    <h3>Router repair (reindex)</h3>
+    <div class="g-note">Expert → new expert slot. Grey discs kept in place; red discs dropped (renumbered away); solid dot = route-bias must move in lockstep.</div>
+    <div id="router-map"></div>
+    <h3>Distillation targets &amp; residual repair</h3>
+    <div class="g-note">Cells sized by priority/severity; &#8220;residual&#8221; cells additionally tinted by repairability (residual_bias vs expert_output).</div>
+    <div id="distill-map"></div>
     <h3>Channel map</h3><table id="t-channel"></table>
     <h3>Tile map</h3><table id="t-tile"></table>
     <h3>Node ownership</h3><table id="t-ownership"></table>
@@ -1181,7 +1212,6 @@ def render_dashboard(data: dict[str, Any]) -> str:
     <h3>Residual repair</h3><table id="t-residual"></table>
     <h3>Distillation targets</h3><table id="t-distill"></table>
  </div>
- <div class="panel" id="panel-pareto">
    <p class="note">Pareto explorer: nondominated frontier, knee as a scored <b>region</b> (never a single point), and per-candidate neighbor deltas (fidelity / compact) with marginal quality-per-GiB. <b>Predicted candidates are shown hollow; measured are solid.</b></p>
    <div id="pareto-summary"></div>
    <h3>Frontier scatter (quality vs resident GiB)</h3>
@@ -1322,6 +1352,96 @@ def render_dashboard(data: dict[str, Any]) -> str:
  fill('t-tile', ['layer','expert','tile','start','importance','keep'], DATA.maps.tile.map(r=>({{'layer':r.layer_index,'expert':r.source_expert_id,'tile':r.tile_index,'start':r.channel_start,'importance':r.importance,'keep':r.keep}})));
  fill('t-ownership', ['tensor','role','layer','expert','node'], DATA.maps.node_ownership.map(r=>({{'tensor':r.tensor_key,'role':r.role,'layer':(r.layer_index??'-'),'expert':(r.source_expert_id??'-'),'node':r.node}})));
  fill('t-overflow', ['layer','expert','tier','reason'], DATA.maps.overflow_pack.map(r=>({{'layer':r.layer_index,'expert':r.source_expert_id,'tier':r.tier,'reason':r.reason}})));
+ // ---- Planning-maps visualizations ----
+ (function(){{
+   var M = DATA.maps; if(!M) return;
+   var NODE_COLORS = {{'node_a':'#2196f3','node_b':'#7c4dff','nvme_a':'#ef5350','nvme_b':'#ef5350','replicated':'#e0e0e0'}};
+   // 1) residency/overflow heat: layer x expert, fill occupancy color, overflow = hatched
+   (function(){{
+     var el=document.getElementById('residency-heat'); if(!el) return;
+     var occ={{}}; M.node_ownership.forEach(function(r){{ if(r.role!=='experts') return; occ[r.layer_index+':'+r.source_expert_id]=r.node; }});
+     var tiers={{}}; M.overflow_pack.forEach(function(r){{ tiers[r.layer_index+':'+r.source_expert_id]=r.tier; }});
+     var nL=2, nE=8;
+     var tbl=document.createElement('table'); tbl.className='map-heat';
+     var cap=tbl.createCaption(); cap.textContent='layer × expert — resident or overflowed';
+     var h=tbl.createTHead().insertRow();
+     h.insertCell().textContent='';
+     for(var e=0;e<nE;e++) h.appendChild(Object.assign(document.createElement('th'),{{textContent:'L0 E'+e}})).textContent='E'+e;
+     // actually label columns E0..E7 with layer rows
+     tbl.tHead.rows[0].innerHTML='<th></th><th colspan="'+nE+'">experts</th>';
+     for(var L=0;L<nL;L++){{ var tr=tbl.insertRow();
+       tr.insertCell().textContent='layer '+L;
+       for(var e=0;e<nE;e++){{ var c=tr.insertCell();
+         var node=occ[L+':'+e]; var tier=tiers[L+':'+e];
+         var div=document.createElement('div'); div.className='oc';
+         if(node){{ div.style.background=NODE_COLORS[node]||'#333'; div.style.opacity='0.9'; div.textContent=node.replace('node_','').replace('nvme_','nv'); }}
+         if(tier){{ div.classList.add('hatch'); div.dataset.tier=tier; }}
+         c.appendChild(div);
+       }}
+     }}
+     el.appendChild(tbl);
+   }})();
+   // 2) channel keep heat: one row per expert, cells shaded by importance, pruned dark
+   (function(){{
+     var el=document.getElementById('channel-heat'); if(!el) return;
+     var rows={{}};
+     M.channel.forEach(function(r){{ var key=r.layer_index+'_'+r.source_expert_id; if(!rows[key]) rows[key]={{}}; rows[key][r.channel_id]=r; }});
+     var chans=M.channel.length?Math.max.apply(null,M.channel.map(r=>r.channel_id))+1:0;
+     var maxI=Math.max.apply(null,M.channel.length?M.channel.map(r=>r.importance):[1]);
+     // group by (layer,expert) but render only layer-0 experts (2 layers, same channel layout)
+     var keys=Object.keys(rows).filter(k=>k.startsWith('0_'));
+     keys.sort(function(a,b){{ return parseInt(a.split('_')[1])-parseInt(b.split('_')[1]); }});
+     var tbl=document.createElement('table'); tbl.className='map-heat ch-heat';
+     var htr=['']; for(var i=0;i<chans;i++) htr.push(i%4===0?i:'');
+     var thead=tbl.createTHead().insertRow(); thead.innerHTML='<th></th>'+htr.map(x=>x===''?'<th></th>':'<th>'+x+'</th>').join('');
+     keys.forEach(function(k){{ var tr=tbl.insertRow();
+       tr.insertCell().textContent='E'+k.split('_')[1];
+       for(var c=0;c<chans;c++){{ var td=document.createElement('td'); var e=rows[k][c];
+         var div=document.createElement('div'); div.className='ch';
+         if(e&&e.keep){{ var a=0.25+0.7*Math.sqrt(e.importance/maxI); div.style.background='rgba(34,197,94,'+a+')'; div.title='E'+e.source_expert_id+' ch'+c+' imp '+e.importance.toFixed(3); }}
+         else div.style.background='rgba(80,80,80,0.25)';
+         td.appendChild(div); tr.appendChild(td);
+       }}
+     }});
+     el.appendChild(tbl);
+   }})();
+   // 3) router repair: circles for old->new slots, dropped = red
+   (function(){{
+     var el=document.getElementById('router-map'); if(!el) return;
+     var kp=M.router_repair.filter(r=>r.action==='keep'), dr=M.router_repair.filter(r=>r.action==='drop');
+     var box=document.createElement('div'); box.className='router-box';
+     // draw kept slots as discs; a small arrow-less mapping (kept in place)
+     kp.forEach(function(r){{ var d=document.createElement('span'); d.className='rslot'+(r.route_bias?' bias':''); d.textContent='E'+r.old_index; box.appendChild(d); }});
+     dr.forEach(function(r){{ var d=document.createElement('span'); d.className='rslot drop'; d.textContent='E'+r.old_index+'↛'; box.appendChild(d); }});
+     var n=document.createElement('div'); n.className='rn'; n.textContent=kp.length+' kept · '+dr.length+' dropped · '+(kp.filter(r=>r.route_bias).length)+' route-bias locked';
+     box.appendChild(n);
+     el.appendChild(box);
+   }})();
+   // 4) distill + residual: cell size by priority/severity, residual tinted
+   (function(){{
+     var el=document.getElementById('distill-map'); if(!el) return;
+     var box=document.createElement('div'); box.className='distill-box';
+     var maxD=Math.max.apply(null,M.distillation_target.length?M.distillation_target.map(r=>r.priority):[1]);
+     var maxS=Math.max.apply(null,M.residual_repair.length?M.residual_repair.map(r=>r.severity):[1]);
+     M.distillation_target.forEach(function(r){{ var d=document.createElement('span');
+       d.className='dcell '+(r.target_type||'expert');
+       var sz=16+34*Math.sqrt(r.priority/maxD);
+       d.style.width=sz+'px'; d.style.height=sz+'px';
+       d.textContent='E'+r.source_expert_id;
+       d.title='L'+r.layer_index+' E'+r.source_expert_id+' '+r.target_type+' pri '+r.priority.toFixed(4);
+       box.appendChild(d);
+     }});
+     M.residual_repair.forEach(function(r){{ var d=document.createElement('span');
+       d.className='rcell '+(r.component==='residual_bias'?'bias':(r.component==='expert_output'?'out':'rout'));
+       var sz=14+28*Math.sqrt(r.severity/maxS);
+       d.style.width=sz+'px'; d.style.height=sz+'px';
+       d.textContent='E'+r.source_expert_id;
+       d.title='L'+r.layer_index+' E'+r.source_expert_id+' '+r.component+' sev '+r.severity.toFixed(4);
+       box.appendChild(d);
+     }});
+     el.appendChild(box);
+   }})();
+ }})();
  fill('t-router', ['layer','old','new','action','route_bias'], DATA.maps.router_repair.map(r=>({{'layer':r.layer_index,'old':r.old_index,'new':(r.new_index??'-'),'action':r.action,'route_bias':r.route_bias}})));
  fill('t-residual', ['layer','expert','component','severity','target'], DATA.maps.residual_repair.map(r=>({{'layer':r.layer_index,'expert':r.source_expert_id,'component':r.component,'severity':r.severity,'target':r.target}})));
  fill('t-distill', ['layer','expert','type','priority'], DATA.maps.distillation_target.map(r=>({{'layer':r.layer_index,'expert':r.source_expert_id,'type':r.target_type,'priority':r.priority}})));
