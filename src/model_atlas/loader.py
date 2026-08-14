@@ -6,11 +6,11 @@ NOT a runtime-loadable claim. Distinguishes:
   source tensor is present exactly once with correct name/dtype/shape/bytes, and
   whose non-target tensors are byte-identical to source. This is what the
   exporter guarantees.
-- `runtime_loadable`: FALSE until an authoritative backend probe proves the
-  installed stack can decode/execute ModelOpt NVFP4. Standard vllm 0.21 +
-  transformers 5.9.0 in this env expose NO ModelOpt-NVFP4 decoder (verified by
-  source/dir probe: `grep -rl modelopt vllm/model_executor/...` etc.), so
-  `runtime_loadable` stays False regardless of what we write.
+- `runtime_compatibility`: typed status from the installed stack
+  (e.g. `schema-supported-unvalidated`). The installed vLLM (0.21) DOES contain a
+  ModelOpt-NVFP4 path (ModelOptNvFp4Config + Linear/FusedMoE methods + kernels/
+  emulation), so this is NOT decoder-blocked. `runtime_validated` stays False until
+  a real materialized derivative load/forward is validated.
 
 Engineering requirements:
 - SAFETENSORS data-base offset: every body read adds 8 + uint64(header_len).
@@ -124,7 +124,8 @@ class ExportResult:
     total_bytes: int
     structurally_complete: bool
     promoted: bool
-    runtime_loadable: bool = False
+    runtime_compatibility: str = "schema-supported-unvalidated"
+    runtime_validated: bool = False
     journal: list[JournalEntry] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
@@ -550,8 +551,11 @@ def materialize_uniform_width(
 ) -> ExportResult:
     """Produce a STRUCTURALLY-COMPLETE uniform-width GLM-5.2 derivative.
 
-    `runtime_loadable` stays False — the installed stack can't decode ModelOpt
-    NVFP4 (verified); `structurally_complete` is what this exporter guarantees.
+    `runtime_compatibility` reports schema-support status from the installed
+    stack (see runtimeprobe); `runtime_validated` stays False until a real
+    materialized derivative load/forward is validated. A structurally complete
+    export + passing config/schema probe is NOT decoder-blocked, but it is also
+    not end-to-end runtime validated.
     """
     source = Path(source_dir)
     out = Path(output_dir)
@@ -760,7 +764,9 @@ def materialize_uniform_width(
         output_dir=str(out), width=width, shards_written=shards_written,
         tensor_count=tensor_count, total_bytes=total_bytes,
         structurally_complete=structurally, promoted=promoted,
-        runtime_loadable=False, journal=journal,
+        runtime_compatibility="schema-supported-unvalidated",
+        runtime_validated=False,
+        journal=journal,
     )
 
 

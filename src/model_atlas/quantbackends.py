@@ -182,37 +182,39 @@ def probe_modelopt_nvfp4() -> BackendProbe:
 
 
 def probe_vllm_nvfp4() -> BackendProbe:
-    """Detect whether the installed vllm exposes an NVFP4 (compressed-tensors)
-    decode path usable for the mounted checkpoint."""
+    """Detect whether the installed vllm exposes a ModelOpt-NVFP4 decode path
+    for the mounted checkpoint (quant_method=modelopt, quant_algo=NVFP4)."""
     installed, ver = _probe_module("vllm")
     has_nvfp4 = False
+    detail = ""
     if installed:
         try:
             from vllm.model_executor.layers.quantization import (  # type: ignore[import-not-found]
-                compressed_tensors,
+                get_quantization_config,
             )
-            _candidates = (
-                "compressed_tensors_w4a16_nvfp4",
-                "compressed_tensors_w4a4_nvfp4",
-            )
-            has_nvfp4 = any(
-                hasattr(compressed_tensors, c) or _module_has(c) for c in _candidates
-            )
+            cfg = get_quantization_config("modelopt_fp4")
+            if cfg.__name__ == "ModelOptNvFp4Config":
+                has_nvfp4 = True
+                detail = "vllm registry maps modelopt_fp4 -> ModelOptNvFp4Config"
         except Exception:  # noqa: BLE001
             has_nvfp4 = False
-    support = SupportStatus.PROBE_ONLY if (installed and has_nvfp4) else SupportStatus.UNSUPPORTED
+            detail = "vllm ModelOpt-NVFP4 path probe failed"
+    support = (
+        SupportStatus.PROBE_ONLY if (installed and has_nvfp4) else SupportStatus.UNSUPPORTED
+    )
     return BackendProbe(
         backend_id="vllm_nvfp4",
         installed=installed,
         version=ver,
         support=support,
         note=(
-            "vllm exposes a compressed-tensors NVFP4 (w4a16) scheme; real NVFP4 "
-            "decode/execution of this checkpoint must still pass a sampled-tensor "
-            "parity probe before claiming runtime support"
+            "vllm exposes a ModelOpt-NVFP4 path (modelopt_fp4 -> "
+            "ModelOptNvFp4Config + NVFP4 Linear/FusedMoE); a real materialized "
+            "derivative load/forward is still unvalidated"
         )
         if has_nvfp4
-        else "vllm present but no NVFP4 decode scheme detected",
+        else ("vllm not importable here; run under the installed vLLM exec venv "
+              "(probe detail: " + detail + ")"),
         setup=[],
         location=None,
     )

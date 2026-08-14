@@ -35,7 +35,7 @@ current availability is a separate live gate).
   `RealActivationHook` measures ONLY with an explicit real-corpus run id
   (offline replay never); `TorchScoringResult` rejects MEASURED with synthetic or
   missing provenance. Verified under `.venv-exec` (torch) + repo venv.
-- **F (structural exporter, NEW)** — `loader.py` `materialize_uniform_width`: produces a STRUCTURALLY-COMPLETE tree (index+config rebuilt, quant assets preserved, exact validation, real resume/bounded-IO). `runtime_loadable` stays False (installed stack cannot decode ModelOpt-NVFP4).
+- **F (structural exporter, NEW)** — `loader.py` `materialize_uniform_width`: produces a STRUCTURALLY-COMPLETE tree. `runtime_compatibility='schema-supported-unvalidated'`; `runtime_validated=False` until a real materialized derivative load/forward is validated. The installed vLLM 0.21 DOES contain a ModelOpt-NVFP4 path (ModelOptNvFp4Config + Linear/FusedMoE + kernels/emulation) — NOT decoder-blocked.
   all sparse layers x all experts, uniform width `W` (multiple of 16, verified fail-closed on non-multiples
   fail-closed), expert-specific channel selections only when width == W, every
   non-target tensor copied verbatim, SAFETENSORS index + `config.json`
@@ -61,17 +61,18 @@ Source: 232,385 tensors / 47 shards / ~464.8 GB; hidden 6144, 2048 moe_intermedi
 
 | W | total GiB | per-rank GiB (EP) | fits 2x~120 GiB (window) |
 |---|---|---|---|
-| 64 | 47.6 | 41.4 | yes |
-| 128 | 60.0 | 47.6 | yes |
-| 256 | 84.9 | 60.0 | yes |
-| 512 | 134.6 | 84.9 | yes |
-| 1024 | 234.0 | 134.6 | marginal (needs measured free >135 GiB/rank) |
-| 2048 | 432.9 | 234.0 | no |
+| 64 | 59.1 | yes |
+| 128 | 65.1 | yes |
+| 256 | 76.9 | yes |
+| 512 | 100.6 | yes |
+| 1024 | 148.1 | no |
+| 2048 | 243.0 | no |
 
-Backbone (copied) bytes ≈ 35.2 GiB; routed-expert bytes ≈ 397.7 GiB at full width.
-After an authorized maintenance window (production occupancy removed), physical
-capacity is ~120 GiB/node; at `per_rank ~60 GiB` node W=256 fits with ~60 GiB
-headroom. Current availability (production still runnning) is measured
+Recomputed with the EXACT exporter size plan (scalar quant tensors do NOT
+scale): W64/W128/W256/W512 fit a 115 GiB usable per-node planning budget;
+W1024/W2048 do not. W=256 => per_rank ~76.9 GiB. After an authorized
+maintenance window (production occupancy removed) the two-node run is
+possible; current live availability (production still running) is measured
 separately by `model-atlas two-node` and is NOT the planning capacity.
 
 ## Commits (round 1–3)
@@ -81,28 +82,35 @@ P3–7 · `9a164e9` review-fix 1 · (round-3 commit, below).
 
 ## Current status — two irreducible gates
 
-1. **Runtime-Loadable decode path (schema/runtime blocker, demonstrated from installed
-   source)**: vllm 0.21 + transformers 5.9.0 here expose NO ModelOpt NVFP4
-   decoder (no `modelopt` quant_method mapping — verified: `modelopt-aware
-   path present: False`; `nvfp4 modules in vllm quant: []`; `compressed_tensors`
-   files for nvfp4: none; `CompressedTensorsLinearMethod` does not handle
-   `modelopt`). The mounted checkpoint is `quant_method=modelopt, quant_algo=NVFP4`.
-   So the standard stack cannot decode/execute this NVFP4 derivative as-is; the
-   closest valid artifact our exporter can produce is the STRUCTURALLY-COMPLETE
-   uniform-width safetensors+index+config derivative (valid HF/census structure)
-   plus an honest note that the NVFP4 *decode/run* requires either a ModelOpt
-   decode adapter or a BF16 reference that is unavailable. The materializer
-   writes a correct `moe_intermediate_size` and preserves every tensor's dtype/
-   shape/quant metadata, so it is a valid checkpoint for any stack that CAN
-   decode ModelOpt NVFP4 (e.g. the exact producer version). We do NOT claim
-   vllm can run it today.
+1. **Runtime validation gate (not decoder-absent)**: the installed vLLM 0.21
+   DOES contain a ModelOpt-NVFP4 path: `modelopt.py` provides
+   `ModelOptNvFp4Config`, `ModelOptNvFp4LinearMethod`, `ModelOptNvFp4FusedMoE`;
+   the registry maps `modelopt_fp4 -> ModelOptNvFp4Config`; the mounted config
+   (`quant_method=modelopt, quant_algo=NVFP4`) returns override `modelopt_fp4`,
+   and `ModelOptNvFp4Config.from_config(mounted_qc)` succeeds selecting the
+   NVFP4 Linear+FusedMoE methods; NVFP4 kernels/emulation are present in source.
+   What is absent/unproven: Ray package (not installed), external `modelopt`
+   package (not installed; likely not required for vLLM inference), producer
+   parity still unproven, and crucially a real materialized-derivative
+   load/forward is NOT yet validated. `runtime_validated=False`.
 2. **Service-window execution**: real forward/benchmark requires the operator to
    remove production occupancy (DeepSeek two-rank vLLM + llama-server) — never
    done automatically. `docs/glm52-runbook.md` gives exact commands; the gate
    stays CLOSED until an authorized window.
 
+## Readiness (not decoder-infeasible)
+
+The Atlas structural exporter is implemented and mounted-header-compatible
+(real geometry precheck PASS). Candidate widths W64/W128/W256/W512 fit a 115-GiB
+usable per-node planning budget (exact table above); W1024/W2048 do not. The
+next safe technical step is to materialize a chosen derivative (disk/time/storage
+gate) and validate config/index on the resulting tree, then, once Ray is
+available and a maintenance window is authorized, load/forward the derivative on
+the two nodes. The decoder path IS present (probe output in this file + JSON in
+`/tmp/runtime_cap.json`); it is simply not yet end-to-end validated.
+
 ## Tests / lint
 
-- Round-3 regressions green (repo venv): test_materialize, test_glm52trace,
-  test_twonode, test_quantbackends, test_evidencegates, test_streaming, + torch
-  tests verified under `.venv-exec` (D semantics). `ruff` + `mypy` clean.
+- runtimeprobe (fake-adapter + installed-vLLM mounted-config probe), loader_r4,
+  torch round-7, fitplan, quantbackends (ModelOpt-NVFP4 detection) all green;
+  `ruff` + `mypy` (src + scripts) clean; full fast suite green.

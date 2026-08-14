@@ -117,7 +117,8 @@ def test_exact_byte_equivalence_non_target_and_target(tmp_path):
     out = tmp_path / "deriv"
     res = materialize_uniform_width(ckpt, str(out), width=16)
     assert res.structurally_complete is True
-    assert res.runtime_loadable is False  # renamed: never claim runtime
+    assert res.runtime_validated is False  # never validated end-to-end here
+    assert res.runtime_compatibility == "schema-supported-unvalidated"
     manifest = load_manifest(ckpt)
     out_manifest = load_manifest(str(out))
     # non-target: byte-identical

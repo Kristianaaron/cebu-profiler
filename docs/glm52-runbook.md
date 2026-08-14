@@ -51,9 +51,11 @@ PY
 Use `loader.materialize_uniform_width` (the full structural exporter). It exports
 a STRUCTURALLY-COMPLETE checkpoint tree (all sparse layers × all experts, uniform
 width, safetensors + index + config rebuilt, quant/tokenizer/code preserved) and
-sets `runtime_loadable=False` — the installed vllm/transformers cannot decode the
-ModelOpt NVFP4 checkpoint (verified: no ModelOpt-NVFP4 decoder in vllm 0.21 /
-transformers 5.9.0 here). It is fed to a ModelOpt-capable loader once such a
+sets `runtime_compatibility='schema-supported-unvalidated'` and
+`runtime_validated=False`. The installed vllm 0.21 DOES contain a ModelOpt-NVFP4
+path (ModelOptNvFp4Config + Linear/FusedMoE + kernels/emulation); what is absent
+is Ray, external `modelopt`, producer-version parity, and validated
+materialized-derivative load/forward. It is fed to a ModelOpt-capable loader once such a
 backend probe passes; it is never fed to the installed vllm as runtime-ready.
 
 ```bash
@@ -71,14 +73,16 @@ source_cfg = json.loads(open(SRC + '/config.json').read())
 out = '/home/kristianaaron/tmp/model-atlas/derivatives/glm-uniform-w256'
 res = materialize_uniform_width(SRC, out, width=256)   # resumable, transactional
 print('structurally_complete', res.structurally_complete, 'promoted', res.promoted)
-print('runtime_loadable', res.runtime_loadable)   # False (no ModelOpt decoder here)
+print('runtime_compatibility', res.runtime_compatibility)
+print('runtime_validated', res.runtime_validated)   # False until end-to-end validated
 PY
 ```
 
 ## 3. The ONLY valid runbook start: a fully materialized structural-complete derivative + a ModelOpt-capable loader
 
 The exporter always sets `runtime_loadable=False` because the installed stack
-cannot decode ModelOpt NVFP4. The execution gate stays CLOSED until BOTH hold:
+has a ModelOpt-NVFP4 decoder path but a real derivative load is unvalidated. The
+execution gate stays CLOSED until BOTH hold:
 1. a **structurally-complete** derivative checkpoint is materialized at `<=
    target envelope` (index+config rebuilt, exact-validation passed);
 2. an authoritative backend probe proves a ModelOpt-capable loader can decode/run

@@ -471,6 +471,13 @@ def build_launch_plan(
     # the server-side --node-ip). Ray itself is NOT installed in the exec venvs
     # (verified import err), so the exact Ray --help cannot be run here; the
     # flag is emitted as Ray's documented spelling and the bootstrap is gated.
+    # Installed vLLM (0.21) api_server --help confirms (captured fresh):
+    #   --distributed-executor-backend ['external_launcher','mp','ray','uni']
+    #   --nnodes NNODES --node-rank NODE_RANK
+    #   --enable-expert-parallel | -ep, --expert-placement-strategy {linear,round_robin}
+    # and the model registry source maps 'GlmMoeDsaForCausalLM' -> deepseek_v2
+    # (verified by source inspection). Ray package itself is NOT installed, so
+    # ray-start bootstrapping is documented but gated (no shared-venv install).
     plan.launch_command = (
         "# service-window gate: GPUs occupied by production DeepSeek vLLM; do not run now.\n"
         "# Step 0 - start an external Ray cluster first (Ray's documented "
