@@ -8,6 +8,7 @@
 
 # python
 .venv/
+.venv-exec/
 __pycache__/
 *.pyc
 *.egg-info/

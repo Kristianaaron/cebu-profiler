@@ -408,6 +408,51 @@ def canary(
         print(f"wrote: {out}")
 
 
+@app.command("backends")
+def backends() -> None:
+    """Probe real quantization backend support (EXL3 / ModelOpt NVFP4 / vllm)."""
+    from model_atlas.quantbackends import all_backend_probes
+
+    for b in all_backend_probes():
+        print(f"{b.backend_id}: installed={b.installed} version={b.version} "
+              f"support={b.support.value}")
+        print(f"  {b.note}")
+        if b.setup:
+            for s in b.setup:
+                print(f"    setup: {s}")
+
+
+@app.command("two-node")
+def two_node(
+    out: str = typer.Option("", "--out", help="write inventory JSON here"),
+) -> None:
+    """Probe the two DGX-Spark nodes (spark + gx10-ac63), non-evasive."""
+    from model_atlas.twonode import run_inventory
+
+    inv = run_inventory()
+    print("reachable nodes:", ", ".join(inv.reachable()))
+    for host, n in inv.nodes.items():
+        print(
+            f"  {host}: gpu={n.gpu_name} cap={n.compute_cap} "
+            f"torch={n.torch} svc={n.active_gpu_services}"
+        )
+    if out:
+        Path(out).write_text(json.dumps(inv.to_dict(), indent=2, sort_keys=True))
+        print(f"wrote: {out}")
+
+
+@app.command("runtime-contract")
+def runtime_contract(
+    context: int = typer.Option(8192, "--context", help="target context tokens"),
+    kv_scheme: str = typer.Option("fp8", "--kv-scheme"),
+) -> None:
+    """Print the SM121/MTP/KV/runtime contract for the two-Spark experiment."""
+    from model_atlas.runtimecontracts import build_runtime_contract
+
+    rc = build_runtime_contract(context_tokens=context, kv_scheme=kv_scheme)
+    print(json.dumps(rc.to_dict(), indent=2, sort_keys=True))
+
+
 def main() -> None:
     app()
 
