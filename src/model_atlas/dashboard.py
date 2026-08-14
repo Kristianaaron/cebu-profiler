@@ -1011,17 +1011,32 @@ def render_dashboard(data: dict[str, Any]) -> str:
  span.coal-node.on{{background:#4b4b4b;border-color:#6e6e6e;color:#ffffff}}
  span.coal-node.mid{{background:#303030;border-color:#4a4a4a;color:#dcdcdc}}
  span.coal-node.dim{{background:#1d1d1d;border-color:#2c2c2c;color:#787878}}
- .coal-row{{display:flex;align-items:center;gap:12px;padding:8px 12px;margin:5px 0;background:#161616;border:1px solid #282828;border-radius:8px;flex-wrap:wrap}}
- .coal-row.min{{opacity:.74}}
- .coal-row .edge{{flex:1 1 180px;min-width:150px;height:34px;position:relative;display:flex;align-items:flex-end;gap:2px;background:transparent}}
- .coal-row .edge i{{display:block;width:6px;height:16px;border-radius:1px 1px 0 0;background:#2f2f2f}}
- .coal-row .edge i.fill{{background:#3f6212}}
- .coal-row .edge .cnt{{margin-left:6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#a1a1aa;letter-spacing:.03em;line-height:34px}}
- .coal-row.lo .edge i.fill{{background:#3f6212}}
- .coal-row.md .edge i.fill{{background:#94cc1c}}
- .coal-row.hi .edge i.fill{{background:#22c55e}}
- .coal-row.cr .edge i.fill{{background:#f97316}}
- .coal-row.cr .edge .cnt{{color:#fb923c}}
+ .coal-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;margin-top:2px}}
+ .coal-card{{background:#161616;border:1px solid #282828;border-radius:10px;padding:10px 12px;cursor:pointer;display:flex;flex-direction:column;gap:8px;transition:border-color .15s,box-shadow .15s,opacity .15s}}
+ .coal-card:hover{{border-color:#3a3a3a}}
+ .coal-card.cs{{border-color:#5ecfff;box-shadow:0 0 0 1px #5ecfff inset}}
+ .coal-card.min{{opacity:.72}}
+ .cc-top{{display:flex;align-items:center;justify-content:space-between;gap:8px}}
+ .cc-pills{{display:flex;align-items:center;gap:5px}}
+ .cc-pills .plus{{color:#6b7280;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:13px}}
+ .cc-rank{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#8a8a8a;border:1px solid #353535;border-radius:999px;padding:1px 8px;background:#0f0f0f}}
+ .cc-meter{{height:6px;border-radius:3px;background:#1d1d1d;overflow:hidden}}
+ .cc-meter i{{display:block;height:100%;border-radius:3px;width:0}}
+ .coal-card.lo .cc-meter i{{background:#3f6212}}
+ .coal-card.md .cc-meter i{{background:#94cc1c}}
+ .coal-card.hi .cc-meter i{{background:#22c55e}}
+ .coal-card.cr .cc-meter i{{background:#f97316}}
+ .cc-count{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:15px;color:#eee;line-height:1;margin-top:-2px}}
+ .cc-count small{{color:#8a8a8a;font-size:11px}}
+ .cc-solo{{display:flex;flex-direction:column;gap:4px}}
+ .cc-s{{display:flex;align-items:center;gap:6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#979797}}
+ .cc-s .en{{color:#dcdcdc;min-width:18px}}
+ .cc-s .sb{{flex:1;height:4px;border-radius:2px;background:#1a1a1a;overflow:hidden}}
+ .cc-s .sb i{{display:block;height:100%;border-radius:2px;width:0}}
+ .cc-s .sb i.on{{background:#6e6e6e}} .cc-s .sb i.mid{{background:#4a4a4a}} .cc-s .sb i.dim{{background:#2a2a2a}}
+ .cc-s .v{{min-width:16px;text-align:right;color:#a1a1aa}}
+ .cc-badges{{display:flex;gap:4px;margin-top:-2px}}
+ .coal-legend .lg co-routing{{color:#b7b7b7;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px}}
  .coal-meta{{flex:0 0 200px;min-width:160px;display:flex;flex-direction:column;gap:3px;font-size:11px;color:#b7b7b7}}
  .coal-meta .m1{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;color:#eee}}
  .coal-meta .m2{{color:#8a8a8a}}
@@ -1037,12 +1052,6 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .coal-legend .sw.on{{background:#4b4b4b;border:1px solid #6e6e6e}} .coal-legend .sw.mid{{background:#303030;border:1px solid #4a4a4a}} .coal-legend .sw.dim{{background:#1d1d1d;border:1px solid #2c2c2c}}
  .coal-legend .ln{{height:14px;width:6px;border-radius:1px;display:inline-block;vertical-align:middle}}
  .coal-legend .ln.lo{{background:#3f6212}} .coal-legend .ln.md{{background:#94cc1c}} .coal-legend .ln.hi{{background:#22c55e}} .coal-legend .ln.cr{{background:#f97316}}
- .coal-detail{{flex:0 0 300px;align-self:flex-start;background:#0d0d0d;border:1px solid #2e2e2e;border-radius:8px;padding:12px;font-size:12px;color:#d7d7d7;min-height:140px}}
- .coal-detail .d-head{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;color:#eee;margin:0 0 4px}}
- .coal-detail .d-note{{color:#8a8a8a;font-size:11.5px;margin:0 0 8px}}
- .coal-detail .d-grp{{color:#dfdfdf;font-size:11px;font-family:'JetBrains Mono',ui-monospace,monospace;margin:8px 0 2px}}
- .coal-detail .d-row{{display:flex;justify-content:space-between;gap:8px;font-size:11.5px;color:#c9c9c9;margin:2px 0}}
- .coal-detail .d-row b{{color:#fff;font-family:'JetBrains Mono',ui-monospace,monospace}}
  .cap3d-controls{{position:absolute;top:6px;left:6px;z-index:3;display:flex;align-items:center;gap:4px;background:rgba(14,14,14,0.7);border:1px solid #444444;border-radius:6px;padding:3px 4px}}
  .cap3d-controls button{{width:19px;height:19px;display:inline-flex;align-items:center;justify-content:center;padding:0;color:#d7d7d7;background:#171717;border:1px solid #444444;border-radius:4px;cursor:pointer}}
  .cap3d-controls button:hover{{border-color:#646464;color:#fff;background:#202020}}
@@ -1129,15 +1138,14 @@ def render_dashboard(data: dict[str, Any]) -> str:
    </div>
    <div id="contrast-list-wrap"></div></div>
  <div class="panel" id="panel-coalition">
-   <p class="note">Coalitions = expert pairs that are <b>routed together</b> (co-activated) at layer 0, measured by running the calibration corpus forwards. Each row is one pair: the connecting line is its co-routing count, the <span class="coal-node on" style="height:13px;min-width:13px;padding:0 4px;font-size:9px">E</span> badges show how often each expert <em>alone</em> appears in a route (brighter = fires more). Where causal tracing (§17) ran, the right tags are ablation ground truth: <b>hot</b> = removed together they hurt more than apart (catastrophic cascade), <b>synergistic</b> = joint harm clearly exceeds the pair's individual-sum, <b>redundant</b> = overlap, taking one leaves the other.</p>
+   <p class="note">Coalitions = expert pairs that are <b>routed together</b> (co-activated) at layer 0, measured by running the calibration corpus forwards. Cards rank every pair by firing strength: the <b>meter = co-routing count</b> (a card&#8217;s bar is length proportional to how often this pair fires, colour by tier), and each expert pill shows how often it appears <em>alone</em> in a route (brighter = fires more) with its % + count. Cascade-risk pairs (removed together they hurt more than apart — measured, §17) get an orange meter + <b>hot</b> tag; <b>synergy</b> = joint harm exceeds the pair's individual sum; <b>redundant</b> = overlap, keeping one covers the other.</p>
    <div class="coal-wrap">
-     <div class="coal-g">
+     <div class="coal-g" style="flex:1 1 100%">
        <h3>How experts team up (layer 0)</h3>
-       <div class="g-note">Most co-routed pairs first. Hover/click a row for the causal ablation panel.</div>
-       <div class="coal-legend"><span class="lg"><span class="sw on"></span>fires a lot</span><span class="lg"><span class="sw mid"></span>moderately routed</span><span class="lg"><span class="sw dim"></span>rare / quiet expert</span><span class="lg">co-routing: <span class="ln lo"></span>low</span><span class="lg"><span class="ln md"></span>mid</span><span class="lg"><span class="ln hi"></span>frequent</span><span class="lg"><span class="ln cr"></span>cascade risk</span></div>
-       <div id="coal-list"></div>
+       <div class="g-note">Strongest coalitions first (all info in the card &#8212; no separate detail panel).</div>
+       <div class="coal-legend"><span class="lg"><span class="sw on"></span>fires a lot</span><span class="lg"><span class="sw mid"></span>moderately routed</span><span class="lg"><span class="sw dim"></span>rare / quiet</span><span class="lg"><span class="ln md"></span></span><span class="lg">co-routing&nbsp;meter:&nbsp;<span class="ln lo"></span>&nbsp;low</span><span class="lg"><span class="ln hi"></span>&nbsp;frequent</span><span class="lg"><span class="ln cr"></span>&nbsp;cascade&nbsp;risk</span></div>
+       <div id="coal-list" class="coal-grid" role="list"></div>
      </div>
-     <aside class="coal-detail" id="coal-detail" aria-live="polite"></aside>
    </div>
    <table id="t-coalition"></table>
  </div>
@@ -1255,56 +1263,40 @@ def render_dashboard(data: dict[str, Any]) -> str:
    function tier(c){{ return c>=maxC*0.8 ? 'hi' : (c>=maxC*0.5 ? 'md' : 'lo'); }}
    function nodeCls(act){{ return act>=maxA*0.55 ? 'on' : (act>=maxA*0.2 ? 'mid' : 'dim'); }}
    var list = document.getElementById('coal-list'); if(!list) return;
-   var sel = null;
    function fmt(x){{ return (x===null||x===undefined||isNaN(x)) ? '—' : parseFloat(x).toFixed(4); }}
    function badgeCls(p){{ if(p.catastrophic) return 'cr'; if(p.causal && p.synergy>0.004) return 'hi'; return 'md'; }}
    function renderRows(){{ list.innerHTML = '';
-     pairs.forEach(function(p,i){{ var tc=tier(p.coactivity);
-       var row=document.createElement('div'); row.className='coal-row '+tc+(sel===i?' cs':'');
-       var edge=document.createElement('span'); edge.className='edge';
-       for(var b=0;b<p.coactivity;b++){{ var bar=document.createElement('i'); if(b<p.coactivity) bar.className='fill'; edge.appendChild(bar); }}
-       var cnt=document.createElement('span'); cnt.className='cnt'; cnt.textContent=p.coactivity+'×'; edge.appendChild(cnt);
-       var meta=document.createElement('span'); meta.className='coal-meta';
-       meta.innerHTML = '<span class="m1">L0E'+p.pair[0]+' + L0E'+p.pair[1]+'</span><span class="m2">co-routed <b>'+p.coactivity+'</b>/24·solo <b>'+p.activeA+'</b> / <b>'+p.activeB+'</b></span>';
-       var badges=document.createElement('span'); badges.className='coal-badges';
+     var srt = pairs.slice().sort(function(a,b){{ return b.coactivity-a.coactivity || (Math.max(b.activeA,b.activeB)-Math.max(a.activeA,a.activeB)); }});
+     srt.forEach(function(p,i){{ var tc=tier(p.coactivity);
+       var card=document.createElement('div'); card.className='coal-card '+tc;
+       // header: pills + rank
+       var top=document.createElement('div'); top.className='cc-top';
+       var pills=document.createElement('span'); pills.className='cc-pills';
+       ['A','B'].forEach(function(k,j){{ var n=document.createElement('span'); n.className='coal-node '+nodeCls(k==='A'?p.activeA:p.activeB); n.textContent='E'+p.pair[j]; pills.appendChild(n); if(k==='A'){{ var plus=document.createElement('span'); plus.className='plus'; plus.textContent='+'; pills.appendChild(plus); }} }});
+       var rank=document.createElement('span'); rank.className='cc-rank'; rank.textContent='#'+(i+1);
+       top.appendChild(pills); top.appendChild(rank);
+       // firing meter (full width, green->orange by tier)
+       var meter=document.createElement('div'); meter.className='cc-meter';
+       var mbar=document.createElement('i'); mbar.style.width=Math.round(p.coactivity/maxC*100)+'%'; meter.appendChild(mbar);
+       // count + solo
+       var cnt=document.createElement('div'); cnt.className='cc-count'; cnt.innerHTML=''+p.coactivity+'<small>&nbsp;of 24&nbsp;·&nbsp;'+p.coactivity+'× co-routed</small>';
+       var solo=document.createElement('div'); solo.className='cc-solo';
+       ['A','B'].forEach(function(k,j){{ var row=document.createElement('div'); row.className='cc-s';
+         var s1=document.createElement('span'); s1.className='en'; s1.textContent='E'+p.pair[j]+' ·'+Math.round((k==='A'?p.activeA:p.activeB)/maxA*100)+'%';
+         var sb=document.createElement('span'); sb.className='sb'; var f=document.createElement('i'); f.className=nodeCls(k==='A'?p.activeA:p.activeB); f.style.width=Math.round((k==='A'?p.activeA:p.activeB)/maxA*100)+'%'; sb.appendChild(f);
+         var v=document.createElement('span'); v.className='v'; v.textContent=(k==='A'?p.activeA:p.activeB);
+         row.appendChild(s1); row.appendChild(sb); row.appendChild(v); solo.appendChild(row);
+       }});
+       card.appendChild(top); card.appendChild(meter); card.appendChild(cnt); card.appendChild(solo);
+       var badges=document.createElement('div'); badges.className='cc-badges';
        if(p.catastrophic) badges.innerHTML='<span class="cb hot">hot</span>';
-       else if(p.causal && p.synergy>0.004) badges.innerHTML='<span class="cb syn">synergistic</span>';
+       else if(p.causal && p.synergy>0.004) badges.innerHTML='<span class="cb syn">synergy</span>';
        if(p.redundant) badges.innerHTML+='<span class="cb res">redundant</span>';
-       row.appendChild(edge);
-       var nodes=document.createElement('span');
-       ['A','B'].forEach(function(k,j){{ var n=document.createElement('span'); n.className='coal-node '+nodeCls(k==='A'?p.activeA:p.activeB); n.textContent='E'+p.pair[j]; nodes.appendChild(n); }});
-       row.appendChild(nodes);
-       row.appendChild(meta); row.appendChild(badges);
-       row.addEventListener('click', function(){{ sel=(sel===i?-1:i); renderRows(); }});
-       list.appendChild(row);
+       if(badges.childNodes.length) card.appendChild(badges);
+       list.appendChild(card);
      }});
-     renderDetail();
-   }}
-   function renderDetail(){{ var d=document.getElementById('coal-detail'); if(!d) return;
-     var p = (sel!==null && pairs[sel]) ? pairs[sel] : pairs[0];
-     var isDef = sel!==null;
-     var sg = (p.causal) ? parseFloat(p.synergy).toFixed(4) : null;
-     var ht = '';
-     if(!p.causal){{
-       ht='<p class="d-note">Pair co-occurs '+p.coactivity+'/24 samples — '+(p.coactivity>=4?'persistent, not transient.':'modest; may be transient.' )+'</p><p class="d-note">Causal ablation was measured but every effect here sits below the '+1e-3.toExponential(0)+' noise floor (removing this pair changes nothing measurable on the miniature) — so no HOT/redundant tag is claimed. On the real GLM-5.2 with meaningful routing this becomes ground truth.</p>';
-     }}
-     else {{
-       ht =
-         '<div class="d-row"><span>removing A alone</span><b>'+fmt(p.EA)+'</b></div>'+
-         '<div class="d-row"><span>removing B alone</span><b>'+fmt(p.EB)+'</b></div>'+
-         '<div class="d-row"><span>removing both</span><b>'+fmt(p.EAb)+'</b></div>'+
-         '<div class="d-row" style="border-top:1px solid #2a2a2a;padding-top:5px"><span>joint − individual sum</span><b style="color:'+(parseFloat(sg)>0?'#f87171':'#94a3b8')+'">'+sg+'</b></div>';
-       if(p.catastrophic) ht+='<p class="d-note" style="color:#f87171">HOT — removed together they hurt far more than apart: a real cascade risk.</p>';
-       else if(p.redundant) ht+='<p class="d-note" style="color:#94a3b8">redundant — overlap; keeping one covers the other.</p>';
-       else ht+='<p class="d-note">removed together ≈ apart: neither is hiding behind the other.</p>';
-     }}
-     d.innerHTML =
-       '<div class="d-head">L0E'+p.pair[0]+' + L0E'+p.pair[1]+(isDef?'':' <span style="color:#8a8a8a;font-size:10px">(default — click a row)</span>')+'</div>'+
-       '<div class="d-grp">co-routings</div><div class="d-row"><span>count (of 24)</span><b>'+p.coactivity+'</b></div>'+
-       '<div class="d-grp">causal ablation (§17)</div>'+ht;
    }}
    renderRows();
-   document.addEventListener('click', function(e){{ if(!e.target.closest('.coal-row') && !e.target.closest('.coal-detail')) {{ sel=null; renderRows(); }} }});
  }})();
  fill('t-path', ['count','success rate','signature'], DATA.paths.map(r=>({{count:r.count, 'success rate':r.success_rate, signature:r.signature.map(s=>s.join(',')).join(' | ')}})));
  fill('t-compression', ['layer/expert','format','bits','recon','drift','repair'],
