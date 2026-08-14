@@ -970,7 +970,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .note{{color:#979797;font-size:12px}}
  .panel h3{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:13px;color:#b4b4b4;margin:18px 0 6px}}
  .navsec{{color:#676767;font-size:10.5px;font-weight:600;letter-spacing:0.09em;text-transform:uppercase;margin:14px 10px 4px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
- .navlink{{display:block;margin:14px 10px 0;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;color:#dfdfdf;text-decoration:none;padding:6px 0;border-top:1px solid #2e2e2e}}
+ .navlink{{display:block;margin:14px 10px 0;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:14px;color:#dfdfdf;text-decoration:none;padding:6px 0;border-top:1px solid #2e2e2e}}
  .navlink:hover{{color:#f2f2f2}}
  .stat{{display:inline-block;background:#262626;border:1px solid #353535;border-radius:6px;padding:10px 14px;margin:4px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
  .stat .k{{color:#979797;font-size:11px;display:block}} .stat .v{{font-size:18px;color:#dcdcdc}}
@@ -1013,17 +1013,15 @@ def render_dashboard(data: dict[str, Any]) -> str:
  span.coal-node.dim{{background:#1d1d1d;border-color:#2c2c2c;color:#787878}}
  .coal-row{{display:flex;align-items:center;gap:12px;padding:8px 12px;margin:5px 0;background:#161616;border:1px solid #282828;border-radius:8px;flex-wrap:wrap}}
  .coal-row.min{{opacity:.74}}
- .coal-row .edge{{flex:1 1 180px;min-width:150px;height:2px;position:relative;background:transparent}}
- .coal-row .edge::before{{content:'';position:absolute;left:0;right:0;top:0;height:2px;border-radius:2px}}
- .coal-row.lo .edge::before{{background:#374151}}
- .coal-row.md .edge::before{{background:#65a30d}}
- .coal-row.hi .edge::before{{background:#eab308}}
- .coal-row.cr .edge::before{{background:linear-gradient(90deg,#f97316,#ef4444);height:3px}}
- .coal-row .edge::after{{content:attr(data-cnt);position:absolute;top:-16px;left:50%;transform:translateX(-50%);font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;color:#9ca3af;letter-spacing:.04em}}
- .coal-row.lo .edge::after{{color:#6b7280}}
- .coal-row.md .edge::after{{color:#a3b14a}}
- .coal-row.hi .edge::after{{color:#eab308}}
- .coal-row.cr .edge::after{{color:#fb923c}}
+ .coal-row .edge{{flex:1 1 180px;min-width:150px;height:34px;position:relative;display:flex;align-items:flex-end;gap:2px;background:transparent}}
+ .coal-row .edge i{{display:block;width:6px;border-radius:1px 1px 0 0;background:#2f2f2f}}
+ .coal-row .edge i.fill{{background:#3f6212}}
+ .coal-row .edge .cnt{{margin-left:6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#a1a1aa;letter-spacing:.03em;line-height:34px}}
+ .coal-row.lo .edge i.fill{{background:#3f6212}}
+ .coal-row.md .edge i.fill{{background:#94cc1c}}
+ .coal-row.hi .edge i.fill{{background:#22c55e}}
+ .coal-row.cr .edge i.fill{{background:#f97316}}
+ .coal-row.cr .edge .cnt{{color:#fb923c}}
  .coal-meta{{flex:0 0 200px;min-width:160px;display:flex;flex-direction:column;gap:3px;font-size:11px;color:#b7b7b7}}
  .coal-meta .m1{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11.5px;color:#eee}}
  .coal-meta .m2{{color:#8a8a8a}}
@@ -1037,8 +1035,8 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .coal-legend .lg{{display:inline-flex;align-items:center;gap:6px}}
  .coal-legend .sw{{width:12px;height:12px;border-radius:3px;display:inline-block}}
  .coal-legend .sw.on{{background:#4b4b4b;border:1px solid #6e6e6e}} .coal-legend .sw.mid{{background:#303030;border:1px solid #4a4a4a}} .coal-legend .sw.dim{{background:#1d1d1d;border:1px solid #2c2c2c}}
- .coal-legend .ln{{height:2px;width:26px;border-radius:2px;display:inline-block;vertical-align:middle}}
- .coal-legend .ln.lo{{background:#374151}} .coal-legend .ln.md{{background:#65a30d}} .coal-legend .ln.hi{{background:#eab308}} .coal-legend .ln.cr{{background:#f97316}}
+ .coal-legend .ln{{height:14px;width:6px;border-radius:1px;display:inline-block;vertical-align:middle}}
+ .coal-legend .ln.lo{{background:#3f6212}} .coal-legend .ln.md{{background:#94cc1c}} .coal-legend .ln.hi{{background:#22c55e}} .coal-legend .ln.cr{{background:#f97316}}
  .coal-detail{{flex:0 0 300px;align-self:flex-start;background:#0d0d0d;border:1px solid #2e2e2e;border-radius:8px;padding:12px;font-size:12px;color:#d7d7d7;min-height:140px}}
  .coal-detail .d-head{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;color:#eee;margin:0 0 4px}}
  .coal-detail .d-note{{color:#8a8a8a;font-size:11.5px;margin:0 0 8px}}
@@ -1136,7 +1134,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
      <div class="coal-g">
        <h3>How experts team up (layer 0)</h3>
        <div class="g-note">Most co-routed pairs first. Hover/click a row for the causal ablation panel.</div>
-       <div class="coal-legend"><span class="lg"><span class="sw on"></span>fires a lot</span><span class="lg"><span class="sw mid"></span>moderately routed</span><span class="lg"><span class="sw dim"></span>rare / quiet expert</span><span class="lg"><span class="ln lo"></span>low count</span><span class="lg"><span class="ln md"></span>mid</span><span class="lg"><span class="ln hi"></span>frequent</span><span class="lg"><span class="ln cr"></span class="ln cr">cascade risk</span></div>
+       <div class="coal-legend"><span class="lg"><span class="sw on"></span>fires a lot</span><span class="lg"><span class="sw mid"></span>moderately routed</span><span class="lg"><span class="sw dim"></span>rare / quiet expert</span><span class="lg">co-routing: <span class="ln lo"></span>low</span><span class="lg"><span class="ln md"></span>mid</span><span class="lg"><span class="ln hi"></span>frequent</span><span class="lg"><span class="ln cr"></span>cascade risk</span></div>
        <div id="coal-list"></div>
      </div>
      <aside class="coal-detail" id="coal-detail" aria-live="polite"></aside>
@@ -1263,7 +1261,9 @@ def render_dashboard(data: dict[str, Any]) -> str:
    function renderRows(){{ list.innerHTML = '';
      pairs.forEach(function(p,i){{ var tc=tier(p.coactivity);
        var row=document.createElement('div'); row.className='coal-row '+tc+(sel===i?' cs':'');
-       var edge=document.createElement('span'); edge.className='edge'; edge.setAttribute('data-cnt', p.coactivity+'×');
+       var edge=document.createElement('span'); edge.className='edge';
+       for(var b=0;b<p.coactivity;b++){{ var bar=document.createElement('i'); if(b<p.coactivity) bar.className='fill'; edge.appendChild(bar); }}
+       var cnt=document.createElement('span'); cnt.className='cnt'; cnt.textContent=p.coactivity+'×'; edge.appendChild(cnt);
        var meta=document.createElement('span'); meta.className='coal-meta';
        meta.innerHTML = '<span class="m1">L0E'+p.pair[0]+' + L0E'+p.pair[1]+'</span><span class="m2">co-routed <b>'+p.coactivity+'</b>/24·solo <b>'+p.activeA+'</b> / <b>'+p.activeB+'</b></span>';
        var badges=document.createElement('span'); badges.className='coal-badges';
