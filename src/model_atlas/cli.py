@@ -393,6 +393,21 @@ def validate_bodies(
         print(f"wrote: {out}")
 
 
+@app.command("canary")
+def canary(
+    out: str = typer.Option("", "--out", help="write canary-status JSON here"),
+) -> None:
+    """Real-GLM canary status: metadata census + bounded body validation done,
+    forward trace honestly reported blocked (no torch/NVFP4 decoder in venv)."""
+    from model_atlas.canary import canary_status
+
+    st = canary_status()
+    print(json.dumps(st.to_dict(), indent=2, sort_keys=True))
+    if out:
+        Path(out).write_text(json.dumps(st.to_dict(), indent=2, sort_keys=True))
+        print(f"wrote: {out}")
+
+
 def main() -> None:
     app()
 
