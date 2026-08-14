@@ -1007,10 +1007,10 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .coal-g{{flex:1 1 460px;min-width:340px}}
  .coal-g h3{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:13.5px;color:#eee;margin:0 0 4px;letter-spacing:-0.01em}}
  .coal-g .g-note{{color:#979797;font-size:11.5px;margin:0 0 10px}}
- span.coal-node{{display:inline-flex;align-items:center;justify-content:center;min-width:30px;height:30px;padding:0 6px;margin:2px;border-radius:999px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;font-weight:600;background:#262626;border:1px solid #3a3a3a;color:#dcdcdc}}
- span.coal-node.on{{background:#38bdf8;border-color:#5ecfff;color:#04141c;box-shadow:0 0 8px rgba(56,189,248,0.35)}}
- span.coal-node.mid{{background:#155e75;border-color:#2aa4c5;color:#e0f2fe}}
- span.coal-node.dim{{background:#1a1a1a;border-color:#2a2a2a;color:#555}}
+ span.coal-node{{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;padding:0 5px;margin:2px;border-radius:999px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;font-weight:600;background:#3a3a3a;border:1px solid #555;color:#f2f2f2}}
+ span.coal-node.on{{background:#4b4b4b;border-color:#6e6e6e;color:#ffffff}}
+ span.coal-node.mid{{background:#303030;border-color:#4a4a4a;color:#dcdcdc}}
+ span.coal-node.dim{{background:#1d1d1d;border-color:#2c2c2c;color:#787878}}
  .coal-row{{display:flex;align-items:center;gap:12px;padding:8px 12px;margin:5px 0;background:#161616;border:1px solid #282828;border-radius:8px;flex-wrap:wrap}}
  .coal-row.min{{opacity:.74}}
  .coal-row .edge{{flex:1 1 180px;min-width:150px;height:2px;position:relative;background:transparent}}
@@ -1035,8 +1035,8 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .coal-badges .cb.res{{color:#94a3b8}}
  .coal-legend{{display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin:8px 2px 4px;font-size:11px;color:#979797}}
  .coal-legend .lg{{display:inline-flex;align-items:center;gap:6px}}
- .coal-legend .sw{{width:16px;height:16px;border-radius:4px;display:inline-block}}
- .coal-legend .sw.on{{background:#38bdf8}} .coal-legend .sw.mid{{background:#155e75}} .coal-legend .sw.dim{{background:#1a1a1a;border:1px solid #2a2a2a}}
+ .coal-legend .sw{{width:12px;height:12px;border-radius:3px;display:inline-block}}
+ .coal-legend .sw.on{{background:#4b4b4b;border:1px solid #6e6e6e}} .coal-legend .sw.mid{{background:#303030;border:1px solid #4a4a4a}} .coal-legend .sw.dim{{background:#1d1d1d;border:1px solid #2c2c2c}}
  .coal-legend .ln{{height:2px;width:26px;border-radius:2px;display:inline-block;vertical-align:middle}}
  .coal-legend .ln.lo{{background:#374151}} .coal-legend .ln.md{{background:#65a30d}} .coal-legend .ln.hi{{background:#eab308}} .coal-legend .ln.cr{{background:#f97316}}
  .coal-detail{{flex:0 0 300px;align-self:flex-start;background:#0d0d0d;border:1px solid #2e2e2e;border-radius:8px;padding:12px;font-size:12px;color:#d7d7d7;min-height:140px}}
@@ -1131,12 +1131,12 @@ def render_dashboard(data: dict[str, Any]) -> str:
    </div>
    <div id="contrast-list-wrap"></div></div>
  <div class="panel" id="panel-coalition">
-   <p class="note">Coalitions = expert pairs that are <b>routed together</b> (co-activated) at layer 0, measured by running the calibration corpus forwards. Each row is one pair: the connecting line is its co-routing count, the <span class="coal-node on" style="height:16px;min-width:16px;padding:0 5px;font-size:10px">E</span> nodes show how often each expert <em>alone</em> appears in a route (hot = fires a lot). Where causal tracing (§17) ran, the right tags are ablation ground truth: <b>hot</b> = removed together they hurt more than apart (catastrophic cascade), <b>synergistic</b> = joint harm clearly exceeds the pair's individual-sum, <b>redundant</b> = overlap, taking one leaves the other.</p>
+   <p class="note">Coalitions = expert pairs that are <b>routed together</b> (co-activated) at layer 0, measured by running the calibration corpus forwards. Each row is one pair: the connecting line is its co-routing count, the <span class="coal-node on" style="height:13px;min-width:13px;padding:0 4px;font-size:9px">E</span> badges show how often each expert <em>alone</em> appears in a route (brighter = fires more). Where causal tracing (§17) ran, the right tags are ablation ground truth: <b>hot</b> = removed together they hurt more than apart (catastrophic cascade), <b>synergistic</b> = joint harm clearly exceeds the pair's individual-sum, <b>redundant</b> = overlap, taking one leaves the other.</p>
    <div class="coal-wrap">
      <div class="coal-g">
        <h3>How experts team up (layer 0)</h3>
        <div class="g-note">Most co-routed pairs first. Hover/click a row for the causal ablation panel.</div>
-       <div class="coal-legend"><span class="lg"><span class="sw on"></span>both experts healthy &amp; co-routed</span><span class="lg"><span class="sw mid"></span>moderately routed</span><span class="lg"><span class="sw dim"></span>rare / quiet expert</span><span class="lg"><span class="ln lo"></span>low count</span><span class="lg"><span class="ln md"></span>mid</span><span class="lg"><span class="ln hi"></span>frequent</span><span class="lg"><span class="ln cr"></span class="ln cr">cascade risk</span></div>
+       <div class="coal-legend"><span class="lg"><span class="sw on"></span>fires a lot</span><span class="lg"><span class="sw mid"></span>moderately routed</span><span class="lg"><span class="sw dim"></span>rare / quiet expert</span><span class="lg"><span class="ln lo"></span>low count</span><span class="lg"><span class="ln md"></span>mid</span><span class="lg"><span class="ln hi"></span>frequent</span><span class="lg"><span class="ln cr"></span class="ln cr">cascade risk</span></div>
        <div id="coal-list"></div>
      </div>
      <aside class="coal-detail" id="coal-detail" aria-live="polite"></aside>
