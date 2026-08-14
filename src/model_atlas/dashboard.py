@@ -1022,10 +1022,10 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .cc-rank{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#8a8a8a;border:1px solid #353535;border-radius:999px;padding:1px 8px;background:#0f0f0f}}
  .cc-meter{{height:6px;border-radius:3px;background:#1d1d1d;overflow:hidden}}
  .cc-meter i{{display:block;height:100%;border-radius:3px;width:0}}
- .coal-card.lo .cc-meter i{{background:#c4c4c4}}
- .coal-card.md .cc-meter i{{background:#9a9a9a}}
- .coal-card.hi .cc-meter i{{background:#6e6e6e}}
- .coal-card.cr .cc-meter i{{background:#e05c5c}}
+ .coal-card.lo .cc-meter i{{background:#3f6212}}
+ .coal-card.md .cc-meter i{{background:#94cc1c}}
+ .coal-card.hi .cc-meter i{{background:#22c55e}}
+ .coal-card.cr .cc-meter i{{background:#f97316}}
  .cc-count{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:15px;color:#eee;line-height:1;margin-top:-2px}}
  .cc-count small{{color:#8a8a8a;font-size:11px}}
  .cc-solo{{display:flex;flex-direction:column;gap:4px}}
@@ -1051,7 +1051,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .coal-legend .sw{{width:12px;height:12px;border-radius:3px;display:inline-block}}
  .coal-legend .sw.on{{background:#4b4b4b;border:1px solid #6e6e6e}} .coal-legend .sw.mid{{background:#303030;border:1px solid #4a4a4a}} .coal-legend .sw.dim{{background:#1d1d1d;border:1px solid #2c2c2c}}
  .coal-legend .ln{{height:14px;width:6px;border-radius:1px;display:inline-block;vertical-align:middle}}
- .coal-legend .ln.lo{{background:#c4c4c4}} .coal-legend .ln.md{{background:#9a9a9a}} .coal-legend .ln.hi{{background:#6e6e6e}} .coal-legend .ln.cr{{background:#e05c5c}}
+ .coal-legend .ln.lo{{background:#3f6212}} .coal-legend .ln.md{{background:#94cc1c}} .coal-legend .ln.hi{{background:#22c55e}} .coal-legend .ln.cr{{background:#f97316}}
  .struct-sec{{margin-top:18px;padding:14px 16px;background:#151515;border:1px solid #2a2a2a;border-radius:10px}}
  .struct-sec h3{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:13.5px;color:#eee;margin:0 0 2px;letter-spacing:-0.01em}}
  .struct-sec .g-note{{color:#979797;font-size:11.5px;margin:0 0 10px}}
@@ -1063,6 +1063,8 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .oc.hatch{{background-image:repeating-linear-gradient(45deg,rgba(0,0,0,0.35) 0 4px,rgba(255,255,255,0.12) 4px 8px)}}
  .ch-heat{{border-collapse:separate;border-spacing:1px}}
  .ch-heat td{{padding:1px}}
+ .strip-lab{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#a7a7a7;margin:12px 0 4px;letter-spacing:.03em}}
+ .ch-heat .tile-edge{{box-shadow:inset 0 0 0 2px #8a8a8a;border-radius:2px}}
  .ch{{width:12px;height:12px;border-radius:2px}}
  .router-box,.distill-box{{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px;background:#161616;border:1px solid #2a2a2a;border-radius:8px;margin:4px 0 10px}}
  .rslot{{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:26px;border-radius:50%;background:#3c3c3c;border:1px solid #565656;color:#e8e8e8;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;font-weight:600}}
@@ -1195,8 +1197,8 @@ def render_dashboard(data: dict[str, Any]) -> str:
     <h3>Expert residency &amp; overflow (node A / node B / NVMe tier)</h3>
     <div class="g-note">Each cell is one expert (L0 L2 rows, E0&#8211;E7 columns): solid = resident on this node, hatched = stored but overflowed to NVMe (non-resident).</div>
     <div id="residency-heat"></div>
-    <h3>Channel keep-map (32 channels × expert, measured)</h3>
-    <div class="g-note">Bright cells = channel kept at its measured importance; dark = pruned. One row per expert, channels 0&#8211;31.</div>
+    <h3>Channel keep-map (per layer, 16 channels × expert)</h3>
+    <div class="g-note">One strip per layer: bright green cells = channel kept (shade = measured importance), dark = pruned; outlined cells mark each <b>tile block</b> start. Hover any cell for exact importance.</div>
     <div id="channel-heat"></div>
     <h3>Router repair (reindex)</h3>
     <div class="g-note">Expert → new expert slot. Grey discs kept in place; red discs dropped (renumbered away); solid dot = route-bias must move in lockstep.</div>
@@ -1382,29 +1384,43 @@ def render_dashboard(data: dict[str, Any]) -> str:
      }}
      el.appendChild(tbl);
    }})();
-   // 2) channel keep heat: one row per expert, cells shaded by importance, pruned dark
+   // 2) channel + tile strip: per-layer horizontal heat strips, tile blocks outlined, hovers show importance
    (function(){{
      var el=document.getElementById('channel-heat'); if(!el) return;
      var rows={{}};
      M.channel.forEach(function(r){{ var key=r.layer_index+'_'+r.source_expert_id; if(!rows[key]) rows[key]={{}}; rows[key][r.channel_id]=r; }});
+     var tiles={{}};
+     M.tile.forEach(function(r){{ var key=r.layer_index+'_'+r.source_expert_id; if(!tiles[key]) tiles[key]={{}}; tiles[key][r.channel_start]=r; }});
      var chans=M.channel.length?Math.max.apply(null,M.channel.map(r=>r.channel_id))+1:0;
      var maxI=Math.max.apply(null,M.channel.length?M.channel.map(r=>r.importance):[1]);
-     // group by (layer,expert) but render only layer-0 experts (2 layers, same channel layout)
-     var keys=Object.keys(rows).filter(k=>k.startsWith('0_'));
-     keys.sort(function(a,b){{ return parseInt(a.split('_')[1])-parseInt(b.split('_')[1]); }});
-     var tbl=document.createElement('table'); tbl.className='map-heat ch-heat';
-     var htr=['']; for(var i=0;i<chans;i++) htr.push(i%4===0?i:'');
-     var thead=tbl.createTHead().insertRow(); thead.innerHTML='<th></th>'+htr.map(x=>x===''?'<th></th>':'<th>'+x+'</th>').join('');
-     keys.forEach(function(k){{ var tr=tbl.insertRow();
-       tr.insertCell().textContent='E'+k.split('_')[1];
-       for(var c=0;c<chans;c++){{ var td=document.createElement('td'); var e=rows[k][c];
-         var div=document.createElement('div'); div.className='ch';
-         if(e&&e.keep){{ var a=0.18+0.62*Math.sqrt(e.importance/maxI); div.style.background='rgba(210,210,210,'+a+')'; div.title='E'+e.source_expert_id+' ch'+c+' imp '+e.importance.toFixed(3); }}
-         else div.style.background='rgba(80,80,80,0.25)';
-         td.appendChild(div); tr.appendChild(td);
+     var keys=Object.keys(rows);
+     var layers=[];
+     keys.forEach(function(k){{ var L=parseInt(k.split('_')[0]); if(layers.indexOf(L)<0) layers.push(L); }});
+     layers.sort(function(a,b){{ return a-b; }});
+     layers.forEach(function(L){{
+       var lab=document.createElement('div'); lab.className='strip-lab'; lab.textContent='layer '+L+' — channel keep/tile map';
+       el.appendChild(lab);
+       var tbl=document.createElement('table'); tbl.className='map-heat ch-heat';
+       var thead=tbl.createTHead().insertRow();
+       var hd='<th></th>'; for(var i=0;i<chans;i++){{ hd += (i%4===0? '<th>'+i+'</th>' : '<th></th>'); }}
+       thead.innerHTML=hd;
+       for(var e=0;e<8;e++){{
+         var key=L+'_'+e; var tr=tbl.insertRow();
+         tr.insertCell().textContent='E'+e;
+         for(var c=0;c<chans;c++){{
+           var td=document.createElement('td'); var r=rows[key]?rows[key][c]:null;
+           var div=document.createElement('div'); div.className='ch';
+           if(r&&r.keep){{ var a=0.18+0.62*Math.sqrt(r.importance/maxI); div.style.background='rgba(34,197,94,'+a+')'; div.title='L'+L+' E'+e+' ch'+c+' imp '+r.importance.toFixed(3); }}
+           else div.style.background='rgba(80,80,80,0.25)';
+           td.appendChild(div);
+           // tile block outline from channel_start
+           var tk=tiles[key]?tiles[key][c]:null;
+           if(tk) td.className='tile-edge';
+           tr.appendChild(td);
+         }}
        }}
+       el.appendChild(tbl);
      }});
-     el.appendChild(tbl);
    }})();
    // 3) router repair: circles for old->new slots, dropped = red
    (function(){{
