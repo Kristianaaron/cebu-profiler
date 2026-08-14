@@ -883,7 +883,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
             "tabs": [
                 {"id": "capability", "title": "Experts"},
                 {"id": "contrast", "title": "Success\u2212Failure"},
-                {"id": "coalition", "title": "Coalitions"},
+                {"id": "coalition", "title": "Expert Pairings"},
                 {"id": "path", "title": "Paths"},
                 {"id": "hierarchy", "title": "Hierarchy"},
                 {"id": "maps", "title": "Planning Maps"},
@@ -1138,18 +1138,18 @@ def render_dashboard(data: dict[str, Any]) -> str:
    </div>
    <div id="contrast-list-wrap"></div></div>
  <div class="panel" id="panel-coalition">
-   <p class="note">Coalitions = expert pairs that are <b>routed together</b> (co-activated) at layer 0, measured by running the calibration corpus forwards. Cards rank every pair by firing strength: the <b>meter = co-routing count</b> (a card&#8217;s bar is length proportional to how often this pair fires, colour by tier), and each expert pill shows how often it appears <em>alone</em> in a route (brighter = fires more) with its % + count. Cascade-risk pairs (removed together they hurt more than apart — measured, §17) get an orange meter + <b>hot</b> tag; <b>synergy</b> = joint harm exceeds the pair's individual sum; <b>redundant</b> = overlap, keeping one covers the other.</p>
+   <p class="note">Expert Pairings = pairs of experts that are <b>routed together</b> (co-activated) at layer 0, measured by running the calibration corpus forwards. Cards rank every pair by firing strength: the <b>meter = co-routing count</b> (a card&#8217;s bar is length proportional to how often this pair fires, colour by tier), and each expert pill shows how often it appears <em>alone</em> in a route (brighter = fires more) with its % + count. Cascade-risk pairs (removed together they hurt more than apart — measured, §17) get an orange meter + <b>hot</b> tag; <b>synergy</b> = joint harm exceeds the pair's individual sum; <b>redundant</b> = overlap, keeping one covers the other.</p>
    <div class="coal-wrap">
      <div class="coal-g" style="flex:1 1 100%">
        <h3>How experts team up (layer 0)</h3>
-       <div class="g-note">Strongest coalitions first (all info in the card &#8212; no separate detail panel).</div>
+       <div class="g-note">Strongest pairings first (all info in the card &#8212; no separate detail panel).</div>
        <div class="coal-legend"><span class="lg"><span class="sw on"></span>fires a lot</span><span class="lg"><span class="sw mid"></span>moderately routed</span><span class="lg"><span class="sw dim"></span>rare / quiet</span><span class="lg"><span class="ln md"></span></span><span class="lg">co-routing&nbsp;meter:&nbsp;<span class="ln lo"></span>&nbsp;low</span><span class="lg"><span class="ln hi"></span>&nbsp;frequent</span><span class="lg"><span class="ln cr"></span>&nbsp;cascade&nbsp;risk</span></div>
        <div id="coal-list" class="coal-grid" role="list"></div>
      </div>
    </div>
  </div>
  <div class="panel" id="panel-path"><p class="note">Most frequent cross-layer route signatures with success rate (measured).</p><table id="t-path"></table></div>
- <div class="panel" id="panel-hierarchy"><p class="note">Six-level atlas hierarchy (v2 §9): L1 weights → L2 units → L3 experts → L4 coalitions → L5 pathways → L6 behaviour, traceable up and down. Per-level node counts are measured; the example shows how many lower-level components realise the first behaviour (and the peak shared-channel prevalence — how load-bearing).</p><div id="hier-stats"></div><table id="t-hierarchy"></table></div>
+ <div class="panel" id="panel-hierarchy"><p class="note">Six-level atlas hierarchy (v2 §9): L1 weights → L2 units → L3 experts → L4 expert pairings → L5 pathways → L6 behaviour, traceable up and down. Per-level node counts are measured; the example shows how many lower-level components realise the first behaviour (and the peak shared-channel prevalence — how load-bearing).</p><div id="hier-stats"></div><table id="t-hierarchy"></table></div>
  <div class="panel" id="panel-compression"><p class="note">Per-expert compression response (int4 vs int8), reconstruction error + output drift (measured math).</p><table id="t-compression"></table></div>
  <div class="panel" id="panel-candidate"><p class="note">Derivative candidates: kept experts/layer, resident bytes per node, go/no-go fit, held-out retention.</p><table id="t-candidate"></table></div>
  <div class="panel" id="panel-heldout"><p class="note">Per-capability held-out retention (derivative vs source), measured.</p><table id="t-heldout"></table></div>
@@ -1253,7 +1253,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  }})();
  renderCap();
 
- // ---- Coalition visualization (co-routed pairs with causal tags) ----
+ // ---- Expert-pairing visualization (co-routed pairs with causal tags) ----
  (function(){{
    var pairs = DATA.coalitions||[]; if(!pairs.length) return;
    var maxC = Math.max.apply(null, pairs.map(p=>p.coactivity||0))||1;
