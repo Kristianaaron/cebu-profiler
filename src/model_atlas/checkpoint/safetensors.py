@@ -45,3 +45,24 @@ def write_safetensors(path: str | Path, tensors: dict[str, dict[str, Any]]) -> N
         f.write(struct.pack("<Q", len(header_bytes)))
         f.write(header_bytes)
         f.write(bytes(data))
+
+
+def write_safetensors_flat(path: str | Path, tensors: dict[str, dict[str, Any]]) -> None:
+    """Write a Safetensors file whose tensor entries come pre-shaped.
+
+    `tensors`: name -> {dtype, bytes}. Shapes are inferred from the body byte
+    length / itemsize for the fixture dtypes so callers do not need to repeat
+    them. Synthetic fixtures only.
+    """
+    shaped: dict[str, dict[str, Any]] = {}
+    for name, spec in tensors.items():
+        isz = {"F16": 2, "F32": 4, "BF16": 2, "I8": 1}[spec["dtype"]]
+        body = spec["bytes"]
+        if len(body) % isz != 0:
+            raise ValueError(f"{name}: body not aligned to dtype itemsize")
+        shaped[name] = {
+            "dtype": spec["dtype"],
+            "shape": [len(body) // isz],
+            "bytes": body,
+        }
+    write_safetensors(path, shaped)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import platform
 from pathlib import Path
 
@@ -371,6 +372,25 @@ def preflight(
     model_paths = [model_dir] if model_dir else None
     path = write_preflight(out, model_paths)
     print(f"wrote preflight/capability report: {path}")
+
+
+@app.command("validate-bodies")
+def validate_bodies(
+    checkpoint_dir: str,
+    out: str = typer.Option("", "--out", help="write JSON scan report here"),
+) -> None:
+    """Bounded, read-only body validation over a real checkpoint (GLM-5.2 NVFP4).
+
+    Reads only a few reference tensors + one NVFP4 expert's constituents; never
+    materializes the source. GPU/mount untouched.
+    """
+    from model_atlas.checkpoint.realbody import validate_real_bodies
+
+    scan = validate_real_bodies(checkpoint_dir)
+    print(json.dumps(scan.as_dict(), indent=2, sort_keys=True))
+    if out:
+        Path(out).write_text(json.dumps(scan.as_dict(), indent=2, sort_keys=True))
+        print(f"wrote: {out}")
 
 
 def main() -> None:
