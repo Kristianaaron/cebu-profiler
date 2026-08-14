@@ -1212,6 +1212,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
     <h3>Residual repair</h3><table id="t-residual"></table>
     <h3>Distillation targets</h3><table id="t-distill"></table>
  </div>
+ <div class="panel" id="panel-pareto">
    <p class="note">Pareto explorer: nondominated frontier, knee as a scored <b>region</b> (never a single point), and per-candidate neighbor deltas (fidelity / compact) with marginal quality-per-GiB. <b>Predicted candidates are shown hollow; measured are solid.</b></p>
    <div id="pareto-summary"></div>
    <h3>Frontier scatter (quality vs resident GiB)</h3>
