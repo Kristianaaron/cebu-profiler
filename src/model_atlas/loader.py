@@ -476,15 +476,23 @@ def production_write_shard(path: Path, specs: list[TensorSpec], body_provider: A
             "data_offsets": list(rel[sp.name]),
         }
     header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    close = getattr(body_provider, "close", None)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as f:
-        f.write(struct.pack("<Q", len(header_bytes)))
-        f.write(header_bytes)
-        for sp in specs:
-            # stream each body at this buffer position (provider handles source)
-            body_provider(sp.name, rel[sp.name][0], sp.data_len, f)
-        f.flush()
-        os.fsync(f.fileno())
+    try:
+        with open(path, "wb") as f:
+            f.write(struct.pack("<Q", len(header_bytes)))
+            f.write(header_bytes)
+            for sp in specs:
+                # stream each body at this buffer position (provider handles source)
+                body_provider(sp.name, rel[sp.name][0], sp.data_len, f)
+            f.flush()
+            os.fsync(f.fileno())
+    finally:
+        # idempotently close any resource-bearing provider (plain callable test
+        # providers have no close -> no-op). Guarantees a per-shard source handle
+        # is released even when a body writer raises.
+        if callable(close):
+            close()
 
 
 def _write_partial_and_finalize(
@@ -786,19 +794,65 @@ def _copy_stream(src: Path, dst: Path, chunk: int = _IO_CHUNK) -> None:
         os.fsync(fo.fileno())
 
 
-def _stream_body_window(
-    src: Path, abs_start: int, abs_end: int, dst: Any,
-    dst_off: int, size: int, chunk: int = _IO_CHUNK,
+def _read_exact(f: Any, n: int, what: str) -> bytes:
+    out = bytearray()
+    while len(out) < n:
+        b = f.read(n - len(out))
+        if not b:
+            raise ValueError(f"short read {what}: wanted {n}, got {len(out)}")
+        out += b
+    return bytes(out)
+
+
+def _copy_range(
+    f: Any, abs_start: int, length: int, dst: Any, chunk: int = _IO_CHUNK,
 ) -> None:
-    with open(src, "rb") as f:
-        f.seek(abs_start)
-        rem = abs_end - abs_start
-        while rem > 0:
-            take = f.read(min(chunk, rem))
-            if not take:
-                raise ValueError("short")
-            dst.write(take)
-            rem -= len(take)
+    """Stream one contiguous source interval [abs_start, abs_start+length) into
+    dst in <=chunk reads/writes. Used for a single contiguous run, including one
+    longer than `chunk` (streamed in <=chunk chunks). Never materializes more
+    than `chunk` bytes."""
+    f.seek(abs_start)
+    rem = length
+    while rem > 0:
+        take = f.read(min(chunk, rem))
+        if not take:
+            raise ValueError(f"short read at {abs_start} rem {rem}")
+        dst.write(take)
+        rem -= len(take)
+
+
+def _bounded_spans(
+    windows: list[tuple[int, int]], chunk: int = _IO_CHUNK,
+) -> list[list[tuple[int, int]]]:
+    """Group ordered windows into source spans whose EXTENT (first.a .. last.b,
+    gaps included) <= `chunk`. One seek/read per span then extracts the requested
+    subranges. Rejects overlapping/reversed windows; adjacent windows (a == prev_b)
+    stay in the same span. A single contiguous window longer than `chunk` remains
+    its own (oversized) span and is streamed by the caller in <=chunk chunks.
+    Offsets are ABSOLUTE file offsets (may exceed `chunk`), so span formation
+    compares derivative offsets (b - first_a), never the raw offsets."""
+    spans: list[list[tuple[int, int]]] = []
+    cur: list[tuple[int, int]] = []
+    first_a: int | None = None
+    prev_b: int | None = None
+    for (a, b) in windows:
+        if not isinstance(a, int) or not isinstance(b, int) or b <= a:
+            raise ValueError(f"invalid/inverted window: {(a, b)}")
+        if prev_b is not None and a < prev_b:
+            raise ValueError(f"overlapping/reversed windows: {a}<{prev_b}")
+        # flush cur once the current span would exceed the chunk extent (gaps
+        # included), keyed on derivative extent only.
+        if cur and first_a is not None and (b - first_a) > chunk:
+            spans.append(cur)
+            cur = []
+            first_a = None
+        if not cur:
+            first_a = a
+        cur.append((a, b))
+        prev_b = b
+    if cur:
+        spans.append(cur)
+    return spans
 
 
 def _plan_output_shard(
@@ -806,9 +860,23 @@ def _plan_output_shard(
     keep_map: dict[tuple[int, int], list[int]], width: int,
 ) -> tuple[list[TensorSpec], Any]:
     """Plan an output shard's ordered specs + streaming body writer (data-base
-    aware). Returns (specs, build_body)."""
+    aware). Returns (specs, build_body).
+
+    The returned body provider opens the source shard ONCE lazily and reuses that
+    handle for every body in the shard. Its `close` is idempotent and always
+    invoked by `production_write_shard` via `finally`, so resume-skipped shards
+    (never written) never open a handle and no handle leaks on error. It also
+    works as a plain callable (single body) for compatibility.
+
+    Ordering/IO: ordered sparse windows are gathered in original order and
+    grouped into source spans of extent <= _IO_CHUNK, read with one seek/read per
+    span (gaps included), requested subranges emitted in order into a <=4MiB
+    buffer and written once. A single contiguous interval >4MiB is streamed in
+    <=4MiB chunks. Every read/write <=4MiB; no full tensor/shard is materialized.
+    """
     base = _shard_data_base(source / shard)
     shard_entries = sorted((t for t in manifest.tensors if t.shard == shard), key=lambda t: t.name)
+    src_path = source / shard
     specs: list[TensorSpec] = []
     bodies: dict[str, list[tuple[int, int]]] = {}
     for t in shard_entries:
@@ -831,11 +899,55 @@ def _plan_output_shard(
             # non-target: whole body [offset_start, offset_end)
             bodies[name] = [(tbase, tbase + t.byte_size)]
 
+    state: dict[str, Any] = {"f": None, "closed": False}
+
+    def _ensure() -> Any:
+        if state["closed"]:
+            raise ValueError("provider already closed")
+        if state["f"] is None:
+            state["f"] = open(src_path, "rb")  # noqa: SIM115 - lazy per-shard handle, closed by close()
+        return state["f"]
+
     def build_body(name: str, start: int, size: int, dst: Any) -> None:
         _ = start
-        for (a, b) in bodies[name]:
-            _stream_body_window(source / shard, a, b, dst, 0, b - a)
+        wins = bodies[name]
+        if not wins:
+            return
+        f = _ensure()
+        blank = bytearray()
+        for span in _bounded_spans(wins, _IO_CHUNK):
+            first_a = span[0][0]
+            last_b = span[-1][1]
+            length = last_b - first_a
+            if length <= 0:
+                continue
+            contiguous = sum((b - a) for (a, b) in span) == length
+            if contiguous:
+                # one interval (possibly > chunk): stream/slice in bounded chunks
+                _copy_range(f, first_a, length, dst)
+                continue
+            # sparse span extent <= chunk: one seek/read, gather subranges in
+            # original order into a bounded buffer, write once. Reads gap bytes
+            # so the seek/read count is O(source_bytes/4MiB), not per-window.
+            if length > _IO_CHUNK:  # defensive; formation keeps extent <= chunk
+                raise ValueError(f"span extent {length} exceeds chunk")
+            f.seek(first_a)
+            raw = _read_exact(f, length, f"span {first_a}:{last_b}")
+            blank.clear()
+            for (a, b) in span:
+                blank += raw[(a - first_a):(b - first_a)]
+            dst.write(blank)
 
+    def close() -> None:
+        if state["closed"]:
+            return
+        state["closed"] = True
+        f = state["f"]
+        state["f"] = None
+        if f is not None:
+            f.close()
+
+    build_body.close = close  # type: ignore[attr-defined]
     return specs, build_body
 
 

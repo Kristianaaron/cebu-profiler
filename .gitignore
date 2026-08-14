@@ -6,6 +6,9 @@
 /calibration/
 /traces/
 
+# materialized derivatives (large generated outputs, never committed)
+/derivatives/
+
 # python
 .venv/
 .venv-exec/
