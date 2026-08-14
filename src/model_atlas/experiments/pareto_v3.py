@@ -41,7 +41,7 @@ class FrontierPoint(BaseModel):
     frontier: bool = False
     dominated_by: list[str] = Field(default_factory=list)
     knee_score: float | None = Field(default=None, ge=0.0, le=1.0)
-    evidence_kind: EvidenceKind = EvidenceKind.MEASURED
+    evidence_kind: EvidenceKind = EvidenceKind.PREDICTED
 
 
 class NeighborDelta(BaseModel):

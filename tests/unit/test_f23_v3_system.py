@@ -3,6 +3,8 @@ v3 pipeline orchestrator, and output-contract additions."""
 
 import json
 
+import pytest
+
 from model_atlas.analysis import build_corpus_semantic_map, project_corpus_delta
 from model_atlas.atlas.output_layout import ATLAS_RUN_FILES, expected_run_files
 from model_atlas.atlas.reap import make_synthetic_corpus
@@ -92,6 +94,7 @@ def test_corpus_bidirectional_reports_and_delta_projection() -> None:
         assert -1.0 <= d.quality_delta <= 1.0
 
 
+@pytest.mark.slow
 def test_v3_pipeline_runs_all_stages_and_serializes() -> None:
     model = _model()
     corpus = _corpus(model, n=4)

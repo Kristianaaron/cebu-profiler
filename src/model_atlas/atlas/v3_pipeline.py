@@ -138,10 +138,11 @@ def run_v3_pipeline(
     result.structural_fallback = list(fallback)
     stages.append("structural_fallback")
 
-    # 9. Pareto over a small synthetic candidate family (idealized numbers for
-    #    demonstration on the minature; real measured numbers replace these).
-    #    Sized so the nondominated frontier has several points -> the explorer's
-    #    scatter, knee band, and neighbor-delta views are meaningfully populated.
+    # 9. Pareto over a small synthetic candidate family. These are IDEALIZED
+    #    numbers for demonstration on the miniature, NOT measurements: they are
+    #    tagged PREDICTED (never MEASURED) and can never be marked deployable.
+    #    Real measured numbers from materialized + evaluated + runtime-measured
+    #    candidates replace these behind the measured data path.
     from model_atlas.experiments.pareto_v3 import FrontierPoint
 
     candidates = []
@@ -163,6 +164,7 @@ def run_v3_pipeline(
                     "decode_tps": decode,
                     "context": ctx,
                 },
+                evidence_kind=EvidenceKind.PREDICTED,
             )
         )
     pareto = restrict_frontier(candidates)
@@ -179,11 +181,12 @@ def run_v3_pipeline(
         "routing_consistency": EvidenceKind.MEASURED.value,
         "kv_budget": EvidenceKind.ESTIMATED.value,
         "structural_fallback": EvidenceKind.PREDICTED.value,
-        "pareto": EvidenceKind.MEASURED.value,
+        "pareto": EvidenceKind.PREDICTED.value,
     }
     result.notes = (
-        "fidelity-first pipeline; predictions are never deployable "
-        "until materialized+measured"
+        "fidelity-first pipeline; pareto points are PREDICTED (idealized demo "
+        "family), not measured — never deployable until materialized + "
+        "held-out evaluated + runtime measured"
     )
     return result
 

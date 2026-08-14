@@ -23,7 +23,9 @@ from model_atlas.dashboard import write_dashboard
 from model_atlas.experiments.pareto_v3 import restrict_frontier
 from model_atlas.planning.memory_planner import GIB, assess
 from model_atlas.planning.realbytes import account_manifest, plan_candidates, report
+from model_atlas.preflight import write_preflight
 from model_atlas.registry.architectures import get_registry
+from model_atlas.schemas.evidence import EvidenceKind
 
 app = typer.Typer(no_args_is_help=True, help="Model-agnostic Atlas platform CLI.")
 
@@ -272,22 +274,26 @@ def v3_pareto(
             values={
                 "quality": 0.99, "resident_gib": 214.0, "decode_tps": 21.0, "context": 256000,
             },
+            evidence_kind=EvidenceKind.PREDICTED,
         ),
         FrontierPoint(
             candidate_id="B",
             values={"quality": 0.995, "resident_gib": 196.0, "decode_tps": 26.0, "context": 384000},
+            evidence_kind=EvidenceKind.PREDICTED,
         ),
         FrontierPoint(
             candidate_id="C",
             values={"quality": 0.96, "resident_gib": 150.0, "decode_tps": 33.0, "context": 720000},
+            evidence_kind=EvidenceKind.PREDICTED,
         ),
         FrontierPoint(
             candidate_id="D",
             values={"quality": 0.97, "resident_gib": 160.0, "decode_tps": 30.0, "context": 700000},
+            evidence_kind=EvidenceKind.PREDICTED,
         ),
     ]
     r = restrict_frontier(pts)
-    print("v3 pareto:")
+    print("v3 pareto (IDEALIZED demo points — tagged PREDICTED, not measured):")
     print(f"  frontier: {', '.join(r.frontier_ids)}")
     print(f"  knee region: {', '.join(r.knee_region)}")
     for cid, deltas in r.neighbor_deltas.items():
@@ -354,6 +360,17 @@ def v3_corpus(
     print(f"  clusters: {', '.join(c.cluster_id for c in rep.clusters)}")
     print(f"  insufficient-evidence cluster-cells: {len(rep.insufficient_clusters)}")
     print(f"  per-cluster rows: {len(rep.cluster_expert_coverage)}")
+
+
+@app.command()
+def preflight(
+    out: str = typer.Option("capability_report.json", "--out"),
+    model_dir: str = typer.Option("", "--model-dir", help="extra mounted model dir to size"),
+) -> None:
+    """Write a machine-readable capability/preflight report (measured)."""
+    model_paths = [model_dir] if model_dir else None
+    path = write_preflight(out, model_paths)
+    print(f"wrote preflight/capability report: {path}")
 
 
 def main() -> None:

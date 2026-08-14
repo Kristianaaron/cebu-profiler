@@ -2,9 +2,12 @@
 
 import json
 
+import pytest
+
 from model_atlas.dashboard import build_dashboard_data, render_dashboard, write_dashboard
 
 
+@pytest.mark.slow
 def test_build_dashboard_data_has_sections():
     data = build_dashboard_data(seed=0)
     assert data["meta"]["arch"] == "k3-mini"
@@ -34,6 +37,7 @@ def test_build_dashboard_data_has_sections():
     assert data["ecosystem"]["eval_host"] == 8100
 
 
+@pytest.mark.slow
 def test_render_dashboard_is_self_contained_html():
     data = build_dashboard_data(seed=0)
     html = render_dashboard(data)
@@ -61,6 +65,7 @@ def test_render_dashboard_is_self_contained_html():
     assert embedded["meta"]["arch"] == "k3-mini"
 
 
+@pytest.mark.slow
 def test_write_dashboard_writes_file(tmp_path):
     write_dashboard(str(tmp_path / "dash.html"), seed=0)
     assert tmp_path.joinpath("dash.html").read_text().startswith("<!doctype html>")

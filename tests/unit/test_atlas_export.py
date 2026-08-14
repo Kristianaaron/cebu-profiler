@@ -8,6 +8,10 @@ import pytest
 from model_atlas.atlas.export import export_run
 from model_atlas.atlas.output_layout import ATLAS_RUN_FILES
 
+# Every export test runs the full v3 pipeline over the synthetic model
+# (~30s each). Keep these out of the default fast suite.
+pytestmark = pytest.mark.slow
+
 
 def _write_fixture_corpus(root: Path) -> None:
     """A tiny eval-lab-shaped task tree with two prompt.md files."""

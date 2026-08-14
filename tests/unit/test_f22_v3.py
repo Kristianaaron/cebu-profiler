@@ -8,6 +8,8 @@ the deterministic synthetic MiniMoE — no checkpoint required.
 """
 
 
+import pytest
+
 from model_atlas.analysis import (
     analyze_shared_representation,
     analyze_spectral,
@@ -61,6 +63,7 @@ def test_shared_representation_rows_and_bounds() -> None:
         assert abs(r.shared_energy_ratio + r.unique_energy_ratio - 1.0) < 1e-6
 
 
+@pytest.mark.slow
 def test_spectral_rows_three_tensors() -> None:
     model = _model()
     sp = analyze_spectral(model, heavy_tail_modes=4)
