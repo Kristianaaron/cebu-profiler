@@ -87,7 +87,12 @@ def _probe_modelopt_venv(venv: str) -> tuple[bool, str | None]:
 
 def probe_exl3() -> BackendProbe:
     installed, ver = _probe_module("exllamav2")
-    note = "no EXL3 kernel present on this host"
+    note = (
+        "EXL3 conversion from the installed NVFP4 checkpoint is BLOCKED: there is "
+        "no BF16 parent source and no verified ModelOpt dequantization available, "
+        "so an EXL3 quant cannot be produced from it. EXL3 is a distinct 4-bit "
+        "format needing its own dequant source."
+    )
     setup = []
     if not installed:
         setup.append(
@@ -98,14 +103,19 @@ def probe_exl3() -> BackendProbe:
             "uv venv .venv-exl3 && uv pip install --python .venv-exl3/bin/python "
             "exllamav2@git+https://github.com/turboderp/exllamav2@<pinned-rev>"
         )
+        support = SupportStatus.REQUIRES_CUSTOM_KERNEL
     else:
-        note = f"EXL3 {ver} present; audit GLM-5.2/SM121 path before probing (report, do not claim)"
-        setup.append("# run the EXL3 conversion + reconstruction probe to measure real support")
+        note = (
+            f"EXL3 {ver} present, but conversion from this NVFP4 source is STILL "
+            "BLOCKED without a BF16 parent or verified ModelOpt dequantization "
+            "(report gap, do not claim)"
+        )
+        support = SupportStatus.UNSUPPORTED
     return BackendProbe(
         backend_id="exl3",
         installed=installed,
         version=ver,
-        support=SupportStatus.REQUIRES_CUSTOM_KERNEL if not installed else SupportStatus.PROBE_ONLY,
+        support=support,
         note=note,
         setup=setup,
         location=None,
@@ -130,13 +140,18 @@ def probe_modelopt_nvfp4() -> BackendProbe:
         if ver and ver != CHECKPOINT_MODELOPT_PRODUCER:
             note.append(
                 f"ModelOpt {ver} present but producer is {CHECKPOINT_MODELOPT_PRODUCER}; "
-                "decode parity must be verified on a sampled tensor before trusting"
+                "**dequantization parity is UNPROVEN** — must be verified on a "
+                "sampled tensor against the checkpoint's NVFP4 layout before any "
+                "conversion/reconstruction is trusted"
             )
+            support = SupportStatus.UNSUPPORTED  # parity unproven -> no decode claimed
         else:
-            note.append("ModelOpt version matches the checkpoint producer (decode path plausible)")
-        support = (
-            SupportStatus.PROBE_ONLY  # reference decode measurable; inference is separate
-        )
+            note.append(
+                "ModelOpt version matches the checkpoint producer (decode path plausible)"
+            )
+            support = (
+                SupportStatus.PROBE_ONLY  # reference decode measurable; inference is separate
+            )
     else:
         support = SupportStatus.UNSUPPORTED
         note.append("ModelOpt not importable here; use the host ModelOpt venv or pip-install")

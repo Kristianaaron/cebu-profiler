@@ -39,9 +39,51 @@ class NodeProbe:
     nvlink: str = ""
     exec_venv: str | None = None
     active_gpu_services: int = 0
+    # GB10 reports N/A VRAM (unified memory): measure host RAM for capacity.
+    host_mem_total_gib: float = 0.0
+    host_mem_available_gib: float = 0.0
+    # production occupancy currently present (gpu app committed memory, GB class)
+    production_occupied_gib: float = 0.0
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+def _host_mem() -> tuple[float, float]:
+    """Read /proc/meminfo MemTotal/MemAvailable (host unified memory)."""
+    try:
+        total = available = 0.0
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal"):
+                    total = int(line.split()[1]) / 1024 / 1024  # KiB -> GiB
+                elif line.startswith("MemAvailable"):
+                    available = int(line.split()[1]) / 1024 / 1024
+        return total, available
+    except Exception:  # noqa: BLE001
+        return 0.0, 0.0
+
+
+def _gpu_app_mem_gib() -> float:
+    """Sum nvidia-smi compute-app used_memory (production occupancy), GB class."""
+    from contextlib import suppress
+
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=used_memory", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+        total = 0.0
+        for line in out.splitlines():
+            v = line.strip()
+            if v and v != "[N/A]":
+                with suppress(ValueError):
+                    total += float(v) / 1024  # MiB -> GiB
+        return total
+    except Exception:  # noqa: BLE001
+        return 0.0
 
 
 def _local_kernel_count() -> int:
@@ -97,6 +139,8 @@ def probe_local_node() -> NodeProbe:
         n.memory_total_gib = g["total"]
         n.memory_used_gib = g["used"]
         n.compute_cap = g["cap"]
+    n.host_mem_total_gib, n.host_mem_available_gib = _host_mem()
+    n.production_occupied_gib = _gpu_app_mem_gib()
     n.exec_venv = "/home/kristianaaron/ai-lab/venvs/reap-torch211"
     try:
         _r: subprocess.CompletedProcess[str] = subprocess.run(
@@ -173,6 +217,27 @@ def probe_remote_node(target: str = REMOTE_SSH_TARGET) -> NodeProbe:
     except ValueError:
         n.active_gpu_services = 0
     n.nvlink = "nvlink-v2.20.26"  # measured driver renders GB10/GB200 NVLink facts via nvidia-smi
+    # GB10 reports N/A VRAM -> measure host unified memory remotely
+    awk_cmd = (
+        "awk '/MemTotal/{t=$2} /MemAvailable/{a=$2} END{print t,a}' /proc/meminfo"
+    )
+    _, memh = _ssh(target, awk_cmd)
+    try:
+        parts = memh.split()
+        if len(parts) == 2:
+            n.host_mem_total_gib = float(parts[0]) / 1024 / 1024
+            n.host_mem_available_gib = float(parts[1]) / 1024 / 1024
+    except (ValueError, IndexError):
+        pass
+    _, occ = _ssh(
+        target,
+        "nvidia-smi --query-compute-apps=used_memory --format=csv,noheader,nounits 2>/dev/null"
+        " | awk '{s+=$1} END{print s}'",
+    )
+    try:
+        n.production_occupied_gib = (float(occ) if occ else 0.0) / 1024
+    except ValueError:
+        n.production_occupied_gib = 0.0
     return n
 
 
@@ -206,6 +271,8 @@ class RankLedger:
     headroom_bytes: float = 0.0
     total: float = 0.0
     physical_bytes: float = 0.0
+    production_occupied_bytes: float = 0.0  # services currently using capacity
+    allocatable_bytes: float = 0.0  # physical - production - OS overhead
     fits: bool = False
     failures: list[str] = field(default_factory=list)
 
@@ -216,30 +283,47 @@ class RankLedger:
 def compute_rank_ledger(
     weights_bytes: float,
     *,
-    physical_bytes: float,
+    physical_bytes: float | None = None,
+    allocatable_bytes: float | None = None,
+    production_occupied_bytes: float = 0.0,
     kv_bytes: float = 0.0,
     runtime_reserve: float = 0.15,
     os_overhead: float = 2.0 * 1024**3,
     comm_reserve: float = 512 * 1024**2,
     safe_margin: float = 0.1,
 ) -> RankLedger:
-    """Exact per-rank ledger with fitted/margin decisions."""
+    """Exact per-rank ledger separating physical capacity, production occupancy,
+    and current availability.
+
+    `physical_bytes` is the node's physical capacity; `allocatable_bytes`
+    accounts production occupancy + an OS/headroom margin so the go/no-go is
+    measured against what is actually free, not an unexplained constant.
+    """
     weights = weights_bytes
     runtime_scratch = weights * runtime_reserve
     allocator_reserve = weights * 0.05  # torch caching allocator
     comm = comm_reserve
     osg = os_overhead
     total = weights + runtime_scratch + allocator_reserve + kv_bytes + comm + osg
-    headroom = physical_bytes * safe_margin
+
+    if allocatable_bytes is None:
+        base = physical_bytes if physical_bytes is not None else 0.0
+        allocatable = max(0.0, base - production_occupied_bytes - osg)
+    else:
+        allocatable = allocatable_bytes
+
+    headroom = allocatable * safe_margin
     needs = total
-    fits = needs <= physical_bytes - headroom
+    fits = (allocatable > 0) and (needs <= allocatable - headroom)
     failures: list[str] = []
     if not fits:
+        phys_s = f"{physical_bytes/1024**3:.1f}" if physical_bytes else "unknown"
         failures.append(
-            f"rank total {needs/1024**3:.1f} GiB > physical {physical_bytes/1024**3:.1f} GiB "
-            f"(with {headroom/1024**3:.1f} GiB headroom)"
+            f"rank total {needs/1024**3:.1f} GiB > allocatable {allocatable/1024**3:.1f} GiB "
+            f"(physical {phys_s} GiB - production "
+            f"{production_occupied_bytes/1024**3:.1f} GiB - OS {osg/1024**3:.1f} GiB)"
         )
-    ledger = RankLedger(
+    return RankLedger(
         rank="",
         weights_bytes=weights,
         runtime_scratch_bytes=runtime_scratch,
@@ -249,11 +333,12 @@ def compute_rank_ledger(
         os_bytes=osg,
         headroom_bytes=headroom,
         total=total,
-        physical_bytes=physical_bytes,
+        physical_bytes=physical_bytes or 0.0,
+        production_occupied_bytes=production_occupied_bytes,
+        allocatable_bytes=allocatable,
         fits=fits,
         failures=failures,
     )
-    return ledger
 
 
 @dataclass
@@ -325,25 +410,43 @@ def build_launch_plan(
     *,
     weights_bytes_total: float,
     kv_bytes_per_rank: float = 0.0,
-    physical_per_rank: float = 100 * 1024**3,
+    physical_per_rank: float | None = None,
 ) -> LaunchPlan:
     """Compute a two-node expert-parallel launch plan + gate decisions.
 
     Placement: GLM-5.2 routed experts split across the two nodes
     (expert-parallel), attention/shared/embed head replicated; activations move
     between nodes per token (no per-token weight fetch).
+
+    Memory uses each node's MEASURED host unified capacity minus measured
+    production occupancy (services currently armed), not an unexplained
+    constant; physical fallback only if the probe reported none.
     """
+    # measured host capacity per reachable node; fallback if not reported
+    def cap(host: str) -> float:
+        n = inventory.nodes.get(host)
+        if n and n.host_mem_total_gib > 0:
+            return n.host_mem_total_gib * 1024**3
+        return physical_per_rank if physical_per_rank is not None else 0.0
+
+    def occ(host: str) -> float:
+        n = inventory.nodes.get(host)
+        return (n.production_occupied_gib if n else 0.0) * 1024**3
+
+    rank0_cap = cap(NODE_LOCAL)
+    rank0_occ = occ(NODE_LOCAL)
+    rank1_cap = cap(NODE_REMOTE)
+    rank1_occ = occ(NODE_REMOTE)
+
     plan = LaunchPlan(
         per_rank_ledger={
             "rank0": compute_rank_ledger(
-                weights_bytes_total / 2,
-                physical_bytes=physical_per_rank,
-                kv_bytes=kv_bytes_per_rank,
+                weights_bytes_total / 2, physical_bytes=rank0_cap,
+                production_occupied_bytes=rank0_occ, kv_bytes=kv_bytes_per_rank,
             ),
             "rank1": compute_rank_ledger(
-                weights_bytes_total / 2,
-                physical_bytes=physical_per_rank,
-                kv_bytes=kv_bytes_per_rank,
+                weights_bytes_total / 2, physical_bytes=rank1_cap,
+                production_occupied_bytes=rank1_occ, kv_bytes=kv_bytes_per_rank,
             ),
         }
     )
@@ -351,7 +454,8 @@ def build_launch_plan(
     placement = [
         "expert-parallel: routed experts split evenly across rank0/rank1",
         "attention + shared experts + embed + output head replicated on both ranks",
-        f"node_ip_list={plan.node_ip_list}",
+        f"node_ip_list={plan.node_ip_list} (ray address auto-discovered by the "
+        "distributed executor)",
     ]
     plan.placement = placement
     all_fit = all(r.fits for r in plan.per_rank_ledger.values())
@@ -360,19 +464,25 @@ def build_launch_plan(
         "per_rank_memory_fit": all_fit,
         "non_evasive": True,  # plan uses metadata probes only
     }
-    # exact launch command (vllm two-node EP). GPUs busy -> documented, not run.
+    # Valid multi-node vllm flags (validated against vllm 0.21 --help):
+    #   --nnodes / --node-rank (NOT --node-ip)
+    #   --enable-expert-parallel (-ep) for routed-expert parallelism
+    #   external Ray head/worker bootstrap (NOT --ray-address in the server)
     plan.launch_command = (
         "# service-window gate: GPUs occupied by production DeepSeek vLLM; do not run now.\n"
-        "# After an explicit maintenance window:\n"
-        "cd /home/kristianaaron/ai-lab/venvs/vllm && \\\n"
-        "  python -m vllm.entrypoints.openai.api_server \\\n"
-        f"  --model /media/glm52/models/nvidia/GLM-5.2-NVFP4 \\\n"
-        f"  --tensor-parallel-size 1 --pipeline-parallel-size 1 \\\n"
-        f"  --trust-remote-code --max-model-len 8192 \\\n"
-        f"  --distributed-executor-backend ray \\\n"
-        f"  --ray-address auto \\\n"
-        f"  --node-ip {' '.join(plan.node_ip_list)} "
-        f"# two-node expert-parallel via distributed executor"
+        "# Step 0 - start an external Ray cluster first (validated vllm 0.21 workflow):\n"
+        "cd /home/kristianaaron/ai-lab/venvs/vllm && ray start --head --num-gpus 1 "
+        "--node-ip 10.77.0.1 &   # on spark\n"
+        "ssh gx10-ac63 'cd /home/kristianaaron/ai-lab/venvs/vllm && ray start "
+        "--address 10.77.0.1:6379 --num-gpus 1'   # on gx10\n"
+        "# Step 1 - on the head node, launch the server (expert-parallel enabled):\n"
+        "python -m vllm.entrypoints.openai.api_server \\\n"
+        "  --model /media/glm52/models/nvidia/GLM-5.2-NVFP4 \\\n"
+        "  --tensor-parallel-size 1 --pipeline-parallel-size 1 \\\n"
+        "  --enable-expert-parallel \\\n"
+        "  --distributed-executor-backend ray \\\n"
+        "  --nnodes 2 --node-rank 0 \\\n"
+        "  --trust-remote-code --max-model-len 8192\n"
     )
     return plan
 

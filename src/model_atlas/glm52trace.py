@@ -1,19 +1,13 @@
-"""Real GLM-5.2 config/model adapter + bounded streamed routing trace (Phase 3).
+"""Real GLM-5.2 config/facts + BOUNDED routing probe that uses REAL ROUTER with
+SYNTHETIC INPUT (Phase 3, review-corrected).
 
-Builds on the native `transformers` GLM-5.2 support (transformers >= 4.4x has
-`GlmMoeDsaForCausalLM`). Two independent strands:
-
-1. **Config adapter** — loads the mounted `config.json`, normalizes the
-   `layer_types` field that native transformers rejects
-   (`deepseek_sparse_attention` -> `sparse`), and yields a
-   `GlmMoeDsaConfig` + measured structural facts (n layers, routed vs dense,
-   NVFP4 quant metadata).
-2. **Bounded streamed routing trace** — CPU-only: reads a sparse layer's real
-   router (`gate.weight` BF16 + `e_score_correction_bias` F32) via the bounded
-   streaming substrate and runs real top-k routing over reference hidden states,
-   producing measured routing IDs / weights / frequency / entropy / co-activation
-   — no GPU, no full-model materialization. Full forward/benchmark stays behind
-   the service-window gate.
+This is NOT a measured corpus/activation trace. It reads a sparse layer's real
+router weights (BF16 gate + F32 correction bias) via the bounded streaming
+substrate, but feeds DETERMINISTIC GAUSSIAN hidden-state placeholders (not real
+forward activations). Every result is therefore labelled
+`REAL_ROUTER_SYNTHETIC_INPUT_PROBE` / `PREDICTED` — a noise-injection/coverage
+probe, never measured routing-on-corpus evidence. A real corpus forward remains
+service-window-gated.
 """
 
 from __future__ import annotations
@@ -25,9 +19,13 @@ from pathlib import Path
 from typing import Any
 
 from model_atlas.checkpoint.streaming import CheckpointStream
+from model_atlas.schemas.evidence import EvidenceKind
 
 # NVFP4 checkpoint was produced by this ModelOpt version (measured).
 MODELOPT_PRODUCER = "0.46.0.dev65+g977d34dc3"
+# This probe's honest evidence/input label.
+PROBE_EVIDENCE_KIND = EvidenceKind.PREDICTED
+PROBE_INPUT_LABEL = "REAL_ROUTER_SYNTHETIC_INPUT_PROBE"
 
 
 @dataclass
@@ -106,20 +104,23 @@ def load_glm52_facts(checkpoint_dir: str) -> Glm52Facts:
         ),
         model_type=cfg.get("model_type"),
         architectures=list(cfg.get("architectures", []) or []),
-        normalized_layer_types=False,
+        normalized_layer_types=True,
     )
 
 
 def normalized_glm52_config(checkpoint_dir: str) -> dict[str, Any]:
-    """Return a transformers-loadable GLM-5.2 config dict (layer_types normalized).
+    """Return a transformers-loadable GLM-5.2 config dict.
 
-    Native `GlmMoeDsaConfig` only accepts layer_types in a fixed vocabulary and
-    rejects `deepseek_sparse_attention`. We map each DSA layer to `sparse`
-    (DSA layers are also MoE "sparse" layers), so the native model can load.
+    The mounted `config.json` serializes `layer_types` with values the native
+    `GlmMoeDsaConfig` does not recognize (`deepseek_sparse_attention`). We DO NOT
+    claim DSA->sparse or silently replace attention kinds; instead we DROP the
+    incompatible serialized `layer_types` key so the native config falls back to
+    its own validated defaults (and `mlp_layer_types`/`indexer_types` are kept).
+    The native config semantics are then tested directly by the caller.
     """
     root = Path(checkpoint_dir)
     cfg: dict[str, Any] = json.loads((root / "config.json").read_text())
-    cfg["layer_types"] = ["full_attention"] * int(cfg.get("num_hidden_layers", 78))
+    cfg.pop("layer_types", None)
     return cfg
 
 
@@ -134,6 +135,7 @@ def _topk_rank(scores: list[float], k: int) -> tuple[list[int], list[float]]:
 
 
 def _sum_p_log(probs: list[float]) -> float:
+    """Shannon entropy of a categorical distribution (>= 0)."""
     return -sum(p * math.log(p) for p in probs if p > 0)
 
 
@@ -152,20 +154,29 @@ class GlmRoutingTrace:
     n_experts: int
     top_k: int
     hidden: int
+    input_label: str = PROBE_INPUT_LABEL
+    evidence_kind: EvidenceKind = PROBE_EVIDENCE_KIND
+    provenance: str = (
+        "REAL_ROUTER_SYNTHETIC_INPUT_PROBE: real router weights, deterministic "
+        "Gaussian placeholder hidden states; NOT measured corpus/activation evidence"
+    )
     records: list[RoutingRecord] = field(default_factory=list)
     frequency: dict[int, int] = field(default_factory=dict)
     coactivation: dict[tuple[int, int], int] = field(default_factory=dict)
-    sorce_gate_bias: list[float] = field(default_factory=list)
+    gate_bias_values: list[float] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "input_label": self.input_label,
+            "evidence_kind": self.evidence_kind.value,
+            "provenance": self.provenance,
             "layer": self.layer,
             "n_experts": self.n_experts,
             "top_k": self.top_k,
             "hidden": self.hidden,
             "records": [asdict(r) for r in self.records],
             "frequency": self.frequency,
-            "coactivation": self.coactivation,
+            "coactivation": {f"{a}:{b}": c for (a, b), c in self.coactivation.items()},
         }
 
 
@@ -176,12 +187,12 @@ def stream_routing_trace(
     n_hidden_rows: int = 8,
     hidden_scale: float = 0.5,
 ) -> GlmRoutingTrace:
-    """Bounded CPU routing trace over a real GLM-5.2 sparse layer.
+    """Bounded REAL_ROUTER_SYNTHETIC_INPUT_PROBE over a real GLM-5.2 sparse layer.
 
-    Reads the layer's real router (`gate.weight` BF16 + correction bias F32),
-    synthesizes reference hidden states for `n_hidden_rows` "tokens" (channel
-    pressure only — not the full attention stack), and runs real top-k gating.
-    Yields measured routing IDs / weights / entropy / frequency / co-activation.
+    Reads the layer's real router (BF16 gate + F32 correction bias), synthesizes
+    deterministic Gaussian hidden-state placeholders (NOT measured activations),
+    and runs top-k gating. Output is tagged PREDICTED (synthetic input), so it is
+    a coverage/probe only — never measured routing-on-corpus evidence.
     """
     from model_atlas.checkpoint.source_manifest import load_manifest
 
@@ -206,7 +217,7 @@ def stream_routing_trace(
         gate_rows[hidden * e : hidden * (e + 1)] for e in range(facts.n_routed_experts)
     ]
 
-    # reference hidden states (deterministic placeholder; real forward is gated)
+    # deterministic Gaussian placeholder hidden states (synthetic input)
     import random
 
     rng = random.Random(7)
@@ -225,12 +236,18 @@ def stream_routing_trace(
             bias = bias_values[e] if e < len(bias_values) else 0.0
             scores.append(dot + bias)
         sel, probs = _topk_rank(scores, facts.top_k)
-        H = -_sum_p_log(probs)
+        H = _sum_p_log(probs)  # entropy is already positive; do NOT negate
         for e, _p in zip(sel, probs, strict=True):
             freq[e] = freq.get(e, 0) + 1
-            for e2 in sel:
-                key = (min(e, e2), max(e, e2))
-                coact[key] = coact.get(key, 0) + 1
+        # distinct unordered expert COMBINATIONS exactly once per token
+        seen: set[tuple[int, int]] = set()
+        for i in range(facts.top_k):
+            for j in range(i + 1, facts.top_k):
+                a, b = sel[i], sel[j]
+                key = (min(a, b), max(a, b))
+                if key not in seen:
+                    coact[key] = coact.get(key, 0) + 1
+                    seen.add(key)
         records.append(
             RoutingRecord(
                 layer=layer,
@@ -249,5 +266,5 @@ def stream_routing_trace(
         records=records,
         frequency=freq,
         coactivation=coact,
-        sorce_gate_bias=[],
+        gate_bias_values=[round(x, 6) for x in bias_values],
     )

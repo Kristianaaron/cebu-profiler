@@ -66,12 +66,61 @@ maintenance-window runbook is one decision away.
   freeze/SIGTERM commands for the DeepSeek vLLM worker (pid 1366114) + llama-server
   (pid 611507); never executes a stop/restart itself.
 
-## Current status: one gate BLOCKED
-The real full-model forward + two-node benchmark cannot run without evicting the
-production DeepSeek two-rank vLLM (TP0/TP1 ~102.5 GB each) + llama-server. That is
-the **single remaining execution gate** and requires an explicit operator service
-window. All code, tests, manifests, and exact commands are complete and verified;
-finish via `docs/glm52-runbook.md` section 4.
+## Review-correction (2026-08-14, round 3) — applied, commit below
+
+The code-review rejection of `1a8de9a` was addressed and committed. Key corrections:
+
+1. **glm52trace** relabelled to `REAL_ROUTER_SYNTHETIC_INPUT_PROBE` / `PREDICTED`
+   (real router + synthetic Gaussian input — never measured corpus/activation
+   evidence); added `input_label`/`evidence_kind`/`provenance`; entropy fixed
+   (positive; no double-negation); coactivation counts each unordered distinct
+   expert combination exactly once per token; `sorce_gate_bias` typo removed
+   -> `gate_bias_values`; `normalized_glm52_config` now DROPS the incompatible
+   `layer_types` key (does not DSA->sparse / silent full_attention replacement).
+2. **Materializer** is now real NVFP4 surgery: nibble-aware (2 values/byte)
+   weight packing; gate/up keep byte-rows; down requires a UNION OF FULL
+   16-CHANNEL SCALE GROUPS (fails closed otherwise, `NonBlockAlignedError`);
+   `weight_scale_2`/`input_scale` are SCALARS copied unchanged; coverage
+   validates exact names/shapes/byte-counts + sha256 hashes (not a count);
+   router written ONCE; output is `NON_LOADABLE_EXPERT_BANK` (never claimed
+   experiment-ready / vllm-loadable); `overwrite=True` required to replace an
+   existing dir (never implicit rmtree).
+3. **twonode** measures host unified memory (MemTotal/MemAvailable, since GB10
+   VRAM reports N/A) + production occupancy; `RankLedger` separates physical
+   capacity / production occupancy / current allocatable — go/no-go never an
+   unexplained 100 GiB constant.
+4. **vLLM** multi-node flags validated against vllm 0.21 `--help`: `--nnodes` /
+   `--node-rank` + `--enable-expert-parallel` / Ray head/worker bootstrap; the
+   prior `--node-ip`/`--ray-address` server flags (invalid) and the unsafe
+   commands (503 GB source across 2×~120 GB, single-node `from_pretrained`)
+   removed. Runbook now OPEN only with a fully materialized, loadable,
+   in-envelope derivative; otherwise gate CLOSED.
+5. **Quant truth**: EXL3 conversion from the NVFP4 checkpoint is BLOCKED (no
+   BF16 parent / no verified ModelOpt dequantization); ModelOpt 0.45 vs producer
+   0.46.0.dev65 parity is UNPROVEN -> UNSUPPORTED (was PROBE_ONLY).
+6. **Scoring**: kernels over synthetic/random tensors are IMPLEMENTATIONS,
+   relabelled PREDICTED with provenance; added `RealActivationHook` real-forward
+   interface; the measured gate stays closed until a real corpus forward runs.
+
+## Current status: one gate BLOCKED (real full-model forward + two-node benchmark)
+
+The real full-model forward + two-node benchmark require evicting the production
+two-rank DeepSeek vLLM (TP0/TP1 ~103 GB each) + llama-server, AND require a
+fully materialized, loadable, in-envelope derivative. That is the single
+remaining execution gate. All code/tests/manifests/runbook are complete and
+verified; finish via `docs/glm52-runbook.md` (which now opens only after the
+gate passes).
+
+## Test + lint results (review round)
+
+- All review regression tests green (repo venv): test_glm52trace, test_materialize,
+  test_twonode, test_quantbackends, test_evidencegates, test_streaming,
+  test_realbody, test_protocols, test_corpus_manifest, test_runtimecontracts.
+- torch scoring tests SKIP in repo venv (no torch); verified correct under
+  `.venv-exec` (kernels + provenance + real-hook all pass).
+- `ruff check src tests scripts` -> All checks passed.
+- `mypy src scripts` -> Success, no issues.
+
 
 ## Test + lint results (round 2)
 - All new phase 3–7 test files green: test_glm52trace, test_torch_scores (skips

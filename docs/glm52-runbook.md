@@ -1,13 +1,11 @@
-# GLM-5.2 two-DGX-Spark maintenance-window runbook
+# GLM-5.2 two-DGX-Spark maintenance-window runbook (review-corrected)
 
-**Status: everything below is IMPLEMENTED and TESTED except the explicit
-service-window execution, which is the single remaining GATE.**
-
-The two GPUs are occupied by the production two-rank DeepSeek vLLM service
-(TP0/TP1 ~102.5 GB each) + a `llama-server` on spark. The real forward + runtime
-benchmark require evicting them, so all code/tests/manifests/commands are ready
-and the *execution* is one explicit service-window decision away. **Never stop,
-restart, or contend with those services outside the window.**
+**Status: code/tests/manifests implemented. The real runbook BEGIN only when a
+fully materialized, loadable derivative at or under the target per-{} envelope
+exists. Until such a derivative passes materialized + held-out + runtime gates,
+the execution gate stays CLOSED (no direct full-model run of the 503 GB source
+is possible on 2×~120 GB, and a single-node Transformers `from_pretrained` of it
+is infeasible — both are removed here as unsafe).**
 
 ---
 
@@ -16,146 +14,118 @@ restart, or contend with those services outside the window.**
 ```bash
 cd /home/kristianaaron/tmp/model-atlas
 git checkout atlas-glm52-experiment-runtime
-.venv/bin/python -m pytest -m "not slow" -q          # fast suite green
+.venv/bin/python -m pytest -m "not slow" -q      # fast suite green
 model-atlas preflight --out capability_report.json
-model-atlas canary                                    # census+body OK, forward=blocked (honest)
-sqlite3 /dev/null 'select 1' 2>/dev/null || true      # (placeholder; n/a)
+model-atlas canary                                # census+body OK, forward gated (honest)
 ```
 
-## 1. Fast forward / trace canary (CPU or tiny GPU slice, no service eviction)
-
-The bounded routing trace needs no GPU and no service interruption:
+## 1. Bounded canaries (no service eviction; no full-model load)
 
 ```bash
+# REAL_ROUTER_SYNTHETIC_INPUT_PROBE — real router, synthetic hidden input, PREDICTED
 .venv/bin/python -c "
-from model_atlas.glm52trace import load_glm52_facts, stream_routing_trace
-f = load_glm52_facts('/media/glm52/models/nvidia/GLM-5.2-NVFP4')
+from model_atlas.glm52trace import stream_routing_trace
 t = stream_routing_trace('/media/glm52/models/nvidia/GLM-5.2-NVFP4', layer=3, n_hidden_rows=64)
-print('measured facts:', f.quant_algo, f.n_sparse_layers, 'sparse layers;')
-print('routing: top-8 across 256 experts on layer 3 ->', len(t.records), 'rows')
+print(t.input_label, t.evidence_kind.value)   # probe, NOT measured
 "
-```
 
-Torch-backed scoring (real tensor math, forward-only, no GPU):
-
-```bash
+# torch scoring path (verified under .venv-exec; full-forward flagged)
 PYTHONPATH=src .venv-exec/bin/python - <<'PY'
-import torch
-from model_atlas.scoring.torch_scores import (
-    tenp_importance, flexmoe_channel_ranking,
-    grouped_taylor_surrogate, causal_ablation_scores, needs_for_real_scoring,
-)
-# Build small reference tensors (bounded decode of one expert later; here hand tensors)
-gate = torch.randn(128, 6144); up = torch.randn(128, 6144); down = torch.randn(6144, 128)
-z = torch.randn(64, 128)
-imp = tenp_importance(gate, up, down, z)
-keep = flexmoe_channel_ranking(imp, 128, budget_frac=0.7)
-print('top channels kept per expert:', len(keep), '(every routed expert retained)')
-print('requirements', needs_for_real_scoring('bounded_cpu').forward_only)
+from model_atlas.scoring.torch_scores import needs_for_real_scoring
+print('bounded forward_only', needs_for_real_scoring('bounded_cpu').forward_only)
+print('full_forward flags', not needs_for_real_scoring('full_forward').forward_only)
+PY
+
+# two-node inventory (host unified memory + production occupancy, non-evasive)
+.venv/bin/python - <<'PY'
+from model_atlas.twonode import run_inventory
+inv = run_inventory()
+for h, n in inv.nodes.items():
+    print(h, 'host_GiB', round(n.host_mem_total_gib,1), 'avail', round(n.host_mem_available_gib,1),
+          'production_occupied_GiB', round(n.production_occupied_gib,1))
 PY
 ```
 
-## 2. Derivative materializer (bounded, source immutable)
+## 2. Derivative materialization → only a NON-LOADABLE expert-bank slice now
+
+The current `materialize_expert_bank` produces a **NON_LOADABLE_EXPERT_BANK**
+artifact (single/bounded layers, no index/config rebuild). It is NOT a loadable
+checkpoint, so it is never fed to vllm from_pretrained. It is useful only for
+scoring/channel-planning evidence on the real shape/NVFP4 layout.
 
 ```bash
 .venv/bin/python - <<'PY'
 from model_atlas.materialize import materialize_expert_bank
+# down requires a UNION OF FULL 16-CHANNEL GROUPS; keep all channels for a probe
 res = materialize_expert_bank(
-    '/media/glm52/models/nvidia/GLM-5.2-NVFP4',
-    '/home/kristianaaron/tmp/model-atlas/derivatives/glm-layer3-exp0-keep1024',
-    corner_layer=3, keep_channels=list(range(1024)), num_experts=1, group_size=16,
-)
-print('validated', res.validated, 'promoted', res.promoted, 'coverage', res.coverage)
-print('shard hashes in derivative_manifest.json (sha256)')
+  '/media/glm52/models/nvidia/GLM-5.2-NVFP4',
+  derivatives/glm-layer3-exp0-probe, corner_layer=3,
+  keep_channels=list(range(16)), num_experts=1, overwrite=False)
+print('loadable', res.loadable, 'validated', res.validated, 'coverage', res.coverage)
 PY
 ```
 
-## 3. Two-node inventory + launch-plan gate (safe, non-evasive)
+## 3. The ONLY valid runbook start: a fully materialized, loadable, in-envelope derivative
+
+**Gate CLOSED until all three hold:**
+1. a **loadable** derivative checkpoint is materialized at `<= target envelope`
+   (per-rank ledger `fits == True` on the measured allocatable capacity after
+   production occupancy), with full tensor names/shapes/quant metadata, index and
+   config;
+2. it is **held-out evaluated** on the immutable harness (MEASURED quality
+   deltas);
+3. it passes a **runtime canary** (cold/warm/prefill/decode measured).
+
+Until then no vllm launch / full forward is issued. The 503 GB source cannot fit
+2×~120 GB and single-node `from_pretrained` is infeasible, so there is **no route
+that skips this gate**.
+
+### 3a. When the gate is open — two-node vllm serving of the LOADED derivative
+
+Exactly one operator maintenance window (services stopped by the operator; never
+by a script).
 
 ```bash
-.venv/bin/python - <<'PY'
-from model_atlas.twonode import run_inventory, build_launch_plan
-inv = run_inventory()
-print('reachable nodes:', inv.reachable())
-plan = build_launch_plan(inv, weights_bytes_total=190*1024**3, physical_per_rank=100*1024**3)
-print('gates:', plan.gates)
-PY
-```
-
-Measured (2026-08-14): both `spark-d167` (10.77.0.1) and `gx10-ac63` (10.77.0.2)
-reachable via `ssh -o BatchMode=yes`, both NVIDIA GB10 compute-cap (12,1), both
-with `reap-torch211` + `vllm` exec venvs (torch 2.11.0+cu130, NCCL (2,28,9),
-transformers 5.9.0 native `glm_moe_dsa`; vllm 0.21.0 maps `GlmMoeDsaForCausalLM`
--> deepseek_v2 and has a compressed-tensors NVFP4 path).
-
-## 4. THE service-window execution (requires explicit decision + eviction)
-
-**Do NOT run until the maintenance window is scheduled and the production
-DeepSeek two-rank vLLM + llama-server are stopped by the operator.**
-
-### 4a. Full model forward + Routing/Activation trace (torch, one node)
-
-```bash
-cd /home/kristianaaron/ai-lab/venvs/reap-torch211
-# native transformers GLM-5.2 (checked: GlmMoeDsaForCausalLM present)
-python - <<'PY'
-from transformers import GlmMoeDsaForCausalLM, AutoTokenizer
-import torch
-ckpt='/media/glm52/models/nvidia/GLM-5.2-NVFP4'
-model = GlmMoeDsaForCausalLM.from_pretrained(ckpt, trust_remote_code=True, torch_dtype=torch.bfloat16)
-tok = AutoTokenizer.from_pretrained(ckpt, trust_remote_code=True)
-ids = tok("write a merge sort in python", return_tensors="pt")["input_ids"]
-out = model(ids)  # real forward; capture router/activation hooks for the corpus trace
-print('logits', out.logits.shape)
-PY
-```
-
-### 4b. Two-node launch (expert-parallel via vllm distributed executor)
-
-```bash
+# Step 0 — external Ray cluster (validated vllm 0.21):
 cd /home/kristianaaron/ai-lab/venvs/vllm
-export NCCL_SOCKET_IFNAME=enP7s7        # 10.77.0.1/10.77.0.2 link
+ray start --head --num-gpus 1 --node-ip 10.77.0.1 &        # on spark
+ssh gx10-ac63 'cd /home/kristianaaron/ai-lab/venvs/vllm && ray start --address 10.77.0.1:6379 --num-gpus 1'
+# Step 1 — head node server, expert-parallel, on the LOADED derivative:
 python -m vllm.entrypoints.openai.api_server \
-  --model /media/glm52/models/nvidia/GLM-5.2-NVFP4 \
+  --model /home/kristianaaron/tmp/model-atlas/derivatives/<loadable-derivative> \
   --tensor-parallel-size 1 --pipeline-parallel-size 1 \
-  --trust-remote-code --max-model-len 8192 \
-  --distributed-executor-backend ray --ray-address auto \
-  --node-ip 10.77.0.1 10.77.0.2        # two-node expert-parallel
+  --enable-expert-parallel \
+  --distributed-executor-backend ray \
+  --nnodes 2 --node-rank 0 \
+  --trust-remote-code --max-model-len 8192
 ```
 
-### 4c. Benchmark + canary (cold/warm/prefill/decode; long-context)
+### 3b. Benchmark + eval + Pareto (measured only)
 
 ```bash
 curl -N http://127.0.0.1:8000/v1/chat/completions \
-  -d '{"model":"/media/glm52/models/nvidia/GLM-5.2-NVFP4","messages":[
-     {"role":"user","content":"summarize the deepseek architecture in 5 bullets"}],
-     "max_tokens":256}
+  -d '{"model":"<loadable-derivative>","messages":[{"role":"user","content":"summarize in 5 bullets"}],"max_tokens":256}'
 # record: cold-start, warm-up, prefill tok/s, decode tok/s, KV GiB, MTP acceptance
-```
-
-### 4d. Eval + Pareto (measured only)
-
-```bash
 .venv/bin/python - <<'PY'
 from model_atlas.evidencegates import FrontierRecorder
 fr = FrontierRecorder()
-# after 4a/4b/4c complete for this candidate:
-fr.add_candidate(
-  'glm-nvfp4-v1', quality=0.995, resident_gib=196.0, decode_tps=26.0, context_tokens=384000,
+fr.add_candidate('<deriv-id>', quality=..., resident_gib=..., decode_tps=..., context_tokens=...,
   materialized=True, heldout_evaluated=True, runtime_benchmarked=True,
-  provenance='bench:GLM-5.2-NVFP4-2node window <date>')
-print('measured frontier:', [p['candidate_id'] for p in fr.measured_frontier()])
-print('predicted frontier none until measured:', len(fr.predicted_frontier()))
+  provenance='bench:<loadable-derivative> window <date>')
+print([p['candidate_id'] for p in fr.measured_frontier()])
 PY
 ```
 
-## 5. Rollback / safety
+## 4. Rollback / safety
 
-- All code is on `atlas-glm52-experiment-runtime`; `main` untouched at `f1fd5d9`.
-- Source GLM checkpoint is opened read-only (mmap); never rewritten.
-- Derivative output writes to a temp dir + JSONL journal; promote only after
-  validate passes; on failure temp is discarded (no partial candidates).
-- ModelOpt / vllm exec venvs are reused read-only; only repo-local
-  `.venv-exec` is ours to modify. Do not pip-modify the shared exec venvs.
+- All code on `atlas-glm52-experiment-runtime`; `main` untouched at `f1fd5d9`.
+- Source GLM mount opened read-only (mmap); never rewritten.
+- Derivative output writes to temp + JSONL journal; promote only after
+  `validate`; requires `overwrite=True` to replace; no implicit rmtree.
+- ModelOpt / vllm exec venvs reused read-only; only repo-local `.venv-exec` ours.
+- The measured per-rank ledger separates physical capacity, production
+  occupancy, and current availability — go/no-go is never an unexplained constant.
 - Any custom SM121 kernel is prohibited until existing primitives prove
-  correctness + shape coverage + rollback tests (AGENTS.md + runtime contract).
+  correctness + shape coverage + rollback (AGENTS.md + runtime contract).
+- `scripts/production_rollback.py` prints the operator's freeze/SIGTERM
+  commands; it never stops/restarts services itself.

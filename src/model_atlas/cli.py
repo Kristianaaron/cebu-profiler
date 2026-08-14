@@ -434,6 +434,8 @@ def two_node(
     for host, n in inv.nodes.items():
         print(
             f"  {host}: gpu={n.gpu_name} cap={n.compute_cap} "
+            f"host_GiB={n.host_mem_total_gib:.1f} avail={n.host_mem_available_gib:.1f} "
+            f"production_occupied_GiB={n.production_occupied_gib:.1f} "
             f"torch={n.torch} svc={n.active_gpu_services}"
         )
     if out:

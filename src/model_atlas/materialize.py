@@ -1,23 +1,32 @@
-"""Real GLM Safetensors derivative materializer (Phase 4).
+"""Real GLM-5.2 NVFP4 surgical derivative materializer (Phase 4, review-corrected).
 
-Materializes a coupled gate/up/down channel-sliced derivative of real GLM-5.2
-NVFP4 weights into a NEW derivative directory. Contracts:
+Operates on the REAL mounted shapes (measured):
+    gate/up : weight U8 [nchannels, packed] (2 values/byte)  scale F8_E4M3[nchannels, sgroups]
+            scale_2 F32[]  input_scale F32[]   (BOTH scalars -> copied unchanged)
+    down    : weight U8 [hidden, packed]  scale F8_E4M3[hidden, sgroups]
+    e.g. layer 3 exp 0: gate/up weight [2048,3072], scale [2048,384];
+         down [6144,1024], scale [6144,128]
 
-- **Transaction / crash journal**: writes go to a temp dir + a JSONL journal of
-  steps; promote (rename temp -> final) happens only after a successful
-  `validate` step, so a crash never leaves a partially-overwritten candidate.
-- **Source immutability**: source shards are only opened read-only (mmap); the
-  output dir is always distinct from source.
-- **Fail-closed coverage**: validation counts every tensor we intended to write;
-  a mismatch aborts promote (temp discarded).
-- **Hashes**: sha256 of each materialized shard recorded in the manifest.
+Coupled surgery (`keep_channels`):
+- gate/up: a channel == a full weight BYTE-ROW (row is byte aligned, no nibble
+  split) -> keep the byte-row and its scale-row verbatim.
+- down:   a channel == ONE NIBBLE (2 values/byte). To keep the whole coupled
+  matrix coherent we require keep_channels to be a UNION OF FULL 16-CHANNEL
+  SCALE GROUPS (NVFP4 block size). Then kept bytes = the corresponding contiguous
+  packed bytes and kept scale columns = the matching scale groups. Any other
+  selection FAILS CLOSED (unsupported / non-block-aligned).
 
-Coupled surgery: retaining channel `j` keeps `gate[j,:]` / `up[j,:]` rows and
-`down[:,j]` column together. For NVFP4, weight tokens are row-major
-[channels, tokens] (U8, 2 weights/byte) with a per-`group_size` F8_E4M3 scale
-row. Slicing keeps the token/scale rows (gate/up) or columns (down) for the
-retained channels; the scale2 (same row count) and input_scale scalars are
-copied unchanged.
+Contracts kept from round 1: transactional temp->journal->validate->promote;
+sha256 per-shard; source read-only (mmap, never rewritten); fail-closed coverage
+that validates EXACT expected names/shapes/byte-counts/hashes (not just a count).
+
+Honesty-gated output:
+- Produces a NON-LOADABLE expert-bank artifact (single/chosen layers only, no
+  index/config rebuild), so it is NEVER claimed experiment-ready. A fully
+  loadable derivative checkpoint is only produced by the full-pipeline tool
+  that must first satisfy the measured eval + runtime gates.
+- `overwrite` must be True to replace an existing output dir; otherwise the
+  promote step aborts (never an unexplained shutil.rmtree).
 """
 
 from __future__ import annotations
@@ -28,9 +37,9 @@ import os
 import shutil
 import struct
 import time
-from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from model_atlas.checkpoint.safetensors import read_safetensors_header, write_safetensors
 from model_atlas.checkpoint.source_manifest import (
@@ -39,7 +48,14 @@ from model_atlas.checkpoint.source_manifest import (
     load_manifest,
 )
 
-_DTYPE_ITEMSIZE = {"U8": 1, "F8_E4M3": 1, "F32": 4, "BF16": 2}
+_F32 = 4
+_U8 = 1
+_F8 = 1
+_BF16 = 2
+
+
+class NonBlockAlignedError(ValueError):
+    pass
 
 
 @dataclass
@@ -60,10 +76,11 @@ class MaterializeResult:
     validated: bool
     promoted: bool
     coverage: float = 0.0
+    loadable: bool = False  # NEVER True for the expert-bank artifact
     journal: list[JournalEntry] = field(default_factory=list)
 
 
-def _sha256_file(path: Path) -> str:
+def _sha256(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
@@ -71,66 +88,68 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _read_body(source_dir: Path, entry: TensorEntry) -> bytes:
-    """Read a tensor body via the bounded reader (data-base offset handled)."""
-    path = source_dir / entry.shard
-    with open(path, "rb") as f:
+def _read_body(source: Path, entry: TensorEntry) -> bytes:
+    with open(source / entry.shard, "rb") as f:
         (header_len,) = struct.unpack("<Q", f.read(8))
         base = 8 + header_len
         f.seek(base + entry.offset_start)
-        return f.read(entry.offset_end - entry.offset_start)
+        n = entry.offset_end - entry.offset_start
+        body = f.read(n)
+        if len(body) != n:
+            raise ValueError(f"short read for {entry.name}")
+        return body
 
 
-def _sliced_nvfp4(
+def _gateup_slice(
     weight: bytes,
     scale: bytes,
-    scale2: bytes,
-    *,
-    w_rows: int,
-    w_cols: int,
-    group_size: int,
+    w_cols_bytes: int,
+    s_cols: int,
     keep_channels: list[int],
-    is_down: bool,
-) -> tuple[bytes, bytes, bytes]:
-    """Slice NVFP4 weight tokens + block scales for retained channels.
-
-    weight is [w_rows, w_cols] row-major (U8 = 1 byte each; 2 weights per byte,
-    1 token = 1 byte here since GLM NVFP4 stores one byte per 2 weights in the
-    same row). scale is [w_rows, ceil(w_cols/group_size)], scale2 is a per-row
-    scalar [w_rows].
-
-    gate/up: channels are the weight *rows* -> keep those rows (and the matching
-    scale/scale2 rows).
-    down: channels are the weight *columns* -> keep those columns (and the
-    matching scale columns).
-    """
-    if not keep_channels:
-        raise ValueError("keep_channels must be non-empty (fail-closed)")
+) -> tuple[bytes, bytes]:
+    """gate/up: each channel is a full byte-row -> keep rows for kept channels."""
     keep = sorted(set(keep_channels))
-    sc_cols = (w_cols + group_size - 1) // group_size
-    if not is_down:
-        # keep weight rows, scale rows, scale2 rows for each kept channel
-        nw = bytearray()
-        ns = bytearray()
-        n2 = bytearray()
-        for c in keep:
-            nw += weight[c * w_cols : (c + 1) * w_cols]
-            ns += scale[c * sc_cols : (c + 1) * sc_cols]
-            if scale2:
-                n2 += scale2[c * 4 : (c + 1) * 4]
-        return bytes(nw), bytes(ns), bytes(n2) if scale2 else scale2
-    # down: keep weight columns + scale columns for each kept channel
     nw = bytearray()
     ns = bytearray()
-    for r in range(w_rows):
-        for c in keep:
-            nw += weight[r * w_cols + c : r * w_cols + c + 1]
-    sc_rows = w_rows
-    for r in range(sc_rows):
-        for c in keep:
-            c2 = c // group_size
-            ns += scale[r * sc_cols + c2 : r * sc_cols + c2 + 1]
-    return bytes(nw), bytes(ns), scale2
+    for c in keep:
+        nw += weight[c * w_cols_bytes : (c + 1) * w_cols_bytes]
+        ns += scale[c * s_cols : (c + 1) * s_cols]
+    return bytes(nw), bytes(ns)
+
+
+def _down_slice(
+    weight: bytes,
+    scale: bytes,
+    hidden: int,
+    packed_total: int,  # bytes across channel axis (e.g. 1024)
+    scale_groups: int,  # number of scale groups (e.g. 128)
+    keep_channels: list[int],
+    *,
+    values_per_byte: int = 2,
+    group_values: int = 16,
+) -> tuple[bytes, bytes]:
+    """down: channels are nibbles (2/byte). Require group-aligned (16) selection."""
+    group_size_bytes = group_values // values_per_byte  # 8 bytes/group
+    groups = sorted({c // group_values for c in keep_channels})
+    # fail closed: every retained channel's group must be fully retained
+    kept_set = set(keep_channels)
+    for g in groups:
+        members = set(range(g * group_values, (g + 1) * group_values))
+        if not members <= kept_set:
+            raise NonBlockAlignedError(
+                "down_proj requires a UNION OF FULL 16-CHANNEL SCALE GROUPS; "
+                f"group {g} partially retained"
+            )
+    nw = bytearray()
+    ns = bytearray()
+    for r in range(hidden):
+        row_off = r * packed_total
+        for g in groups:
+            b0 = g * group_size_bytes
+            b1 = b0 + group_size_bytes
+            nw += weight[row_off + b0 : row_off + b1]
+            ns += scale[r * scale_groups + g : r * scale_groups + g + 1]
+    return bytes(nw), bytes(ns)
 
 
 def _entry(manifest: CheckpointManifest, name: str) -> TensorEntry:
@@ -146,18 +165,27 @@ def materialize_expert_bank(
     corner_layer: int,
     *,
     keep_channels: list[int],
-    num_experts: int,
-    group_size: int = 16,
+    num_experts: int = 1,
+    overwrite: bool = False,
 ) -> MaterializeResult:
-    """Materialize a channel-sliced derivative of one layer's routed-expert bank.
+    """Materialize a NON-LOADABLE channel-sliced expert-bank artifact.
 
-    `num_experts` experts are re-sliced (gate/up/down weight+scale+scale2 +
-    input_scale each). Output goes to a temp dir + journal; promote only after
-    validation passes.
+    `keep_channels`: gate/up keep by byte-row (any subset valid); down requires
+    full 16-channel groups (fails closed otherwise). Output dir must not exist
+    unless `overwrite=True`.
     """
     source = Path(source_dir)
     out = Path(output_dir)
     manifest = load_manifest(source_dir)
+
+    if out.exists():
+        if not overwrite:
+            raise FileExistsError(
+                f"output {out} already exists; pass overwrite=True to replace "
+                "(explicit flag required, never an implicit rmtree)"
+            )
+        shutil.rmtree(out)
+
     tmp = out.with_name(out.name + ".tmp-" + str(os.getpid()))
     if tmp.exists():
         shutil.rmtree(tmp)
@@ -171,110 +199,180 @@ def materialize_expert_bank(
         with open(journal_path, "a") as f:
             f.write(json.dumps(e.to_dict()) + "\n")
 
-    j("open", f"source={source_dir}")
+    j("open", f"source={source_dir} overwrite={overwrite}")
 
-    expected_tensors = 0
+    expected: dict[str, tuple[str, int]] = {}  # name -> (dtype, byte_size)
+    written: dict[str, tuple[str, int]] = {}
     try:
+        # router + shared experts + norms are reference tensors copied verbatim;
+        # router written ONCE (outside the expert loop).
+        router_entry = _entry(manifest, f"model.layers.{corner_layer}.mlp.gate.weight")
+        router_body = _read_body(source, router_entry)
+        write_safetensors(
+            tmp / f"layer{corner_layer}-router.safetensors",
+            {
+                router_entry.name: {
+                    "dtype": router_entry.dtype,
+                    "shape": router_entry.shape,
+                    "bytes": router_body,
+                }
+            },
+        )
+        expected[router_entry.name] = (router_entry.dtype, len(router_body))
+        written[router_entry.name] = (router_entry.dtype, len(router_body))
+
+        ref_names = [
+            f"model.layers.{corner_layer}.mlp.gate.e_score_correction_bias",
+            f"model.layers.{corner_layer}.input_layernorm.weight",
+        ]
+        for rn in ref_names:
+            try:
+                re_ = _entry(manifest, rn)
+            except ValueError:
+                continue
+            b = _read_body(source, re_)
+            write_safetensors(
+                tmp / f"layer{corner_layer}-ref.safetensors",
+                {rn: {"dtype": re_.dtype, "shape": re_.shape, "bytes": b}},
+            )
+            expected[rn] = (re_.dtype, len(b))
+            written[rn] = (re_.dtype, len(b))
+
         for e in range(num_experts):
-            for name in ("gate_proj", "up_proj", "down_proj"):
-                prefix = f"model.layers.{corner_layer}.mlp.experts.{e}."
-                wname = prefix + name + ".weight"
-                sname = prefix + name + ".weight_scale"
-                s2name = prefix + name + ".weight_scale_2"
-                iname = prefix + name + ".input_scale"
-                w = _entry(manifest, wname)
-                s = _entry(manifest, sname)
+            prefix = f"model.layers.{corner_layer}.mlp.experts.{e}."
+            for name, is_down in (("gate_proj", False), ("up_proj", False), ("down_proj", True)):
+                w = _entry(manifest, prefix + name + ".weight")
+                s = _entry(manifest, prefix + name + ".weight_scale")
                 w_body = _read_body(source, w)
                 s_body = _read_body(source, s)
-                s2_body = b""
-                in_body = b""
-                with suppress(ValueError):
-                    s2_body = _read_body(source, _entry(manifest, s2name))
-                with suppress(ValueError):
-                    in_body = _read_body(source, _entry(manifest, iname))
-                if len(w.shape) == 2:
-                    w_rows, w_cols = w.shape[0], w.shape[1]
+                wshape = list(w.shape)
+                sshape = list(s.shape)
+                if is_down:
+                    # weight [hidden, packed]; scale [hidden, scale_groups]
+                    hidden = wshape[0]
+                    packed_total = wshape[1]
+                    scale_groups = sshape[1]
+                    nw, ns = _down_slice(
+                        w_body,
+                        s_body,
+                        hidden,
+                        packed_total,
+                        scale_groups,
+                        keep_channels,
+                    )
+                    new_w_shape = [hidden, (len(nw) // hidden)]
+                    new_s_shape = [hidden, (len(ns) // hidden)]
                 else:
-                    w_rows, w_cols = w.shape[0], 1
-                nw, ns, n2 = _sliced_nvfp4(
-                    w_body,
-                    s_body,
-                    s2_body,
-                    w_rows=w_rows,
-                    w_cols=w_cols,
-                    group_size=group_size,
-                    keep_channels=keep_channels,
-                    is_down=(name == "down_proj"),
-                )
-                shard = f"layer{corner_layer}-exp{e}-{name}.safetensors"
-                write_safetensors(
-                    tmp / shard,
-                    {
-                        "weight": {"dtype": "U8", "shape": [len(nw)], "bytes": nw},
-                        "weight_scale": {"dtype": "F8_E4M3", "shape": [len(ns)], "bytes": ns},
-                        "weight_scale_2": {"dtype": "F32", "shape": [len(n2)], "bytes": n2},
-                        "input_scale": {"dtype": "F32", "shape": [len(in_body)], "bytes": in_body},
+                    w_cols_bytes = wshape[1]
+                    s_cols = sshape[1]
+                    nw, ns = _gateup_slice(
+                        w_body, s_body, w_cols_bytes, s_cols, keep_channels
+                    )
+                    new_w_shape = [len(keep_channels), w_cols_bytes]
+                    new_s_shape = [len(keep_channels), s_cols]
+                # scale_2 and input_scale are SCALARS ([]) -> copied unchanged
+                tensors: dict[str, dict[str, Any]] = {
+                    prefix + name + ".weight": {
+                        "dtype": w.dtype, "shape": new_w_shape, "bytes": nw,
                     },
+                    prefix + name + ".weight_scale": {
+                        "dtype": s.dtype, "shape": new_s_shape, "bytes": ns,
+                    },
+                }
+                for suffix in ("weight_scale_2", "input_scale"):
+                    sn = prefix + name + "." + suffix
+                    try:
+                        se = _entry(manifest, sn)
+                    except ValueError:
+                        continue
+                    sb = _read_body(source, se)
+                    tensors[sn] = {"dtype": se.dtype, "shape": list(se.shape), "bytes": sb}
+                write_safetensors(
+                    tmp / f"layer{corner_layer}-exp{e}-{name}.safetensors", tensors
                 )
-                expected_tensors += 4
-            # copy the reference BF16 router verbatim (identity check)
-            gname = f"model.layers.{corner_layer}.mlp.gate.weight"
-            g = _entry(manifest, gname)
-            g_body = _read_body(source, g)
-            write_safetensors(
-                tmp / f"layer{corner_layer}-router.safetensors",
-                {"gate": {"dtype": "BF16", "shape": [len(g_body) // 2], "bytes": g_body}},
-            )
-            expected_tensors += 1
-        j("slice", f"{num_experts} expert(s), {len(keep_channels)} channels")
+                for tn, spec in tensors.items():
+                    dt = str(spec["dtype"])
+                    body = bytes(spec["bytes"])  # ensure Sized bytes
+                    bts = len(body)
+                    expected[tn] = (dt, bts)
+                    written[tn] = (dt, bts)
+        j("slice", f"{len(keep_channels)} channels, {num_experts} expert(s)")
     except Exception:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
 
-    # fail-closed coverage validation against the intended plan
-    found = 0
-    for shard_path in Path(tmp).glob("*.safetensors"):
-        hdr = read_safetensors_header(shard_path)
-        found += sum(
-            1 for k, v in hdr.items() if isinstance(v, dict) and "data_offsets" in v
-        )
-    coverage = found / expected_tensors if expected_tensors else 0.0
-    validation_ok = coverage == 1.0
-    j("validate", f"coverage={coverage:.3f} expected={expected_tensors} found={found}")
+    # ---- fail-closed coverage: exact names/shapes/byte sizes + hashes ----
+    found: dict[str, tuple[str, int]] = {}  # name -> (dtype, byte_size)
+    hashes: dict[str, str] = {}
+    for shard in Path(tmp).glob("*.safetensors"):
+        hdr = read_safetensors_header(shard)
+        raw = Path(shard).read_bytes()
+        hashes[shard.name] = hashlib.sha256(raw).hexdigest()
+        for name, spec in hdr.items():
+            if name == "__metadata__" or not isinstance(spec, dict):
+                continue
+            od: Any = spec["data_offsets"]
+            bb = int(od[1]) - int(od[0])
+            found[name] = (str(spec["dtype"]), bb)
+
+    missing = set(expected) - set(found)
+    size_mismatch = {
+        n: (expected[n], found[n])
+        for n in expected
+        if n in found and expected[n][:2] != found[n][:2]
+    }
+    coverage = len(set(expected) & set(found)) / len(expected) if expected else 0.0
+    validation_ok = (not missing) and (not size_mismatch) and coverage == 1.0
+    j(
+        "validate",
+        f"expected={len(expected)} found={len(found)} missing={len(missing)} "
+        f"size_mismatch={len(size_mismatch)} coverage={coverage:.3f}",
+    )
 
     promoted = False
     if validation_ok:
-        j("promote", f"{out.name}")
-        if out.exists():
-            shutil.rmtree(out)
+        j("promote", f"{out.name} (overwrite={overwrite})")
         tmp.rename(out)
         promoted = True
-        hashes = {shard.name: _sha256_file(shard) for shard in out.glob("*.safetensors")}
-        (out / "derivative_manifest.json").write_text(
+        (out / "artifact_manifest.json").write_text(
             json.dumps(
                 {
+                    "artifact_type": "NON_LOADABLE_EXPERT_BANK",
+                    "experiment_ready": False,
                     "source": source_dir,
                     "layer": corner_layer,
                     "num_experts": num_experts,
-                    "keep_channels": keep_channels,
-                    "group_size": group_size,
+                    "keep_channels": list(sorted(keep_channels)),
+                    "tensor_names": sorted(expected),
                     "shard_hashes": hashes,
                     "coverage": coverage,
                     "source_immutable": True,
+                    "note": (
+                        "Single/bounded-layer surgical slice: NOT a loadable GLM "
+                        "checkpoint (no index/config/backbone). Only a full-pipeline "
+                        "candidate that passes materialized+heldout+runtime gates is "
+                        "claimed experiment-ready."
+                    ),
                 },
                 indent=2,
             )
         )
     else:
-        j("abort", "validation failed; temp discarded")
+        j("abort", f"validation failed (missing={list(missing)} mismatch={list(size_mismatch)})")
         shutil.rmtree(tmp, ignore_errors=True)
 
+    tensor_count = len(found) if promoted else 0
     return MaterializeResult(
         output_dir=str(out),
         shards_written=len(list(out.glob("*.safetensors"))) if promoted else 0,
-        tensor_count=found if validation_ok else 0,
+        tensor_count=tensor_count,
         validated=validation_ok,
         promoted=promoted,
         coverage=coverage,
+        loadable=False,
         journal=journal,
     )
+
+
+def _itemsize(dtype: str) -> int:
+    return {"U8": 1, "F8_E4M3": 1, "F32": 4, "BF16": 2}[dtype.upper()]
