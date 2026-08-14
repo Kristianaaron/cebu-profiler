@@ -1022,10 +1022,10 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .cc-rank{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#8a8a8a;border:1px solid #353535;border-radius:999px;padding:1px 8px;background:#0f0f0f}}
  .cc-meter{{height:6px;border-radius:3px;background:#1d1d1d;overflow:hidden}}
  .cc-meter i{{display:block;height:100%;border-radius:3px;width:0}}
- .coal-card.lo .cc-meter i{{background:#3f6212}}
- .coal-card.md .cc-meter i{{background:#94cc1c}}
- .coal-card.hi .cc-meter i{{background:#22c55e}}
- .coal-card.cr .cc-meter i{{background:#f97316}}
+ .coal-card.lo .cc-meter i{{background:#c4c4c4}}
+ .coal-card.md .cc-meter i{{background:#9a9a9a}}
+ .coal-card.hi .cc-meter i{{background:#6e6e6e}}
+ .coal-card.cr .cc-meter i{{background:#e05c5c}}
  .cc-count{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:15px;color:#eee;line-height:1;margin-top:-2px}}
  .cc-count small{{color:#8a8a8a;font-size:11px}}
  .cc-solo{{display:flex;flex-direction:column;gap:4px}}
@@ -1043,15 +1043,15 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .coal-meta b{{color:#fff;font-family:'JetBrains Mono',ui-monospace,monospace;font-weight:600}}
  .coal-badges{{flex:0 0 86px;display:flex;flex-direction:column;gap:3px;align-items:flex-start}}
  .coal-badges .cb{{display:inline-block;font-size:9.5px;font-family:'JetBrains Mono',ui-monospace,monospace;letter-spacing:.07em;text-transform:uppercase;padding:2px 7px;border-radius:999px;border:1px solid currentColor}}
- .coal-badges .cb.hot{{color:#f87171}}
- .coal-badges .cb.syn{{color:#38bdf8}}
- .coal-badges .cb.res{{color:#94a3b8}}
+ .coal-badges .cb.hot{{color:#e07070}}
+ .coal-badges .cb.syn{{color:#c8c8c8}}
+ .coal-badges .cb.res{{color:#8f8f8f}}
  .coal-legend{{display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin:8px 2px 4px;font-size:11px;color:#979797}}
  .coal-legend .lg{{display:inline-flex;align-items:center;gap:6px}}
  .coal-legend .sw{{width:12px;height:12px;border-radius:3px;display:inline-block}}
  .coal-legend .sw.on{{background:#4b4b4b;border:1px solid #6e6e6e}} .coal-legend .sw.mid{{background:#303030;border:1px solid #4a4a4a}} .coal-legend .sw.dim{{background:#1d1d1d;border:1px solid #2c2c2c}}
  .coal-legend .ln{{height:14px;width:6px;border-radius:1px;display:inline-block;vertical-align:middle}}
- .coal-legend .ln.lo{{background:#3f6212}} .coal-legend .ln.md{{background:#94cc1c}} .coal-legend .ln.hi{{background:#22c55e}} .coal-legend .ln.cr{{background:#f97316}}
+ .coal-legend .ln.lo{{background:#c4c4c4}} .coal-legend .ln.md{{background:#9a9a9a}} .coal-legend .ln.hi{{background:#6e6e6e}} .coal-legend .ln.cr{{background:#e05c5c}}
  .struct-sec{{margin-top:18px;padding:14px 16px;background:#151515;border:1px solid #2a2a2a;border-radius:10px}}
  .struct-sec h3{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:13.5px;color:#eee;margin:0 0 2px;letter-spacing:-0.01em}}
  .struct-sec .g-note{{color:#979797;font-size:11.5px;margin:0 0 10px}}
@@ -1065,16 +1065,16 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .ch-heat td{{padding:1px}}
  .ch{{width:12px;height:12px;border-radius:2px}}
  .router-box,.distill-box{{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px;background:#161616;border:1px solid #2a2a2a;border-radius:8px;margin:4px 0 10px}}
- .rslot{{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:26px;border-radius:50%;background:#2c3e50;border:1px solid #3e5a77;color:#e0e8f0;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;font-weight:600}}
- .rslot.bias{{box-shadow:0 0 0 2px #6ccfff inset}}
- .rslot.drop{{background:#5f1f1f;border-color:#a33;color:#ffd9d9}}
+ .rslot{{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:26px;border-radius:50%;background:#3c3c3c;border:1px solid #565656;color:#e8e8e8;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;font-weight:600}}
+ .rslot.bias{{box-shadow:0 0 0 2px #9a9a9a inset}}
+ .rslot.drop{{background:#232323;border-color:#8a5a5a;color:#ffc9c9}}
  .rn{{width:100%;color:#8a8a8a;font-size:11px;font-family:'JetBrains Mono',ui-monospace,monospace;margin-top:2px}}
- .dcell,.rcell{{display:inline-flex;align-items:center;justify-content:center;border-radius:99px;background:#1e3a5f;border:1px solid #3a6ea5;color:#d7e6f5;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;font-weight:600}}
- .dcell.lane{{background:#274b6b;border-color:#4f83b0}}
- .dcell.layer{{background:#1d5b4e;border-color:#3c8a75}}
- .rcell{{background:#3a2a16;border:1px solid #8a6a2f;color:#f5e3c3}}
- .rcell.bias{{background:#4d2e1e;border-color:#a07140}}
- .rcell.out{{background:#3d1f2b;border-color:#8a3f5f}}
+ .dcell,.rcell{{display:inline-flex;align-items:center;justify-content:center;border-radius:99px;background:#4a4a4a;border:1px solid #6a6a6a;color:#f0f0f0;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;font-weight:600}}
+ .dcell.lane{{background:#383838;border-color:#585858}}
+ .dcell.layer{{background:#2f2f2f;border-color:#4d4d4d}}
+ .rcell{{background:#3f3f3f;border:1px solid #5f5f5f;color:#f0f0f0}}
+ .rcell.bias{{background:#333333;border-color:#555555}}
+ .rcell.out{{background:#4f4f4f;border-color:#6f6f6f}}
  .cap3d-controls{{position:absolute;top:6px;left:6px;z-index:3;display:flex;align-items:center;gap:4px;background:rgba(14,14,14,0.7);border:1px solid #444444;border-radius:6px;padding:3px 4px}}
  .cap3d-controls button{{width:19px;height:19px;display:inline-flex;align-items:center;justify-content:center;padding:0;color:#d7d7d7;background:#171717;border:1px solid #444444;border-radius:4px;cursor:pointer}}
  .cap3d-controls button:hover{{border-color:#646464;color:#fff;background:#202020}}
@@ -1355,7 +1355,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  // ---- Planning-maps visualizations ----
  (function(){{
    var M = DATA.maps; if(!M) return;
-   var NODE_COLORS = {{'node_a':'#2196f3','node_b':'#7c4dff','nvme_a':'#ef5350','nvme_b':'#ef5350','replicated':'#e0e0e0'}};
+   var NODE_COLORS = {{'node_a':'#8a8a8a','node_b':'#5c5c5c','nvme_a':'#c9c9c9','nvme_b':'#c9c9c9','replicated':'#e8e8e8'}};
    // 1) residency/overflow heat: layer x expert, fill occupancy color, overflow = hatched
    (function(){{
      var el=document.getElementById('residency-heat'); if(!el) return;
@@ -1398,7 +1398,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
        tr.insertCell().textContent='E'+k.split('_')[1];
        for(var c=0;c<chans;c++){{ var td=document.createElement('td'); var e=rows[k][c];
          var div=document.createElement('div'); div.className='ch';
-         if(e&&e.keep){{ var a=0.25+0.7*Math.sqrt(e.importance/maxI); div.style.background='rgba(34,197,94,'+a+')'; div.title='E'+e.source_expert_id+' ch'+c+' imp '+e.importance.toFixed(3); }}
+         if(e&&e.keep){{ var a=0.18+0.62*Math.sqrt(e.importance/maxI); div.style.background='rgba(210,210,210,'+a+')'; div.title='E'+e.source_expert_id+' ch'+c+' imp '+e.importance.toFixed(3); }}
          else div.style.background='rgba(80,80,80,0.25)';
          td.appendChild(div); tr.appendChild(td);
        }}
