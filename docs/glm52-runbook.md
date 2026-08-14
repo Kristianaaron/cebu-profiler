@@ -1,7 +1,7 @@
 # GLM-5.2 two-DGX-Spark maintenance-window runbook (review-corrected)
 
 **Status: code/tests/manifests implemented. The real runbook BEGIN only when a
-fully materialized, loadable derivative at or under the target per-{} envelope
+fully materialized, loadable derivative at or under the target per-node envelope
 exists. Until such a derivative passes materialized + held-out + runtime gates,
 the execution gate stays CLOSED (no direct full-model run of the 503 GB source
 is possible on 2×~120 GB, and a single-node Transformers `from_pretrained` of it
@@ -59,7 +59,8 @@ from model_atlas.materialize import materialize_expert_bank
 # down requires a UNION OF FULL 16-CHANNEL GROUPS; keep all channels for a probe
 res = materialize_expert_bank(
   '/media/glm52/models/nvidia/GLM-5.2-NVFP4',
-  derivatives/glm-layer3-exp0-probe, corner_layer=3,
+  '/home/kristianaaron/tmp/model-atlas/derivatives/glm-layer3-exp0-probe',
+  corner_layer=3,
   keep_channels=list(range(16)), num_experts=1, overwrite=False)
 print('loadable', res.loadable, 'validated', res.validated, 'coverage', res.coverage)
 PY
@@ -88,7 +89,7 @@ by a script).
 ```bash
 # Step 0 — external Ray cluster (validated vllm 0.21):
 cd /home/kristianaaron/ai-lab/venvs/vllm
-ray start --head --num-gpus 1 --node-ip 10.77.0.1 &        # on spark
+ray start --head --num-gpus 1 --node-ip-address 10.77.0.1 &   # on spark
 ssh gx10-ac63 'cd /home/kristianaaron/ai-lab/venvs/vllm && ray start --address 10.77.0.1:6379 --num-gpus 1'
 # Step 1 — head node server, expert-parallel, on the LOADED derivative:
 python -m vllm.entrypoints.openai.api_server \

@@ -69,13 +69,14 @@ def test_launch_plan_uses_measured_cap_and_valid_vllm_flags():
     )
     # gates reflect only 1 real node (not a two-node plan)
     assert plan.gates["nodes_reachable"] is False
-    # valid vllm 0.21 multi-node flags (api_server must NOT take --node-ip;
-    # external ray start legitimately does)
+    # valid vllm 0.21 multi-node flags (server takes --nnodes/--node-rank, NOT
+    # a server --node-ip; Ray bootstrap uses Ray's --node-ip-address spelling)
     assert "--enable-expert-parallel" in plan.launch_command
     assert "ray start" in plan.launch_command
     server_section = plan.launch_command.split("# Step 1")[-1]
     assert "--node-ip" not in server_section  # not passed to api_server
     assert "--nnodes 2" in plan.launch_command
+    assert "--node-ip-address 10.77.0.1" in plan.launch_command  # ray start spelling
 
 
 @pytest.mark.integration

@@ -43,6 +43,9 @@ def _make_nvfp4_fixture(tmp_path):
         "model.layers.3.mlp.gate.e_score_correction_bias": {
             "dtype": "F32", "shape": [2], "bytes": struct.pack("<ff", 0.1, 0.2),
         },
+        "model.layers.3.input_layernorm.weight": {
+            "dtype": "F32", "shape": [16], "bytes": struct.pack("<f", 1.0) * 16,
+        },
     }
     for e in range(2):
         p = f"model.layers.3.mlp.experts.{e}."
@@ -114,6 +117,26 @@ def test_materialize_promotes_and_labels_non_loadable(tmp_path):
         assert len(h) == 64
     steps = [e.step for e in res.journal]
     assert set(steps) >= {"open", "slice", "validate", "promote"}
+
+
+@pytest.mark.integration
+def test_both_reference_tensors_survive_in_unique_shards(tmp_path):
+    src = _make_nvfp4_fixture(tmp_path)
+    out = tmp_path / "outref"
+    res = materialize_expert_bank(
+        src, str(out), corner_layer=3, keep_channels=list(range(16)), num_experts=1,
+    )
+    assert res.validated is True
+    seen = set()
+    for shard in out.glob("*.safetensors"):
+        hdr = read_safetensors_header(shard)
+        for name in hdr:
+            if name != "__metadata__":
+                assert name not in seen, f"duplicate tensor {name}"
+                seen.add(name)
+    assert "model.layers.3.mlp.gate.e_score_correction_bias" in seen
+    assert "model.layers.3.input_layernorm.weight" in seen
+    assert "model.layers.3.mlp.gate.weight" in seen
 
 
 @pytest.mark.integration

@@ -178,6 +178,17 @@ def materialize_expert_bank(
     out = Path(output_dir)
     manifest = load_manifest(source_dir)
 
+    # ---- B: normalize keep_channels exactly once; fail closed on any bad input ----
+    full = 2048
+    if not isinstance(keep_channels, list) or not keep_channels:
+        raise ValueError("keep_channels must be a non-empty list (fail closed)")
+    s = sorted(set(keep_channels))
+    if len(s) != len(keep_channels):
+        raise ValueError("keep_channels contains duplicates")
+    if any(c < 0 or c >= full for c in s):
+        raise ValueError(f"keep_channels out of range 0..{full-1}: {s}")
+    keep_normalized = s
+
     if out.exists():
         if not overwrite:
             raise FileExistsError(
@@ -201,8 +212,8 @@ def materialize_expert_bank(
 
     j("open", f"source={source_dir} overwrite={overwrite}")
 
-    expected: dict[str, tuple[str, int]] = {}  # name -> (dtype, byte_size)
-    written: dict[str, tuple[str, int]] = {}
+    expected: dict[str, tuple[str, list[int], int]] = {}  # (dtype, shape, byte)
+    written: dict[str, tuple[str, list[int], int]] = {}
     try:
         # router + shared experts + norms are reference tensors copied verbatim;
         # router written ONCE (outside the expert loop).
@@ -218,35 +229,40 @@ def materialize_expert_bank(
                 }
             },
         )
-        expected[router_entry.name] = (router_entry.dtype, len(router_body))
-        written[router_entry.name] = (router_entry.dtype, len(router_body))
+        expected[router_entry.name] = (
+            router_entry.dtype, list(router_entry.shape), len(router_body),
+        )
+        written[router_entry.name] = (
+            router_entry.dtype, list(router_entry.shape), len(router_body),
+        )
 
         ref_names = [
             f"model.layers.{corner_layer}.mlp.gate.e_score_correction_bias",
             f"model.layers.{corner_layer}.input_layernorm.weight",
         ]
-        for rn in ref_names:
+        for idx, rn in enumerate(ref_names):
             try:
                 re_ = _entry(manifest, rn)
             except ValueError:
                 continue
             b = _read_body(source, re_)
+            # unique shard per ref so multiple refs never collide/overwrite
             write_safetensors(
-                tmp / f"layer{corner_layer}-ref.safetensors",
+                tmp / f"layer{corner_layer}-ref-{idx}.safetensors",
                 {rn: {"dtype": re_.dtype, "shape": re_.shape, "bytes": b}},
             )
-            expected[rn] = (re_.dtype, len(b))
-            written[rn] = (re_.dtype, len(b))
+            expected[rn] = (re_.dtype, list(re_.shape), len(b))
+            written[rn] = (re_.dtype, list(re_.shape), len(b))
 
         for e in range(num_experts):
             prefix = f"model.layers.{corner_layer}.mlp.experts.{e}."
             for name, is_down in (("gate_proj", False), ("up_proj", False), ("down_proj", True)):
-                w = _entry(manifest, prefix + name + ".weight")
-                s = _entry(manifest, prefix + name + ".weight_scale")
-                w_body = _read_body(source, w)
-                s_body = _read_body(source, s)
-                wshape = list(w.shape)
-                sshape = list(s.shape)
+                wexp = _entry(manifest, prefix + name + ".weight")
+                sexp = _entry(manifest, prefix + name + ".weight_scale")
+                w_body = _read_body(source, wexp)
+                s_body = _read_body(source, sexp)
+                wshape = list(wexp.shape)
+                sshape = list(sexp.shape)
                 if is_down:
                     # weight [hidden, packed]; scale [hidden, scale_groups]
                     hidden = wshape[0]
@@ -258,7 +274,7 @@ def materialize_expert_bank(
                         hidden,
                         packed_total,
                         scale_groups,
-                        keep_channels,
+                        keep_normalized,
                     )
                     new_w_shape = [hidden, (len(nw) // hidden)]
                     new_s_shape = [hidden, (len(ns) // hidden)]
@@ -266,17 +282,17 @@ def materialize_expert_bank(
                     w_cols_bytes = wshape[1]
                     s_cols = sshape[1]
                     nw, ns = _gateup_slice(
-                        w_body, s_body, w_cols_bytes, s_cols, keep_channels
+                        w_body, s_body, w_cols_bytes, s_cols, keep_normalized
                     )
-                    new_w_shape = [len(keep_channels), w_cols_bytes]
-                    new_s_shape = [len(keep_channels), s_cols]
+                    new_w_shape = [len(keep_normalized), w_cols_bytes]
+                    new_s_shape = [len(keep_normalized), s_cols]
                 # scale_2 and input_scale are SCALARS ([]) -> copied unchanged
                 tensors: dict[str, dict[str, Any]] = {
                     prefix + name + ".weight": {
-                        "dtype": w.dtype, "shape": new_w_shape, "bytes": nw,
+                        "dtype": wexp.dtype, "shape": new_w_shape, "bytes": nw,
                     },
                     prefix + name + ".weight_scale": {
-                        "dtype": s.dtype, "shape": new_s_shape, "bytes": ns,
+                        "dtype": sexp.dtype, "shape": new_s_shape, "bytes": ns,
                     },
                 }
                 for suffix in ("weight_scale_2", "input_scale"):
@@ -294,16 +310,17 @@ def materialize_expert_bank(
                     dt = str(spec["dtype"])
                     body = bytes(spec["bytes"])  # ensure Sized bytes
                     bts = len(body)
-                    expected[tn] = (dt, bts)
-                    written[tn] = (dt, bts)
-        j("slice", f"{len(keep_channels)} channels, {num_experts} expert(s)")
+                    expected[tn] = (dt, list(spec["shape"]), bts)
+                    written[tn] = (dt, list(spec["shape"]), bts)
+        j("slice", f"{len(keep_normalized)} channels, {num_experts} expert(s)")
     except Exception:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
 
-    # ---- fail-closed coverage: exact names/shapes/byte sizes + hashes ----
-    found: dict[str, tuple[str, int]] = {}  # name -> (dtype, byte_size)
+    # ---- fail-closed coverage: exact names/SHAPES/dtypes/byte sizes + hashes ----
+    found: dict[str, tuple[str, list[int], int]] = {}  # name -> (dtype, shape, byte)
     hashes: dict[str, str] = {}
+    dup_names: list[str] = []
     for shard in Path(tmp).glob("*.safetensors"):
         hdr = read_safetensors_header(shard)
         raw = Path(shard).read_bytes()
@@ -311,22 +328,31 @@ def materialize_expert_bank(
         for name, spec in hdr.items():
             if name == "__metadata__" or not isinstance(spec, dict):
                 continue
+            if name in found:
+                dup_names.append(name)
+                continue
             od: Any = spec["data_offsets"]
             bb = int(od[1]) - int(od[0])
-            found[name] = (str(spec["dtype"]), bb)
+            found[name] = (str(spec["dtype"]), list(spec["shape"]), bb)
 
     missing = set(expected) - set(found)
-    size_mismatch = {
-        n: (expected[n], found[n])
-        for n in expected
-        if n in found and expected[n][:2] != found[n][:2]
-    }
+    # exact (dtype, shape, byte) triple comparison for every expected tensor
+    exact_bad: list[str] = []
+    for n in expected:
+        if n not in found:
+            continue
+        exp_dtype, exp_shape, exp_bytes = expected[n]
+        f_dtype, f_shape, f_bytes = found[n]
+        if exp_dtype != f_dtype or exp_shape != f_shape or exp_bytes != f_bytes:
+            exact_bad.append(n)
     coverage = len(set(expected) & set(found)) / len(expected) if expected else 0.0
-    validation_ok = (not missing) and (not size_mismatch) and coverage == 1.0
+    validation_ok = (
+        (not missing) and (not exact_bad) and (not dup_names) and coverage == 1.0
+    )
     j(
         "validate",
         f"expected={len(expected)} found={len(found)} missing={len(missing)} "
-        f"size_mismatch={len(size_mismatch)} coverage={coverage:.3f}",
+        f"exact_mismatch={len(exact_bad)} dups={dup_names} coverage={coverage:.3f}",
     )
 
     promoted = False
@@ -342,7 +368,7 @@ def materialize_expert_bank(
                     "source": source_dir,
                     "layer": corner_layer,
                     "num_experts": num_experts,
-                    "keep_channels": list(sorted(keep_channels)),
+                    "keep_channels": keep_normalized,
                     "tensor_names": sorted(expected),
                     "shard_hashes": hashes,
                     "coverage": coverage,
@@ -358,7 +384,7 @@ def materialize_expert_bank(
             )
         )
     else:
-        j("abort", f"validation failed (missing={list(missing)} mismatch={list(size_mismatch)})")
+        j("abort", f"validation failed (missing={list(missing)} exact={exact_bad})")
         shutil.rmtree(tmp, ignore_errors=True)
 
     tensor_count = len(found) if promoted else 0

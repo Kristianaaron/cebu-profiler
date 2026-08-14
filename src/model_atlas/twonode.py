@@ -465,14 +465,18 @@ def build_launch_plan(
         "non_evasive": True,  # plan uses metadata probes only
     }
     # Valid multi-node vllm flags (validated against vllm 0.21 --help):
-    #   --nnodes / --node-rank (NOT --node-ip)
-    #   --enable-expert-parallel (-ep) for routed-expert parallelism
-    #   external Ray head/worker bootstrap (NOT --ray-address in the server)
+    #   --nnodes / --node-rank (server)   --enable-expert-parallel (-ep)
+    # External Ray bootstrap uses Ray's documented `ray start --node-ip-address`
+    # (Ray's own flag spelling on common versions; server takes --nnodes, not
+    # the server-side --node-ip). Ray itself is NOT installed in the exec venvs
+    # (verified import err), so the exact Ray --help cannot be run here; the
+    # flag is emitted as Ray's documented spelling and the bootstrap is gated.
     plan.launch_command = (
         "# service-window gate: GPUs occupied by production DeepSeek vLLM; do not run now.\n"
-        "# Step 0 - start an external Ray cluster first (validated vllm 0.21 workflow):\n"
+        "# Step 0 - start an external Ray cluster first (Ray's documented "
+        "--node-ip-address; Ray must be installed separately, not present now):\n"
         "cd /home/kristianaaron/ai-lab/venvs/vllm && ray start --head --num-gpus 1 "
-        "--node-ip 10.77.0.1 &   # on spark\n"
+        "--node-ip-address 10.77.0.1 &   # on spark\n"
         "ssh gx10-ac63 'cd /home/kristianaaron/ai-lab/venvs/vllm && ray start "
         "--address 10.77.0.1:6379 --num-gpus 1'   # on gx10\n"
         "# Step 1 - on the head node, launch the server (expert-parallel enabled):\n"

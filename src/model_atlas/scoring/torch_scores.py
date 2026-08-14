@@ -51,6 +51,17 @@ class TorchScoringResult:
     def __post_init__(self) -> None:
         if not self.provenance:
             self.provenance = _provenance(self.input_source, self.evidence_kind)
+        if self.evidence_kind is EvidenceKind.MEASURED:
+            if self.input_source != "real_corpus_forward":
+                raise ValueError(
+                    "TorchScoringResult cannot be MEASURED with a non-real "
+                    f"input_source ({self.input_source!r}); only real corpus "
+                    "forward is measurable"
+                )
+            if not self.provenance:
+                raise ValueError(
+                    "TorchScoringResult MEASURED requires explicit provenance"
+                )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -121,16 +132,40 @@ def grouped_taylor_surrogate(
 
 
 def causal_ablation_scores(
-    z_activation: Any,
-    expert_out: Any,
+    baseline_output: Any,
+    ablated_output: Any,
     *,
     epsilon: float = 1e-6,
 ) -> dict[int, float]:
-    """Channel-wise causal-ablation PROXY kernel (not a causal test)."""
-    z_norm = z_activation.norm(dim=1)
-    contrib = (z_activation * z_norm.unsqueeze(1)).mean(dim=0).tolist()
-    denom = sum(abs(v) for v in contrib) or 1.0
-    return {c: abs(v) / denom for c, v in enumerate(contrib)}
+    """Genuine baseline-vs-ablated-output ablation contribution per channel.
+
+    This is a REAL difference of outputs under an ablation, not a proxy. It
+    requires actual ablated outputs (e.g. the expert output with one channel
+    zeroed) and returns the per-channel relative contribution.
+
+    Returns {channel: delta}, calling on a single fixed 1-D reference. For a
+    proper per-channel ablation each channel needs its own ablated output; the
+    caller passes the concatenated deltas and we normalize over channels.
+
+    `baseline_output` / `ablated_output`: [n_channels] or [num_tokens, n_channels];
+    if 1-D, each position is one channel's baseline-vs-ablated delta.
+    """
+    b = baseline_output.detach().float()
+    a = ablated_output.detach().float()
+    if b.shape != a.shape:
+        raise ValueError(
+            f"baseline/ablated output shape mismatch: {b.shape} vs {a.shape}"
+        )
+    delta = (b - a).abs()  # absolute change under ablation
+    # reduce tokens if 2-D (mean over token dim)
+    if delta.dim() > 1:
+        delta = delta.mean(dim=0)
+    contrib = delta + epsilon
+    denom = float(contrib.sum())
+    if denom <= 0:
+        return {c: 0.0 for c in range(int(contrib.numel()))}
+    flat = contrib.tolist()
+    return {c: float(v) / denom for c, v in enumerate(flat)}
 
 
 def needs_for_real_scoring(trace_mode: str) -> ScorerRequirements:
@@ -160,8 +195,10 @@ class RealActivationHook:
     """Hook interface to capture REAL activations/router during a corpus forward.
 
     Attach to a real model's MoE expert modules in the maintenance window; the
-    captured `z_activation` / router logits feed the kernels above. Until a real
-    forward has run, `has_captured` is False and any scoring is PREDICTED.
+    captured `z_activation` / router logits feed the kernels above. `is_measured`
+    is only True after the caller sets an explicit REAL-CORPUS run id
+    (`mark_real_corpus(run_id)`) — offline replay via `capture` alone never marks
+    it measured.
     """
 
     def __init__(self, layer: int, expert: int) -> None:
@@ -170,18 +207,25 @@ class RealActivationHook:
         self.z_activation: Any | None = None
         self.router_logits: Any | None = None
         self.has_captured = False
+        self._run_id: str | None = None
         self._hook_ref: Any | None = None
 
     def __call__(self, module: Any, inp: Any, out: Any) -> None:
         """Forward-hook body: store intermediate activation + router logits."""
-        self.z_activation = out  # expert-intermediate / gated activation
+        self.z_activation = out
         self.has_captured = True
 
     def capture(self, z_activation: Any, router_logits: Any | None = None) -> None:
-        """Direct capture (for tests / offline replay)."""
+        """Record an activation + router (offline replay / test or real path)."""
         self.z_activation = z_activation
         self.router_logits = router_logits
         self.has_captured = True
+
+    def mark_real_corpus(self, run_id: str) -> None:
+        """Declare this capture came from a REAL corpus forward with a run id."""
+        if not run_id:
+            raise ValueError("run_id required to mark real-corpus provenance")
+        self._run_id = run_id
 
     def attach(self, module: Any) -> Any:
         """Register as a forward hook on a torch module; returns the handle."""
@@ -194,7 +238,11 @@ class RealActivationHook:
             self._hook_ref = None
 
     def is_measured(self) -> bool:
-        """Real-hook captures are only MEASURED evidence if a real corpus forward
-        actually ran (has_captured) AND the caller declares it real; otherwise
-        the measured gate stays closed."""
-        return bool(self.has_captured)
+        """Only true when a REAL corpus run id was explicitly marked AND captures
+        exist; offline replay alone never marks measured."""
+        return bool(self.has_captured and self._run_id)
+
+    def evidence_provenance(self) -> str:
+        if self.is_measured():
+            return f"real_corpus_forward run_id={self._run_id}"
+        return "not-measured"
