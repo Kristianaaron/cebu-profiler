@@ -40,10 +40,15 @@ current availability is a separate live gate).
   fail-closed), expert-specific channel selections only when width == W, every
   non-target tensor copied verbatim, SAFETENSORS index + `config.json`
   (`moe_intermediate_size=W`) rebuilt, quant/tokenizer/code assets preserved,
-  exact census validation (names/dtype/shape/byte totals/hashes) + source
-  immutability, transactional (temp -> journal -> validate -> promote),
-  resumable (`done-shard` journal), never loads a source shard wholesale
-  (per-window bounded reads). `plan_uniform_widths` computes the size plan from
+  exact census validation (names/dtype/shape/byte totals/hashes) + output hash
+  compared to write-time journal; source immutability STAT-verified (size/mtime,
+  not full-file hashing); transactional overwrite (old output preserved until
+  validated, atomic swap+backup); resumable (`done-shard` journal), never loads
+  a source shard wholesale (bounded `_IO_CHUNK` reads). Real mounted GLM-5.2 NVFP4
+  geometry precheck PASSES (header-only metadata, no body reads; hidden=6144,
+  full=2048, gate/up U8 [2048,3072]+F8 [2048,384], down U8 [6144,1024]+F8
+  [6144,128], scalars F32; layer-78 final shared-head block excluded from the
+  routed-expert target set). `plan_uniform_widths` computes the size plan from
   the metadata census BEFORE writing.
 - **G (real size plan)** — computed from the mounted 464.8 GB census for aligned
   widths (below) and shows only widths fitting two ~120 GiB physical nodes AFTER

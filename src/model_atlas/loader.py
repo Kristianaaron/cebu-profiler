@@ -142,10 +142,23 @@ def _shard_data_base(path: Path) -> int:
 def _is_target_expert_tensor(name: str) -> bool:
     if ".mlp.experts." not in name:
         return False
-    parts = name.split(".mlp.experts.")[1].split(".")
-    if len(parts) < 3:
+    # GLM-5.2 has a final shared-head block (layer == num_hidden_layers) whose
+    # experts are BF16 and carry NO NVFP4 weight_scale/input_scale -> not part of
+    # the 256-routed-expert NVFP4 geometry. Exclude it from the target set.
+    parts = name.split(".")
+    if "layers" in parts:
+        try:
+            li = int(parts[parts.index("layers") + 1])
+        except (ValueError, IndexError):
+            li = None
+        if li is not None and li >= 78:  # final head block
+            return False
+    else:
         return False
-    proj, suffix = parts[1], ".".join(parts[2:])
+    sp = name.split(".mlp.experts.")[1].split(".")
+    if len(sp) < 3:
+        return False
+    proj, suffix = sp[1], ".".join(sp[2:])
     return proj in {"gate_proj", "up_proj", "down_proj"} and suffix in _EXPERT_SUFFIXES
 
 
@@ -188,7 +201,11 @@ def _infer_geometry(
     full = int(str(_moes))
     n_exp = int(str(_ne))
     sparse = sorted(
-        {_layer_of(t.name) for t in manifest.tensors if _is_target_expert_tensor(t.name)}
+        {
+            _layer_of(t.name)
+            for t in manifest.tensors
+            if _is_target_expert_tensor(t.name) and t.name.endswith(".weight")
+        }
     )
     return full, n_exp, sparse
 
@@ -233,11 +250,31 @@ def _precheck_geometry(
     sparse_layers: list[int],
     n_exp: int,
     full: int,
+    hidden: int,
 ) -> None:
-    """Round-5 #1: verify every sparse (layer,expert,proj) has the expected
-    weight/scale/scalars with consistent dimensions BEFORE any body write.
-    gate/up weight first dim == full; down packed dim == full/2; scales agree
-    with group count; expert/layer IDs match inferred coverage."""
+    """Round-6 #1: verify every sparse (layer,expert,proj) weight/scale/scalars
+    against the REAL mounted GLM NVFP4 layout, BEFORE any body write.
+
+    Mounted facts: hidden=6144, full=2048, 2 FP4 values/byte, group=16 values.
+      gate/up weight U8 [full, hidden/2]   (bytes: hidden/2 per channel row)
+      gate/up scale  F8 [full, hidden/16]  (groups: hidden/16 per channel row)
+      down  weight U8 [hidden, full/2]
+      down  scale  F8 [hidden, full/16]
+    Requires full % 16 == 0 and hidden % 16 == 0; weight U8 + scale F8_E4M3;
+    both weight_scale_2 and input_scale scalars (shape []) of dtype F32 exist.
+    Also rejects duplicate source tensor names."""
+    if full <= 0 or full % GROUP_VALUES != 0:
+        raise ValueError(f"full({full}) must be positive and a multiple of {GROUP_VALUES}")
+    if hidden <= 0 or hidden % GROUP_VALUES != 0:
+        raise ValueError(f"hidden({hidden}) must be positive and a multiple of {GROUP_VALUES}")
+
+    # duplicate source tensor names
+    seen_names: set[str] = set()
+    for t in manifest.tensors:
+        if t.name in seen_names:
+            raise ValueError(f"duplicate source tensor name {t.name}")
+        seen_names.add(t.name)
+
     by: dict[tuple[int, int, str], dict[str, TensorEntry]] = {}
     for t in manifest.tensors:
         if not _is_target_expert_tensor(t.name):
@@ -254,32 +291,47 @@ def _precheck_geometry(
                     )
                 w = rec.get("weight")
                 s = rec.get("weight_scale")
+                s2 = rec.get("weight_scale_2")
+                isc = rec.get("input_scale")
                 if w is None:
                     raise ValueError(f"missing weight for l{li}e{ei}.{proj}")
                 if s is None:
                     raise ValueError(f"missing weight_scale for l{li}e{ei}.{proj}")
+                if s2 is None:
+                    raise ValueError(f"missing weight_scale_2 for l{li}e{ei}.{proj}")
+                if isc is None:
+                    raise ValueError(f"missing input_scale for l{li}e{ei}.{proj}")
+                if w.dtype.upper() != "U8":
+                    raise ValueError(f"{proj} {li}e{ei} weight dtype {w.dtype} != U8")
+                if s.dtype.upper() not in ("F8_E4M3", "F8", "U8"):
+                    raise ValueError(f"{proj} {li}e{ei} scale dtype {s.dtype} not F8")
+                for scalar, nm in ((s2, "weight_scale_2"), (isc, "input_scale")):
+                    if list(scalar.shape) != [] or scalar.dtype.upper() != "F32":
+                        raise ValueError(
+                            f"{proj} {li}e{ei} {nm} expected scalar F32, got "
+                            f"shape {list(scalar.shape)} dtype {scalar.dtype}"
+                        )
                 wh = list(w.shape)
                 sh_s = list(s.shape)
                 if proj == "down_proj":
-                    hidden = wh[0]
-                    if len(wh) != 2 or wh[1] != full // 2:
+                    if len(wh) != 2 or wh[0] != hidden or wh[1] != full // 2:
                         raise ValueError(
-                            f"down {li}e{ei} shape {wh} != [hidden, full/2={full//2}]"
+                            f"down {li}e{ei} weight {wh} != [hidden={hidden}, full/2={full//2}]"
                         )
-                    if sh_s[0] != hidden:
-                        raise ValueError(f"down scale dim0 {sh_s[0]} != hidden {hidden}")
-                    if sh_s[1] != full // GROUP_VALUES:
+                    if len(sh_s) != 2 or sh_s[0] != hidden or sh_s[1] != full // GROUP_VALUES:
                         raise ValueError(
-                            f"down scale groups {sh_s[1]} != full/{GROUP_VALUES}"
+                            f"down {li}e{ei} scale {sh_s} != "
+                            f"[hidden={hidden}, full/16={full//GROUP_VALUES}]"
                         )
                 else:
-                    if len(wh) != 2 or wh[0] != full:
+                    if len(wh) != 2 or wh[0] != full or wh[1] != hidden // 2:
                         raise ValueError(
-                            f"{proj} {li}e{ei} first dim {wh[0]} != full={full}"
+                            f"{proj} {li}e{ei} weight {wh} != [full={full}, hidden/2={hidden//2}]"
                         )
-                    if sh_s[0] != full or sh_s[1] != full // GROUP_VALUES:
+                    if len(sh_s) != 2 or sh_s[0] != full or sh_s[1] != hidden // GROUP_VALUES:
                         raise ValueError(
-                            f"{proj} scale {sh_s} != [full={full}, full/group={full//GROUP_VALUES}]"
+                            f"{proj} {li}e{ei} scale {sh_s} != "
+                            f"[full={full}, hidden/16={hidden//GROUP_VALUES}]"
                         )
 
 
@@ -415,20 +467,14 @@ def production_write_shard(path: Path, specs: list[TensorSpec], body_provider: A
     for sp in specs:
         rel[sp.name] = (cursor, cursor + sp.data_len)
         cursor += sp.data_len
-    header_bytes = json.dumps(
-        {
-            "__metadata__": {},
-            **{
-                sp.name: {
-                    "dtype": sp.dtype,
-                    "shape": list(sp.shape),
-                    "data_offsets": list(rel[sp.name]),
-                }
-                for sp in specs
-            },
-        },
-        separators=(",", ":"),
-    ).encode("utf-8")
+    header: dict[str, object] = {"__metadata__": {}}
+    for sp in specs:
+        header[sp.name] = {
+            "dtype": sp.dtype,
+            "shape": list(sp.shape),
+            "data_offsets": list(rel[sp.name]),
+        }
+    header_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
         f.write(struct.pack("<Q", len(header_bytes)))
@@ -512,13 +558,16 @@ def materialize_uniform_width(
     manifest = load_manifest(source_dir)
     source_cfg = json.loads((source / "config.json").read_text())
     full, n_exp, sparse_layers = _infer_geometry(manifest, source_cfg)
+    hidden = int(str(source_cfg.get("hidden_size", 0)))
+    if hidden <= 0:
+        raise ValueError("config missing/zero hidden_size")
     if width <= 0 or width > full or width % GROUP_VALUES != 0:
         raise NonBlockAlignedError(
             f"width {width} must satisfy 0 < width <= full({full}) and be a "
             f"multiple of {GROUP_VALUES}"
         )
     keep_map = _build_keep_map(keep_channels, width, full, n_exp, sparse_layers)
-    _precheck_geometry(manifest, sparse_layers, n_exp, full)
+    _precheck_geometry(manifest, sparse_layers, n_exp, full, hidden)
 
     staging = out.parent / f".{out.name}.staging-w{width}"
 
@@ -542,10 +591,12 @@ def materialize_uniform_width(
         "shards": shards_meta,
     }, sort_keys=True)
 
-    if out.exists():
-        if not overwrite:
-            raise FileExistsError("output exists; pass overwrite=True")
-        shutil.rmtree(out)
+    if out.exists() and not overwrite:
+        raise FileExistsError("output exists; pass overwrite=True")
+    # NOTE: with overwrite=True we DO NOT delete the prior output now. It stays
+    # in place throughout materialization and is only swapped on successful
+    # validation (atomic rename old -> backup, staging -> output, then remove
+    # backup). On any failure/interruption the old output remains intact.
 
     # Preserve valid staging; do NOT delete on normal entry. Validate plan
     # identity: mismatch must fail closed unless explicit overwrite clears it.
@@ -621,8 +672,8 @@ def materialize_uniform_width(
             # refuse symlinks resolving outside the source root
             try:
                 target = srcp.resolve()
-                if target != srcp and not str(target).startswith(str(source.resolve())):
-                    continue
+                if not target.is_relative_to(source.resolve()):
+                    continue  # symlink resolves outside source -> skip
             except OSError:
                 continue
             _copy_stream(srcp, staging / asset)
@@ -653,26 +704,58 @@ def materialize_uniform_width(
                 total_bytes += sp.data_len
             shards_written += 1
             tensor_count += len(specs)
-        _write_index(staging, weight_map, source_cfg, width)
+        # validate source index weight_map matches manifest shard assignments
+        src_idx = source / "model.safetensors.index.json"
+        if src_idx.exists():
+            try:
+                src_imap = json.loads(src_idx.read_text()).get("weight_map", {})
+                man_map = {t.name: t.shard for t in manifest.tensors}
+                if set(src_imap) != set(man_map):
+                    raise ValueError(
+                        "source index weight_map keys != manifest census"
+                    )
+                for n, sh in src_imap.items():
+                    if man_map.get(n) != sh:
+                        raise ValueError(
+                            f"source index assigns {n}->{sh} but manifest says {man_map.get(n)}"
+                        )
+            except ValueError as exc:
+                raise ValueError(f"source index/object mismatch: {exc}") from exc
+        _write_index(staging, weight_map, source_cfg, width, source)
         j("slice", f"width={width} tensors={tensor_count} bytes={total_bytes}")
     except Exception:
         # preserve staging on interruption/failure (do NOT delete)
         raise
 
-    validation = _exact_validate(staging, manifest, keep_map, source_cfg, width, pre_src)
+    validation = _exact_validate(
+        staging, manifest, keep_map, source_cfg, width, pre_src, shard_hashes,
+    )
     j("validate", validation.note)
     promoted = False
     structurally = False
     if validation.ok:
         j("promote", f"{out.name}")
         out.parent.mkdir(parents=True, exist_ok=True)
+        # atomic same-filesystem swap: old output -> backup, staging -> output
+        backup = out.with_name(out.name + f".bak-{os.getpid()}")
         if out.exists():
-            shutil.rmtree(out)
-        staging.rename(out)
+            if backup.exists():
+                shutil.rmtree(backup)
+            out.rename(backup)
+        try:
+            staging.rename(out)
+        except Exception:  # noqa: BLE001
+            # restore old output if staging rename failed
+            if backup.exists() and not out.exists():
+                backup.rename(out)
+            raise
+        if backup.exists():
+            shutil.rmtree(backup)
         promoted = True
         structurally = True
     else:
         j("abort", validation.note)
+        # old output (if any) left intact; staging kept for resume
     return ExportResult(
         output_dir=str(out), width=width, shards_written=shards_written,
         tensor_count=tensor_count, total_bytes=total_bytes,
@@ -751,13 +834,23 @@ def _plan_output_shard(
 
 
 def _write_index(
-    staging: Path, weight_map: dict[str, str], source_cfg: dict[str, object], width: int,
+    staging: Path, weight_map: dict[str, str], source_cfg: dict[str, object],
+    width: int, source: Path,
 ) -> None:
     cfg = json.loads(json.dumps(source_cfg))
     cfg["moe_intermediate_size"] = width
     (staging / "config.json").write_text(json.dumps(cfg, indent=2))
+    # preserve source index metadata when rebuilding (weight_map is regenerated)
+    src_meta: dict[str, object] = {}
+    src_idx = source / "model.safetensors.index.json"
+    if src_idx.exists():
+        try:
+            src_idx_d = json.loads(src_idx.read_text())
+            src_meta = src_idx_d.get("metadata", {})
+        except ValueError:
+            src_meta = {}
     (staging / "model.safetensors.index.json").write_text(
-        json.dumps({"metadata": {}, "weight_map": weight_map}, indent=2)
+        json.dumps({"metadata": src_meta, "weight_map": weight_map}, indent=2)
     )
 
 
@@ -765,6 +858,7 @@ def _exact_validate(
     staging: Path, manifest: CheckpointManifest,
     keep_map: dict[tuple[int, int], list[int]], source_cfg: dict[str, object],
     width: int, pre_src_stats: dict[str, os.stat_result],
+    write_hashes: dict[str, str],
 ) -> _Validation:
     ok = True
     notes: list[str] = []
@@ -772,10 +866,18 @@ def _exact_validate(
     present: set[str] = set()
     total_out = 0
     seen: dict[str, int] = {}
-    out_hashes: dict[str, str] = {}  # shard_name -> sha256 (for manifest)
+    out_hashes: dict[str, str] = {}  # shard_name -> sha256 (current)
     shard_of: dict[str, str] = {}  # tensor_name -> containing shard
     for shard in sorted(staging.glob("*.safetensors")):
-        out_hashes[shard.name] = _fingerprint(shard)
+        h = _fingerprint(shard)
+        out_hashes[shard.name] = h
+        # write-time journal hash must MATCH current (post-write corruption caught)
+        if (
+            write_hashes.get(shard.name) is not None
+            and write_hashes[shard.name] != h
+        ):
+            ok = False
+            notes.append(f"shard {shard.name} current hash != write-time journal hash")
         hdr = read_safetensors_header(shard)
         for name, spec in hdr.items():
             if name == "__metadata__":
