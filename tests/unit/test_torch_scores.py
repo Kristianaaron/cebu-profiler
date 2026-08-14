@@ -47,6 +47,9 @@ def test_causal_ablation_genuine_diff_and_shape_check():
     # shape mismatch fails closed
     with pytest.raises(ValueError):
         causal_ablation_scores(torch.ones(2), torch.ones(3))
+    # zero-delta must not fabricate nonzero contributions (epsilon must not add)
+    z = causal_ablation_scores(torch.zeros(2), torch.zeros(2))
+    assert all(abs(v) < 1e-9 for v in z.values())
 
 
 def test_grouped_taylor_groups():
@@ -60,13 +63,20 @@ def test_grouped_taylor_groups():
 
 def test_real_hook_offline_replay_never_measured():
     hook = RealActivationHook(3, 0)
-    hook.capture(torch.ones(2, 4))  # offline replay
+    hook.capture(torch.ones(2, 4))  # offline replay, no real run id
     assert hook.has_captured is True
-    assert hook.is_measured() is False  # no real-corpus run id
-    # explicit real-corpus run id makes it measured
+    assert hook.is_measured() is False
+
+    # marking AFTER a stale offline capture must NOT retroactively measure it
     hook.mark_real_corpus("run-abc")
-    assert hook.is_measured() is True
-    assert "run-abc" in hook.evidence_provenance()
+    assert hook.is_measured() is False  # stale offline capture stays unmeasured
+
+    # a NEW capture under an active run id is measurable
+    hook2 = RealActivationHook(3, 0)
+    hook2.mark_real_corpus("run-abc")
+    hook2.capture(torch.ones(2, 4))
+    assert hook2.is_measured() is True
+    assert "run-abc" in hook2.evidence_provenance()
 
 
 def test_real_hook_missing_run_id_raises():

@@ -49,19 +49,22 @@ class TorchScoringResult:
     notes: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        if not self.provenance:
-            self.provenance = _provenance(self.input_source, self.evidence_kind)
         if self.evidence_kind is EvidenceKind.MEASURED:
+            # check provenance before any auto-fill so stale/missing provenance
+            # is rejected, never silently replaced
+            if not self.provenance:
+                raise ValueError(
+                    "TorchScoringResult MEASURED requires explicit provenance "
+                    "before any generic provenance is auto-filled"
+                )
             if self.input_source != "real_corpus_forward":
                 raise ValueError(
                     "TorchScoringResult cannot be MEASURED with a non-real "
                     f"input_source ({self.input_source!r}); only real corpus "
                     "forward is measurable"
                 )
-            if not self.provenance:
-                raise ValueError(
-                    "TorchScoringResult MEASURED requires explicit provenance"
-                )
+        if not self.provenance:
+            self.provenance = _provenance(self.input_source, self.evidence_kind)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -160,7 +163,7 @@ def causal_ablation_scores(
     # reduce tokens if 2-D (mean over token dim)
     if delta.dim() > 1:
         delta = delta.mean(dim=0)
-    contrib = delta + epsilon
+    contrib = delta  # do NOT add epsilon; zero-delta must stay all-zero
     denom = float(contrib.sum())
     if denom <= 0:
         return {c: 0.0 for c in range(int(contrib.numel()))}
@@ -216,13 +219,20 @@ class RealActivationHook:
         self.has_captured = True
 
     def capture(self, z_activation: Any, router_logits: Any | None = None) -> None:
-        """Record an activation + router (offline replay / test or real path)."""
+        """Record an activation + router. `is_measured` is True ONLY when this
+        capture occurred while a real-corpus run id was already bound; a stale
+        offline capture taken before binding is never measurable."""
+        import time  # noqa: F401
+
         self.z_activation = z_activation
         self.router_logits = router_logits
         self.has_captured = True
+        # capture snapshots the active run_id at capture time
+        self._measured = bool(self._run_id is not None)
 
     def mark_real_corpus(self, run_id: str) -> None:
-        """Declare this capture came from a REAL corpus forward with a run id."""
+        """Bind a real-corpus run id. Only captures made AFTER this binding are
+        measurable (the snapshot in `capture` enforces ordering)."""
         if not run_id:
             raise ValueError("run_id required to mark real-corpus provenance")
         self._run_id = run_id
@@ -238,9 +248,8 @@ class RealActivationHook:
             self._hook_ref = None
 
     def is_measured(self) -> bool:
-        """Only true when a REAL corpus run id was explicitly marked AND captures
-        exist; offline replay alone never marks measured."""
-        return bool(self.has_captured and self._run_id)
+        """Only true if a capture happened UNDER an active real-corpus run id."""
+        return bool(getattr(self, "_measured", False) and self._run_id)
 
     def evidence_provenance(self) -> str:
         if self.is_measured():

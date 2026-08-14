@@ -8,7 +8,7 @@ Implement the real GLM-5.2 two-DGX-Spark experiment capability. Round 3 added a
 **full loadable uniform-width derivative materializer** (all sparse layers x all
 experts, transactional/resumable/streamed) + a **measured size plan** from the
 464.8 GB census, and corrected every second-review finding. Two irreducible
-gates remain and are honestly reported (see Blockers): (i) no loadable NLFP4
+gates remain and are honestly reported (see Blockers): (i) no runtime-loadable ModelOpt-NVFP4
 decode path in the installed stack, and (ii) the real forward/benchmark requires
 an operator maintenance window (services must be stopped by the operator, and
 current availability is a separate live gate).
@@ -36,7 +36,7 @@ current availability is a separate live gate).
   (offline replay never); `TorchScoringResult` rejects MEASURED with synthetic or
   missing provenance. Verified under `.venv-exec` (torch) + repo venv.
 - **F (loadable materializer, NEW)** — `loader.py` `materialize_uniform_width`:
-  all sparse layers x all experts, uniform width `W` (18-multiple-of-16 verified
+  all sparse layers x all experts, uniform width `W` (multiple of 16, verified fail-closed on non-multiples
   fail-closed), expert-specific channel selections only when width == W, every
   non-target tensor copied verbatim, SAFETENSORS index + `config.json`
   (`moe_intermediate_size=W`) rebuilt, quant/tokenizer/code assets preserved,
@@ -83,7 +83,7 @@ P3–7 · `9a164e9` review-fix 1 · (round-3 commit, below).
    files for nvfp4: none; `CompressedTensorsLinearMethod` does not handle
    `modelopt`). The mounted checkpoint is `quant_method=modelopt, quant_algo=NVFP4`.
    So the standard stack cannot decode/execute this NVFP4 derivative as-is; the
-   closest valid artifact our materializer can produce is the FULL LOADABLE
+   closest valid artifact our exporter can produce is the STRUCTURALLY-COMPLETE
    uniform-width safetensors+index+config derivative (valid HF/census structure)
    plus an honest note that the NVFP4 *decode/run* requires either a ModelOpt
    decode adapter or a BF16 reference that is unavailable. The materializer

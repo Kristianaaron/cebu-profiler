@@ -1,7 +1,7 @@
 # GLM-5.2 two-DGX-Spark maintenance-window runbook (review-corrected)
 
 **Status: code/tests/manifests implemented. The real runbook BEGIN only when a
-fully materialized, loadable derivative at or under the target per-node envelope
+fully materialized, structurally-complete (and runtime-loadable for a ModelOpt-capable backend) derivative at or under the per-node envelope
 exists. Until such a derivative passes materialized + held-out + runtime gates,
 the execution gate stays CLOSED (no direct full-model run of the 503 GB source
 is possible on 2×~120 GB, and a single-node Transformers `from_pretrained` of it
@@ -46,23 +46,32 @@ for h, n in inv.nodes.items():
 PY
 ```
 
-## 2. Derivative materialization → only a NON-LOADABLE expert-bank slice now
+## 2. Derivative materialization → the FULL uniform-width derivative exporter
 
-The current `materialize_expert_bank` produces a **NON_LOADABLE_EXPERT_BANK**
-artifact (single/bounded layers, no index/config rebuild). It is NOT a loadable
-checkpoint, so it is never fed to vllm from_pretrained. It is useful only for
-scoring/channel-planning evidence on the real shape/NVFP4 layout.
+Use `loader.materialize_uniform_width` (the full structural exporter). It exports
+a STRUCTURALLY-COMPLETE checkpoint tree (all sparse layers × all experts, uniform
+width, safetensors + index + config rebuilt, quant/tokenizer/code preserved) and
+sets `runtime_loadable=False` — the installed vllm/transformers cannot decode the
+ModelOpt NVFP4 checkpoint (verified: no ModelOpt-NVFP4 decoder in vllm 0.21 /
+transformers 5.9.0 here). It is fed to a ModelOpt-capable loader once such a
+backend probe passes; it is never fed to the installed vllm as runtime-ready.
 
 ```bash
 .venv/bin/python - <<'PY'
-from model_atlas.materialize import materialize_expert_bank
-# down requires a UNION OF FULL 16-CHANNEL GROUPS; keep all channels for a probe
-res = materialize_expert_bank(
-  '/media/glm52/models/nvidia/GLM-5.2-NVFP4',
-  '/home/kristianaaron/tmp/model-atlas/derivatives/glm-layer3-exp0-probe',
-  corner_layer=3,
-  keep_channels=list(range(16)), num_experts=1, overwrite=False)
-print('loadable', res.loadable, 'validated', res.validated, 'coverage', res.coverage)
+from model_atlas.checkpoint.source_manifest import load_manifest
+from model_atlas.loader import materialize_uniform_width, plan_exact_sizes
+
+SRC = '/media/glm52/models/nvidia/GLM-5.2-NVFP4'
+manifest = load_manifest(SRC)
+import json
+source_cfg = json.loads(open(SRC + '/config.json').read())
+# pick a width that fits both nodes after an authorized maintenance window
+# (e.g. W=256 -> per_rank ~60 GiB); compute an exact size plan FIRST (scalars
+# do NOT scale, so this is exact, not a width/full factor):
+out = '/home/kristianaaron/tmp/model-atlas/derivatives/glm-uniform-w256'
+res = materialize_uniform_width(SRC, out, width=256)   # resumable, transactional
+print('structurally_complete', res.structurally_complete, 'promoted', res.promoted)
+print('runtime_loadable', res.runtime_loadable)   # False (no ModelOpt decoder here)
 PY
 ```
 
