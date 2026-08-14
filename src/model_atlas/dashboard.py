@@ -1014,7 +1014,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .coal-row{{display:flex;align-items:center;gap:12px;padding:8px 12px;margin:5px 0;background:#161616;border:1px solid #282828;border-radius:8px;flex-wrap:wrap}}
  .coal-row.min{{opacity:.74}}
  .coal-row .edge{{flex:1 1 180px;min-width:150px;height:34px;position:relative;display:flex;align-items:flex-end;gap:2px;background:transparent}}
- .coal-row .edge i{{display:block;width:6px;border-radius:1px 1px 0 0;background:#2f2f2f}}
+ .coal-row .edge i{{display:block;width:6px;height:16px;border-radius:1px 1px 0 0;background:#2f2f2f}}
  .coal-row .edge i.fill{{background:#3f6212}}
  .coal-row .edge .cnt{{margin-left:6px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#a1a1aa;letter-spacing:.03em;line-height:34px}}
  .coal-row.lo .edge i.fill{{background:#3f6212}}
