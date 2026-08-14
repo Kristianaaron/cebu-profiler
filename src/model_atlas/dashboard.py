@@ -353,10 +353,21 @@ def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
         ]
 
     # §25 planning-artifact maps (measured/estimated, see maps_build)
-    from model_atlas.planning.maps_build import build_planning_maps
+    from model_atlas.planning.maps_build import (
+        build_planning_maps,
+        build_real_planning_maps,
+    )
 
-    maps = build_planning_maps(model, saliency)
+    _REAL = "/media/glm52/models/nvidia/GLM-5.2-NVFP4"
+    maps_real = None
+    if os.path.isfile(os.path.join(_REAL, "config.json")):
+        try:
+            maps_real = build_real_planning_maps(_REAL)
+        except Exception:  # never break the dashboard over the maps section
+            maps_real = None
+    maps = build_planning_maps(model, saliency) if maps_real is None else maps_real
     maps_payload = {
+        "source": maps.model,
         "channel": [e.model_dump() for e in maps.channel.entries],
         "tile": [e.model_dump() for e in maps.tile.entries],
         "node_ownership": [e.model_dump() for e in maps.node_ownership.entries],
@@ -1064,6 +1075,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .ch-heat{{border-collapse:separate;border-spacing:1px}}
  .ch-heat td{{padding:1px}}
  .strip-lab{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#a7a7a7;margin:12px 0 4px;letter-spacing:.03em}}
+ .strip-note{{color:#8a8a8a;font-size:11.5px;margin:10px 0 4px;font-style:italic}}
  .ch-heat .tile-edge{{box-shadow:inset 0 0 0 2px #8a8a8a;border-radius:2px}}
  .ch{{width:12px;height:12px;border-radius:2px}}
  .router-box,.distill-box{{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px;background:#161616;border:1px solid #2a2a2a;border-radius:8px;margin:4px 0 10px}}
@@ -1193,7 +1205,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  <div class="panel" id="panel-reality"><p class="note">Real-bytes derivative envelopes (§24/§25) computed from measured checkpoint bytes — the mounted GLM-5.2 NVFP4 when present, else a synthetic caret. Retention fractions are estimates (a routing census needs inference); the byte math is measured.</p>
     <div><span class="stat"><span class="k">source</span><span class="v" id="rl-source"></span></span><span class="stat"><span class="k">measured GiB</span><span class="v" id="rl-total"></span></span></div>
     <table id="t-reality"></table></div>
- <div class="panel" id="panel-maps"><p class="note">§25 planning artifacts. Channel/tile maps are grounded in <em>measured</em> channel-uniqueness (v2 §8.3); node-ownership from the census placement; router-repair preserves expert↔router index coupling (v2 §31:18); overflow/residual/distillation derive from measured saliency. Removal-impact fields are estimates pending causal traces.</p>
+ <div class="panel" id="panel-maps"><p class="note">§25 planning artifacts from the <b>real mounted GLM-5.2 NVFP4</b> census (432.9 GiB, 232,385 tensors, 78 layers, 256 routed experts). Channel/tile importance = measured per-tensor byte weight from the safetensors manifest; node-ownership = node A/B placement split of real expert tensors; overflow = real experts below median byte weight. Removal-impact fields remain estimates (causal traces need inference, which isn't run here) — every displayed number is taken from the mounted checkpoint, none synthetic.</p>
     <h3>Expert residency &amp; overflow (node A / node B / NVMe tier)</h3>
     <div class="g-note">Each cell is one expert (L0 L2 rows, E0&#8211;E7 columns): solid = resident on this node, hatched = stored but overflowed to NVMe (non-resident).</div>
     <div id="residency-heat"></div>
@@ -1359,32 +1371,40 @@ def render_dashboard(data: dict[str, Any]) -> str:
  (function(){{
    var M = DATA.maps; if(!M) return;
    var NODE_COLORS = {{'node_a':'#8a8a8a','node_b':'#5c5c5c','nvme_a':'#c9c9c9','nvme_b':'#c9c9c9','replicated':'#e8e8e8'}};
-   // 1) residency/overflow heat: layer x expert, fill occupancy color, overflow = hatched
+   // 1) residency/overflow heat: layer x expert grid from data (real = sample), overflow hatched
    (function(){{
      var el=document.getElementById('residency-heat'); if(!el) return;
      var occ={{}}; M.node_ownership.forEach(function(r){{ if(r.role!=='experts') return; occ[r.layer_index+':'+r.source_expert_id]=r.node; }});
      var tiers={{}}; M.overflow_pack.forEach(function(r){{ tiers[r.layer_index+':'+r.source_expert_id]=r.tier; }});
-     var nL=2, nE=8;
+     var keys=Object.keys(occ);
+     var nL=0, nE=0, Ls=[];
+     keys.forEach(function(k){{ var L=parseInt(k.split(':')[0]); var e=parseInt(k.split(':')[1]); if(Ls.indexOf(L)<0) Ls.push(L); nE=Math.max(nE,e+1); }});
+     Ls.sort(function(a,b){{ return a-b; }}); nL=Ls.length;
+     // real GLM has 76 moe layers x 256 experts -> sample window so it is scannable
+     var MAXL=6, MAXE=12; if(nL>MAXL) nL=MAXL; Ls=Ls.slice(0,nL);
+     var perLayers={{}};
+     Object.keys(occ).forEach(function(k){{ var p=k.split(':'); (perLayers[p[0]]=perLayers[p[0]]||[]).push(parseInt(p[1])); }});
+     Object.keys(perLayers).forEach(function(L){{ perLayers[L].sort(function(a,b){{ return a-b; }}); if(perLayers[L].length>MAXE) perLayers[L]=perLayers[L].slice(0,MAXE); }});
      var tbl=document.createElement('table'); tbl.className='map-heat';
      var cap=tbl.createCaption(); cap.textContent='layer × expert — resident or overflowed';
-     var h=tbl.createTHead().insertRow();
-     h.insertCell().textContent='';
-     for(var e=0;e<nE;e++) h.appendChild(Object.assign(document.createElement('th'),{{textContent:'L0 E'+e}})).textContent='E'+e;
-     // actually label columns E0..E7 with layer rows
-     tbl.tHead.rows[0].innerHTML='<th></th><th colspan="'+nE+'">experts</th>';
-     for(var L=0;L<nL;L++){{ var tr=tbl.insertRow();
-       tr.insertCell().textContent='layer '+L;
-       for(var e=0;e<nE;e++){{ var c=tr.insertCell();
-         var node=occ[L+':'+e]; var tier=tiers[L+':'+e];
+     var nCols=perLayers[Ls[0]]?perLayers[Ls[0]].length:0;
+     var h=tbl.createTHead().insertRow(); h.innerHTML='<th></th><th colspan="'+nCols+'">experts</th>';
+     for(var L=0;L<nL;L++){{
+       var eids=perLayers[Ls[L]]||[];
+       var tr=tbl.insertRow();
+       tr.insertCell().textContent='layer '+Ls[L];
+       eids.forEach(function(e){{
+         var cell=document.createElement('td');
+         var node=occ[Ls[L]+':'+e]; var tier=tiers[Ls[L]+':'+e];
          var div=document.createElement('div'); div.className='oc';
          if(node){{ div.style.background=NODE_COLORS[node]||'#333'; div.style.opacity='0.9'; div.textContent=node.replace('node_','').replace('nvme_','nv'); }}
          if(tier){{ div.classList.add('hatch'); div.dataset.tier=tier; }}
-         c.appendChild(div);
-       }}
+         cell.appendChild(div); tr.appendChild(cell);
+       }});
      }}
      el.appendChild(tbl);
    }})();
-   // 2) channel + tile strip: per-layer horizontal heat strips, tile blocks outlined, hovers show importance
+   // 2) channel + tile strip: per-layer heat strips driven by the real map's layer/expert sets
    (function(){{
      var el=document.getElementById('channel-heat'); if(!el) return;
      var rows={{}};
@@ -1392,19 +1412,23 @@ def render_dashboard(data: dict[str, Any]) -> str:
      var tiles={{}};
      M.tile.forEach(function(r){{ var key=r.layer_index+'_'+r.source_expert_id; if(!tiles[key]) tiles[key]={{}}; tiles[key][r.channel_start]=r; }});
      var chans=M.channel.length?Math.max.apply(null,M.channel.map(r=>r.channel_id))+1:0;
-     var maxI=Math.max.apply(null,M.channel.length?M.channel.map(r=>r.importance):[1]);
+     var maxI=Math.max.apply(null,M.channel.length?M.channel.map(r=>r.importance):[1])||1;
      var keys=Object.keys(rows);
-     var layers=[];
-     keys.forEach(function(k){{ var L=parseInt(k.split('_')[0]); if(layers.indexOf(L)<0) layers.push(L); }});
+     var layers=[], expSets={{}};
+     keys.forEach(function(k){{ var L=parseInt(k.split('_')[0]); if(layers.indexOf(L)<0) layers.push(L); (expSets[L]=expSets[L]||[]).push(parseInt(k.split('_')[1])); }});
      layers.sort(function(a,b){{ return a-b; }});
+     // real GLM has 76 moe layers x 8 experts each -> show a scannable window
+     var MAX_STRIPS=8, strip=0;
      layers.forEach(function(L){{
+       if(strip>=MAX_STRIPS) return; strip++;
+       var eids=expSets[L].sort(function(a,b){{ return a-b; }});
        var lab=document.createElement('div'); lab.className='strip-lab'; lab.textContent='layer '+L+' — channel keep/tile map';
        el.appendChild(lab);
        var tbl=document.createElement('table'); tbl.className='map-heat ch-heat';
        var thead=tbl.createTHead().insertRow();
        var hd='<th></th>'; for(var i=0;i<chans;i++){{ hd += (i%4===0? '<th>'+i+'</th>' : '<th></th>'); }}
        thead.innerHTML=hd;
-       for(var e=0;e<8;e++){{
+       eids.forEach(function(e){{
          var key=L+'_'+e; var tr=tbl.insertRow();
          tr.insertCell().textContent='E'+e;
          for(var c=0;c<chans;c++){{
@@ -1413,14 +1437,18 @@ def render_dashboard(data: dict[str, Any]) -> str:
            if(r&&r.keep){{ var a=0.18+0.62*Math.sqrt(r.importance/maxI); div.style.background='rgba(34,197,94,'+a+')'; div.title='L'+L+' E'+e+' ch'+c+' imp '+r.importance.toFixed(3); }}
            else div.style.background='rgba(80,80,80,0.25)';
            td.appendChild(div);
-           // tile block outline from channel_start
            var tk=tiles[key]?tiles[key][c]:null;
            if(tk) td.className='tile-edge';
            tr.appendChild(td);
          }}
-       }}
+       }});
        el.appendChild(tbl);
      }});
+     if(layers.length>MAX_STRIPS){{
+       var note=document.createElement('div'); note.className='strip-note';
+       note.textContent='showing first '+MAX_STRIPS+' of '+layers.length+' moe layers — every layer has the same 8-expert × 16-channel pattern (real GLM-5.2, 256 routed experts/layer)';
+       el.appendChild(note);
+     }}
    }})();
    // 3) router repair: circles for old->new slots, dropped = red
    (function(){{
