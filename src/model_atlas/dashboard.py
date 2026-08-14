@@ -1074,10 +1074,14 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .oc.hatch{{background-image:repeating-linear-gradient(45deg,rgba(0,0,0,0.35) 0 4px,rgba(255,255,255,0.12) 4px 8px)}}
  .ch-heat{{border-collapse:separate;border-spacing:1px}}
  .ch-heat td{{padding:1px}}
- .strip-lab{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;color:#a7a7a7;margin:12px 0 4px;letter-spacing:.03em}}
+ .ch-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px 44px;align-items:start}}
+ .ch-grid-strip{{min-width:0}}
+ .strip-lab{{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:#a7a7a7;margin:10px 0 3px;letter-spacing:.03em;white-space:nowrap}}
  .strip-note{{color:#8a8a8a;font-size:11.5px;margin:10px 0 4px;font-style:italic}}
  .ch-heat .tile-edge{{box-shadow:inset 0 0 0 2px #8a8a8a;border-radius:2px}}
- .ch{{width:12px;height:12px;border-radius:2px}}
+ .ch{{width:9px;height:9px;border-radius:2px}}
+ .ch-heat{{border-collapse:separate;border-spacing:1px}}
+ .ch-heat td{{padding:0}}
  .router-box,.distill-box{{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px;background:#161616;border:1px solid #2a2a2a;border-radius:8px;margin:4px 0 10px}}
  .rslot{{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:26px;border-radius:50%;background:#3c3c3c;border:1px solid #565656;color:#e8e8e8;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;font-weight:600}}
  .rslot.bias{{box-shadow:0 0 0 2px #9a9a9a inset}}
@@ -1443,6 +1447,26 @@ def render_dashboard(data: dict[str, Any]) -> str:
          }}
        }});
        el.appendChild(tbl);
+     }});
+     // arrange strips in a 3-up grid (rows of three layers) so each layer's
+     // 8 x 16 channel/tile strip reads as one compact row — snapshot el's
+     // children, then rebuild cleanly (no live sibling-chain mutation)
+     var kids=Array.prototype.slice.call(el.children), pairs=[];
+     for(var k=0;k<kids.length;k++){{
+       var lab2=kids[k]; if(lab2.className!=='strip-lab') continue;
+       var t2=null;
+       if(k+1<kids.length && kids[k+1].tagName==='TABLE') t2=kids[k+1];
+       pairs.push({{lab:lab2, tbl:t2}});
+     }}
+     el.textContent='';
+     var cols=3;
+     pairs.forEach(function(pr,i){{
+       if(i%cols===0) grid=document.createElement('div');
+       grid.className='ch-grid';
+       var strip=document.createElement('div'); strip.className='ch-grid-strip';
+       strip.appendChild(pr.lab); if(pr.tbl) strip.appendChild(pr.tbl);
+       grid.appendChild(strip);
+       if((i%cols===cols-1)||(i===pairs.length-1)) el.appendChild(grid);
      }});
      if(layers.length>MAX_STRIPS){{
        var note=document.createElement('div'); note.className='strip-note';
