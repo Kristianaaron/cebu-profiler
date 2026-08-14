@@ -1147,7 +1147,6 @@ def render_dashboard(data: dict[str, Any]) -> str:
        <div id="coal-list" class="coal-grid" role="list"></div>
      </div>
    </div>
-   <table id="t-coalition"></table>
  </div>
  <div class="panel" id="panel-path"><p class="note">Most frequent cross-layer route signatures with success rate (measured).</p><table id="t-path"></table></div>
  <div class="panel" id="panel-hierarchy"><p class="note">Six-level atlas hierarchy (v2 §9): L1 weights → L2 units → L3 experts → L4 coalitions → L5 pathways → L6 behaviour, traceable up and down. Per-level node counts are measured; the example shows how many lower-level components realise the first behaviour (and the peak shared-channel prevalence — how load-bearing).</p><div id="hier-stats"></div><table id="t-hierarchy"></table></div>
@@ -1254,7 +1253,6 @@ def render_dashboard(data: dict[str, Any]) -> str:
  }})();
  renderCap();
 
- fill('t-coalition', ['pair','coactivity'], DATA.coalitions.map(r=>({{pair:`L0E${{r.pair[0]}} / L0E${{r.pair[1]}}`, coactivity:r.coactivity}})));
  // ---- Coalition visualization (co-routed pairs with causal tags) ----
  (function(){{
    var pairs = DATA.coalitions||[]; if(!pairs.length) return;
