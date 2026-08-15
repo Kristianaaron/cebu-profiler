@@ -34,7 +34,6 @@ from model_atlas.recommend.policy import (
     Recommendation,
     RecommendationPolicy,
     RecTarget,
-    StageEvidence,
 )
 
 
@@ -148,12 +147,20 @@ class RecommendationService:
                 p = self.import_profile(f)
             except Exception:  # noqa: BLE001
                 continue
-            if p.profile_id_of() == profile:
-                return p
-            # also accept model-keyed lookup (the profile's model field)
-            if p.model == profile:
+            if self._profile_key_matches(p, profile):
                 return p
         raise KeyError(f"profile {profile!r} not found under {self.profile_root}")
+
+    @staticmethod
+    def _profile_key_matches(p: AtlasProfile, key: str) -> bool:
+        """Stable lookup keys: authoritative content id, the file's declared
+        (optional, non-authoritative) profile_id, or the model name. Empty or
+        'unknown'-only matches never short-circuit a real profile."""
+        if p.profile_id_of() == key:
+            return True
+        if p.profile_id and p.profile_id != "imported" and p.profile_id == key:
+            return True
+        return bool(p.model and p.model != "unknown" and p.model == key)
 
 
 def _profile_to_dict(profile: AtlasProfile) -> dict[str, Any]:
@@ -172,20 +179,4 @@ def _profile_to_dict(profile: AtlasProfile) -> dict[str, Any]:
 
 
 def _profile_from_dict(data: dict[str, Any]) -> AtlasProfile:
-    evidence = {}
-    for k, v in (data.get("evidence") or {}).items():
-        evidence[k] = StageEvidence(
-            stage_id=k,
-            kind=str(v.get("kind", "estimated")),
-            present=bool(v.get("present", True)),
-            coverage=v.get("coverage"),
-        )
-    return AtlasProfile(
-        profile_id=str(data.get("profile_id", "imported")),
-        model=str(data.get("model", "unknown")),
-        seed=int(data.get("seed", 0)),
-        evidence=evidence,
-        routing_consistency_passed=data.get("routing_consistency_passed"),
-        hardware_model_arch=str(data.get("hardware_model_arch", "glm-5.2")),
-        notes=str(data.get("notes", "")),
-    )
+    return AtlasProfile.from_dict(data)

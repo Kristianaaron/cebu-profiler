@@ -31,6 +31,7 @@ from typing import Any
 from model_atlas.backend.registry import BackendRegistry
 from model_atlas.recipe.compiler import canonical_json
 from model_atlas.recipe.schema import RecipeStatus
+from model_atlas.schemas.evidence import EvidenceKind
 
 
 class RecConfidence(StrEnum):
@@ -64,6 +65,62 @@ class AtlasProfile:
     routing_consistency_passed: bool | None = None
     hardware_model_arch: str = "glm-5.2"
     notes: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AtlasProfile:
+        """Build a profile from a real exported Atlas run dict.
+
+        Evidence values may be a V3 ``dict`` (``{"kind": ..., "present": ...,
+        "coverage": ...}``) OR a plain string kind; both are parsed into
+        ``StageEvidence``. Evidence keys are normalized through the alias map.
+        """
+        evidence: dict[str, StageEvidence] = {}
+        for k, v in (data.get("evidence") or {}).items():
+            st = cls._parse_evidence(k, v)
+            canonical = canonical_stage(k)
+            if canonical in evidence and st.present:
+                prev = evidence[canonical]
+                if _SRC_PRECEDENCE.get(st.kind, 5) <= _SRC_PRECEDENCE.get(prev.kind, 5):
+                    continue  # keep the strongest observed claim
+            evidence[canonical] = st
+        return cls(
+            profile_id=str(data.get("profile_id", "imported")),
+            model=str(data.get("model", data.get("source_model", "unknown"))),
+            seed=int(data.get("seed", 0)),
+            evidence=evidence,
+            routing_consistency_passed=_as_bool(data.get("routing_consistency_passed")),
+            hardware_model_arch=str(
+                data.get(
+                    "hardware_model_arch",
+                    (data.get("hardware") or {}).get("model_arch", "glm-5.2"),
+                )
+            ),
+            notes=str(data.get("notes", "")),
+        )
+
+    @staticmethod
+    def _parse_evidence(key: str, v: Any) -> StageEvidence:
+        present = True
+        coverage: float | None = None
+        kind = "estimated"
+        if isinstance(v, str):
+            kind = v
+        elif isinstance(v, dict):
+            kind = str(v.get("kind", "estimated"))
+            present = bool(v.get("present", True))
+            cov = v.get("coverage")
+            if isinstance(cov, (int, float)) and not isinstance(cov, bool):
+                coverage = float(cov)
+        else:
+            # non-string/non-dict evidence value: refuse to guess — treat as
+            # absent rather than invent a claim (unknown stays unknown).
+            return StageEvidence(stage_id=key, kind=kind, present=False, coverage=None)
+        return StageEvidence(
+            stage_id=key,
+            kind=kind,
+            present=present,
+            coverage=coverage,
+        )
 
     def profile_id_of(self) -> str:
         payload = canonical_json(
@@ -184,6 +241,68 @@ _ANALYSIS_METHODS = {
     "kv-optimization",
 }
 
+# Evidence keys produced by the real V3 pipeline → canonical policy stage names.
+# V3 run evidence (run.evidence: stage -> kind) names the NVFP4 suitability key
+# "nvfp4"; the policy consumes it as "nvfp4_suitability". Unknown keys are never
+# silently dropped — they fall through unchanged (unknown stays unknown).
+_EVIDENCE_ALIASES = {
+    "nvfp4": "nvfp4_suitability",
+}
+
+_PRUNE_CAP = "pruning"
+# versions that mean "not pinned to a real release" — a blocker for execution.
+_UNPINNED_VERSIONS = frozenset({"", "n/a", "unpinned", "needs-pin", "none"})
+
+# method -> registered backend id (all are registered; an absent registration
+# surfaces as backend_missing instead of silently recommending).
+_BACKEND_ALIASES = {
+    "teacher-identity": "atlas_analysis_v3",
+    "calibration": "atlas_analysis_v3",
+    "sensitivity": "atlas_analysis_v3",
+    "bit-allocation": "atlas_analysis_v3",
+    "kv-optimization": "atlas_analysis_v3",
+    "exl3-primary": "exl3",
+    "llm-compressor": "llm_compressor",
+    "modelopt-nvfp4": "modelopt_nvfp4",
+    "nvfp4-substitute": "modelopt_nvfp4",
+}
+
+# Strength of an evidence source: measured/causally_tested > estimated >
+# predicted > inferred. Used to keep the strongest observed claim when an
+# alias and the canonical key both address the same stage.
+_SRC_PRECEDENCE = {
+    EvidenceKind.CAUSALLY_TESTED.value: 0,
+    EvidenceKind.MEASURED.value: 0,
+    EvidenceKind.ESTIMATED.value: 1,
+    EvidenceKind.PREDICTED.value: 2,
+    EvidenceKind.INFERRED.value: 3,
+}
+
+
+def _as_bool(v: Any) -> bool | None:
+    if v is None:
+        return None
+    if isinstance(v, str):
+        return v.strip().lower() in {"1", "true", "yes", "pass", "passed"}
+    return bool(v)
+
+
+def _is_pinned(version: str) -> bool:
+    return version.strip().lower() not in _UNPINNED_VERSIONS
+
+
+def canonical_stage(key: str) -> str:
+    """Map a produced evidence key (e.g. V3's ``nvfp4``) to the canonical
+    policy stage name. Unknown keys are returned unchanged."""
+    return _EVIDENCE_ALIASES.get(key, key)
+
+
+def _stage_keys(canonical: str) -> frozenset[str]:
+    """All evidence keys (canonical + aliases) that satisfy a policy stage."""
+    keys = {canonical}
+    keys.update(a for a, c in _EVIDENCE_ALIASES.items() if c == canonical)
+    return frozenset(keys)
+
 
 class RecommendationPolicy:
     """Versioned deterministic recommendation policy."""
@@ -210,7 +329,7 @@ class RecommendationPolicy:
                 runtime_backend=target.runtime_backend,
                 memory_target_gib=memory_target_gib,
             )
-        no_pruning = not allow_pruning  # no_pruning defaults True
+        no_pruning = not self._pruning_permitted(allow_pruning)  # no_pruning defaults True
         methods: list[MethodRecommendation] = []
         blocked: list[MethodRecommendation] = []
         for method, stage_ids in _METHOD_STAGES.items():
@@ -245,9 +364,20 @@ class RecommendationPolicy:
     ) -> MethodRecommendation:
         backend = self._backend_for(method)
         blockers: list[RecBlock] = []
+        # Backend resolution: an UNREGISTERED backend id blocks as backend_missing.
+        if backend is None:
+            if method not in _ANALYSIS_METHODS:
+                blockers.append(RecBlock("backend_missing", f"no backend registered for {method}"))
+            backend = {
+                "backend_id": method,
+                "available": False,
+                "derivative": False,
+                "status": "missing",
+                "pinned": False,
+            }
         # backend availability: only COMPRESSION methods require the backend to
         # be available + derivative-producing (analysis/planning run in-repo)
-        if backend is not None and method not in _ANALYSIS_METHODS:
+        if method not in _ANALYSIS_METHODS:
             if not backend["available"]:
                 blockers.append(
                     RecBlock("backend_unavailable", f"{backend['backend_id']} unavailable")
@@ -259,14 +389,24 @@ class RecommendationPolicy:
                         f"{backend['backend_id']} probe-only; no derivative",
                     )
                 )
+            if not backend.get("pinned", True):
+                blockers.append(
+                    RecBlock(
+                        "backend_unpinned",
+                        f"{backend['backend_id']} not version-pinned; cannot execute",
+                    )
+                )
         # evidence: missing evidence for any required stage -> LOW/INSUFFICIENT
         # confidence, and if the default policy requires it, BLOCKED.
         missing: list[str] = []
-        for s in stage_ids:
-            ev = profile.evidence.get(s)
+        for canonical in stage_ids:
+            ev = self._evidence_for(profile, canonical)
             if ev is None or not ev.present:
-                missing.append(s)
-        evidence_refs = [s for s in stage_ids if s in profile.evidence]
+                missing.append(canonical)
+        evidence_refs: list[str] = []
+        for canonical in stage_ids:
+            if self._evidence_for(profile, canonical) is not None:
+                evidence_refs.append(canonical)
         protected = ["attention", "mla", "norms", "embedding", "lm_head", "router"]
         if missing:
             rec = MethodRecommendation(
@@ -312,18 +452,7 @@ class RecommendationPolicy:
 
     # --------------------------------------------------------- helpers
     def _backend_for(self, method: str) -> dict[str, Any] | None:
-        mapping = {
-            "teacher-identity": "atlas_analysis_v3",
-            "calibration": "atlas_analysis_v3",
-            "sensitivity": "atlas_analysis_v3",
-            "bit-allocation": "atlas_analysis_v3",
-            "kv-optimization": "atlas_analysis_v3",
-            "exl3-primary": "exl3",
-            "llm-compressor": "llm_compressor",
-            "modelopt-nvfp4": "modelopt_nvfp4",
-            "nvfp4-substitute": "modelopt_nvfp4",
-        }
-        bid = mapping.get(method)
+        bid = _BACKEND_ALIASES.get(method)
         if bid is None:
             return None
         rec = self._registry.get(bid)
@@ -334,7 +463,39 @@ class RecommendationPolicy:
             "available": rec.is_available(self._registry),
             "derivative": rec.produces_derivative,
             "status": rec.status.value,
+            "version": rec.version,
+            "pinned": _is_pinned(rec.version),
         }
+
+    def _evidence_for(self, profile: AtlasProfile, canonical: str) -> StageEvidence | None:
+        """Resolve a policy stage's evidence, honoring aliases and giving the
+        default the broadest legal key set (identity stage is optional)."""
+        if canonical == "identity":
+            return profile.evidence.get("identity") or profile.evidence.get("teacher_identity")
+        for key in _stage_keys(canonical):
+            if key in profile.evidence:
+                return profile.evidence[key]
+        return None
+
+    def _pruning_permitted(self, allow_pruning: bool) -> bool:
+        """Pruning stays forbidden unless the caller EXPLICITLY requests it AND
+        a separately-registered, available, version-pinned, derivative-producing
+        pruning-capable backend exists. No verified backend -> never permitted."""
+        if not allow_pruning:
+            return False
+        for rec in self._registry.names():
+            record = self._registry.get(rec)
+            if record is None:
+                continue
+            if _PRUNE_CAP not in record.declared_capabilities:
+                continue
+            if not record.produces_derivative:
+                continue
+            if not _is_pinned(record.version):
+                continue
+            if record.is_available(self._registry):
+                return True
+        return False
 
     def _rank_for(self, method: str) -> int:
         return list(_METHOD_STAGES).index(method) + 1
@@ -349,23 +510,35 @@ class RecommendationPolicy:
         backend: dict[str, Any] | None,
     ) -> tuple[str, RecConfidence, str]:
         evidence_count = len(profile.evidence)
+        # routing_consistency is a hard gate: if it FAILED, any recommendation
+        # relying on router-indexed evidence is INSUFFICIENT (indices could be
+        # stale), regardless of per-stage kind.
+        if profile.routing_consistency_passed is False:
+            return (
+                f"{method}: routing-consistency FAILED; router-dependent evidence "
+                "cannot be trusted",
+                RecConfidence.INSUFFICIENT,
+                "routing_consistency_passed=false",
+            )
+        coverage = self._coverage(profile)
         if backend and backend["status"] in {"validated", "recommended"}:
             return (
                 f"{method}: evidence-backed + backend {backend['backend_id']} "
-                f"validated/recommended",
+                f"validated/recommended (coverage {coverage:.2f})",
                 RecConfidence.HIGH,
-                "validated backend + profile evidence",
+                f"validated backend; coverage {coverage:.2f}",
             )
-        if evidence_count >= 5:
+        if evidence_count >= 5 and coverage >= 0.5:
             return (
-                f"{method}: rich profile evidence ({evidence_count} stages)",
+                f"{method}: rich profile evidence ({evidence_count} stages, "
+                f"coverage {coverage:.2f})",
                 RecConfidence.MEDIUM,
-                f"{evidence_count} evidence stages present",
+                f"{evidence_count} evidence stages; coverage {coverage:.2f}",
             )
         return (
-            f"{method}: limited evidence ({evidence_count} stages)",
+            f"{method}: limited evidence ({evidence_count} stages, coverage {coverage:.2f})",
             RecConfidence.LOW,
-            f"only {evidence_count} evidence stages present",
+            f"only {evidence_count} stages; coverage {coverage:.2f}",
         )
 
     def _overall_confidence(
@@ -373,12 +546,24 @@ class RecommendationPolicy:
     ) -> RecConfidence:
         if not methods:
             return RecConfidence.INSUFFICIENT
+        if profile.routing_consistency_passed is False:
+            return RecConfidence.INSUFFICIENT
         worst = min((m.confidence for m in methods), key=lambda c: _C_RANK[c])
         if worst in (RecConfidence.HIGH, RecConfidence.MEDIUM):
-            if len(profile.evidence) < 4:
+            if len(profile.evidence) < 4 or self._coverage(profile) < 0.4:
                 return RecConfidence.LOW
             return worst
         return worst
+
+    def _coverage(self, profile: AtlasProfile) -> float:
+        """Mean calibration coverage over present evidence stages (0 when none;
+        never invents coverage)."""
+        covs = [
+            e.coverage for e in profile.evidence.values() if e.present and e.coverage is not None
+        ]
+        if not covs:
+            return 0.0
+        return sum(covs) / len(covs)
 
     def _recommendation_id(self, profile: AtlasProfile, target: RecTarget, no_pruning: bool) -> str:
         payload = canonical_json(
