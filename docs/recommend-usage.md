@@ -182,13 +182,13 @@ status/events/validate/lineage/output.
 | GET | `/api/profiles` | list profiles |
 | POST | `/api/profiles/import` | server-side path under profile_root (403 traversal) |
 | POST | `/api/recommend` | body `{profile_id, memory_target_gib, constraints}` → **recommendation + token + authorized_methods + selection_hash** |
-| POST | `/api/preview-selection` | body `{token, selected, inputs}` → preview_id/plan_id/hash; rejects empty/unknown/not-authorized |
+| POST | `/api/preview-selection` | body `{token, selected, inputs}` → preview_id/plan_id/hash; accepts any NONEMPTY subset of the authorized methods, rejects empty/unknown/not-authorized |
 | POST | `/api/preview` | full recipe dry-run (no token; read-only) |
 | POST | `/api/start` | body `{token, preview_id, hash, selected, inputs}` → run_id immediately, background worker; NO arbitrary-recipe or raw-selection start |
 | GET | `/api/jobs/<id>` · `/api/jobs/<id>/events` | status / event stream |
 | GET | `/validate?run_id&stage` | stage validation |
 | GET | `/outputs?run_id[&stage_id][&name]` | content-addressed outputs |
-| GET | `/lineage?recipe=…` | run lineage |
+| GET | `/lineage?run_id=…` | run lineage (actual completed run; no recipe={}) |
 
 ## Authorization (token model)
 
@@ -198,10 +198,11 @@ Recommendations, previews and starts are each gated:
    recommendation/profile/target/constraints and the **exact authorized method
    set** (its deterministic selection hash). A bare recommendation mints no
    token and authorizes nothing.
-2. `/api/preview-selection` **requires** a valid token and an exact, non-empty
-   selection-method-set match. It stores a **verified compiled artifact
-   server-side**, keyed by the token + selection hash, and returns only a
-   bounded `preview_id` / `plan_id` / `hash` handle — no recipe payload.
+2. `/api/preview-selection` **requires** a valid token and any NONEMPTY subset
+   of the authorized methods. It stores a **verified compiled artifact
+   server-side**, keyed by the token + the subset's own deterministic hash, and
+   returns only a bounded `preview_id` / `plan_id` / `hash` handle — no recipe
+   payload. The subset hash (not the full-set hash) is what start re-verifies.
 3. `/api/start` **accepts only** `(token, preview_id, hash, exact same
    selection, inputs)`, all re-verified against the stored package.
    Stale/unknown/replay/mismatch/empty starts are rejected deterministically.
@@ -220,8 +221,10 @@ Server-served static HTML/CSS/JS: profile+target selection, recommendation
 cards (method/evidence/confidence/blockers), enable/disable only authorized
 methods, immutable no-pruning indicator, memory target recompute, recipe
 diff/preview, Compress confirmation (disabled with exact blockers while any gate
-fails), live job progress, failure evidence, output listing. Any profile/target/
-constraint/checkbox change invalidates the preview and disables Compress until a
-fresh preview matches the current selection. All dynamic values render via an
+fails), live job progress, failure evidence, output listing. The selection is
+initialized from the methods actually checked (authorized, unblocked). A
+profile/target/constraint change clears token/reco/selection/preview (so Compress
+requires a fresh recommendation); a checkbox change invalidates the preview until
+a fresh preview matches the current selection. All dynamic values render via an
 XSS-safe DOM-text `esc()` helper — never raw `innerHTML` interpolation of
 untrusted values, and no raw snapshot embedded in the page.

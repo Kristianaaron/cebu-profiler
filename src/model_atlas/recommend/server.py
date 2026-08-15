@@ -182,8 +182,16 @@ class RecommendationHandler(BaseHTTPRequestHandler):
                 raise ServerError(_NOT_FOUND, "missing run_id")
             _send_json(self, _OK, svc.job_status(run_id))
         elif path == "/lineage":
-            recipe = self._recipe_from_json(query.get("recipe") or "{}")
-            _send_json(self, _OK, svc.job_lineage(recipe))
+            # run_id-bound lineage of an ACTUAL observable run. There is no
+            # recipe={} lineage anymore — the monitor fetches the lineage of the
+            # run it executed. Missing/unknown run_id fails closed.
+            lineage_run_id = query.get("run_id", "")
+            if not lineage_run_id:
+                raise ServerError(
+                    _BAD_REQUEST,
+                    "lineage requires run_id of an actual completed run",
+                )
+            _send_json(self, _OK, svc.run_lineage(lineage_run_id))
         elif path == "/outputs":
             run_id = query.get("run_id", "")
             stage_id = query.get("stage_id")
@@ -307,16 +315,6 @@ class RecommendationHandler(BaseHTTPRequestHandler):
             constraints=constraints,
         )
         _send_json(self, _OK, result)
-
-    @staticmethod
-    def _recipe_from_json(payload: str) -> CompressionRecipe:
-        try:
-            data = json.loads(payload)
-        except json.JSONDecodeError as exc:
-            raise ServerError(_BAD_REQUEST, f"invalid recipe JSON: {exc}") from exc
-        if not isinstance(data, dict):
-            raise ServerError(_BAD_REQUEST, "recipe must be a JSON object")
-        return RecommendationHandler._recipe_from_body({"recipe": data}, "recipe")
 
     @staticmethod
     def _recipe_from_body(body: dict[str, Any], key: str) -> CompressionRecipe:

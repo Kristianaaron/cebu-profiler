@@ -203,6 +203,12 @@ function renderRec(rec) {
   const np = document.createElement('div'); np.className = 'np';
   np.textContent = 'no_pruning = ' + esc(rec.no_pruning);
   host.appendChild(np);
+  // Initialize the Profile+Compress selection from the methods the browser
+  // actually checked (the authorized, unblocked ones). The recipe is then the
+  // exact checked subset — matching what preview/start will verify.
+  selection = new Set(
+    all.filter(m => !(m.blocked || ((m.blockers || []).length > 0))).map(m => m.method)
+  );
 }
 
 async function previewSelection() {
@@ -275,9 +281,17 @@ function computeGates() {
 
 $('recoBtn').addEventListener('click', recommend);
 $('previewBtn').addEventListener('click', previewSelection);
-// profile / target / constraints changes invalidate the preview binding
-$('profileSel').addEventListener('change', () => invalidatePreview('profile changed'));
-$('mem').addEventListener('input', () => invalidatePreview('memory target changed'));
+// profile / target / constraints changes INVALIDATE the entire authorization
+// + selection + preview (fresh recommendation required): they clear token,
+// reco, selection, preview so Compress is always gated on a current token.
+function clearBinding(reason) {
+  authToken = null;      // the old authorization token no longer applies
+  reco = null;           // the old recommendation no longer applies
+  selection = new Set(); // clear selection — Compress waits for re-select
+  invalidatePreview(reason);
+}
+$('profileSel').addEventListener('change', () => clearBinding('profile changed'));
+$('mem').addEventListener('input', () => clearBinding('memory target changed'));
 $('compressBtn').addEventListener('click', async () => {
   if (!authToken || !preview) return;
   const g = computeGates();
@@ -328,13 +342,27 @@ async function pollRun(runId) {
 }
 
 async function fetchEvidence(runId) {
-  // fetch + render validate/lineage/outputs for the terminal run
+  // fetch + render validate/lineage/outputs for the TERMINAL run only
   const enc = encodeURIComponent(runId);
-  const status = await (await fetch('/api/jobs/' + enc)).json();
+  const statusData = await (await fetch('/api/jobs/' + enc)).json();
   const outputs = await (await fetch('/outputs?run_id=' + enc)).json();
+  // run_id-bound lineage (actual completed stages)
   let lineage = { note: 'unavailable' };
-  try { lineage = await (await fetch('/lineage?recipe={}')).json(); } catch (e) { /* best-effort */ }
-  setOutput(JSON.stringify({ status, outputs: outputs.outputs || [], lineage }, null, 2));
+  try { lineage = await (await fetch('/lineage?run_id=' + enc)).json(); } catch (e) { /* best-effort */ }
+  // per-stage validation for actually-COMPLETED stages in the run
+  let validation = [];
+  const stage_map = (statusData.stages) || {};
+  const doneStages = Object.keys(stage_map).filter(sid => {
+    const so = stage_map[sid]; const sstat = so && so.status ? String(so.status) : '';
+    return sstat === 'done' || sstat === 'completed' || sstat === 'running' || sstat === 'skipped';
+  });
+  for (const sid of doneStages.slice(0, 5)) {
+    try {
+      const v = await (await fetch('/validate?run_id=' + enc + '&stage=' + encodeURIComponent(sid))).json();
+      if (v && v.run_id) validation.push({ stage: sid, ...v });
+    } catch (e) { /* best-effort */ }
+  }
+  setOutput(JSON.stringify({ status: statusData, outputs: outputs.outputs || [], lineage, validation }, null, 2));
 }
 
 updateCompress();

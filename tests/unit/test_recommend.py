@@ -969,12 +969,16 @@ def test_gui_preview_invalidation_and_compress_gating_deterministic():
     cover every invalidation path."""
     from model_atlas.recommend.gui import _GUI_PAGE as t
 
-    # every change source invalidates the preview + re-disables Compress
-    assert "invalidatePreview('profile changed')" in t
-    assert "invalidatePreview('memory target changed')" in t
+    # every change source invalidates + CLEARS the binding (fresh recommendation
+    # required) and re-disables Compress
+    assert "clearBinding('profile changed')" in t
+    assert "clearBinding('memory target changed')" in t
     assert "invalidatePreview('selection changed')" in t
     assert "invalidatePreview('new recommendation')" in t
-    # preview invalidation clears the stored preview (token+selection binding)
+    # profile/memory change clears token + reco + selection + preview
+    assert "authToken = null" in t
+    assert "reco = null" in t
+    assert "selection = new Set()" in t
     assert "preview = null" in t
     assert "authToken" in t  # token is part of the state; no token = disabled
     # Compress enabled ONLY when computeGates().ready (token+selection+preview match)
@@ -995,6 +999,9 @@ def test_gui_monitor_polls_terminal_and_fetches_evidence():
     assert "COMPLETED_WITH_WARNINGS" in t
     assert "FAILED_RECOVERABLE" in t
     assert "CANCELLED" in t
-    # after terminal, fetch and render outputs (+ line/lineage)
+    # after terminal, fetch and render outputs + run-bound lineage + validation
     assert "fetch('/outputs?run_id=' + enc)" in t
+    assert "fetch('/lineage?run_id=' + enc)" in t
+    assert "recipe={}" not in t and "/lineage?run_id=" in t  # always run-bound
+    assert "fetch('/validate?run_id=' + enc" in t  # per-stage validation
     assert "fetchLineage" not in t  # replaced by fetchEvidence

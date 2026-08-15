@@ -362,13 +362,14 @@ class RecommendationService:
     ) -> dict[str, Any]:
         """Token-gated preview-from-selection.
 
-        Only a live token (minted by :meth:`authorize`) may preview. The
-        selection MUST exactly equal the token's authorized method set (its
-        method-set hash binds it), and every method must actually be authorized
-        (not blocked/unknown). On success the deterministic compiled artifact is
-        verified and STORED server-side keyed by the preview. Returns a bounded
-        ``preview_id``/``plan_id``/``hash`` handle — never the full recipe or
-        artifact payload.
+        Only a live token (minted by :meth:`authorize`) may preview, and the
+        selection must be a NONEMPTY SUBSET of the token's authorized method
+        set (every selected method must actually be authorized — never
+        blocked/unknown/outside the set). The subset's own deterministic hash is
+        what binds the preview, start, and recomputation. On success the
+        deterministic compiled artifact is verified and STORED server-side
+        keyed by the preview. Returns a bounded ``preview_id``/``plan_id``/
+        ``hash`` handle — never the full recipe or artifact payload.
         """
         token = token or ""
         if not token:
@@ -381,12 +382,16 @@ class RecommendationService:
         if not all(isinstance(m, str) for m in selected):
             raise AuthError(400, "selection_invalid", "selection must be method strings")
         sel = sorted(set(selected))
-        if _selection_hash(sel) != session.selected_hash():
+        # every selected method must be authorized by the token's session —
+        # never the full-set hash: the subset's OWN hash binds this preview.
+        unauthorized = [m for m in sel if m not in set(session.authorized_methods)]
+        if unauthorized:
             raise AuthError(
                 403,
                 "selection_not_authorized",
-                "selection does not match the authorized method set",
+                f"not authorized: {unauthorized}",
             )
+        subset_hash = _selection_hash(sel)
         pv = self.recipe_preview(sel)
         plan = pv.get("plan") or {}
         readiness = {
@@ -397,7 +402,7 @@ class RecommendationService:
         preview_id = (
             "pv-"
             + sha256_hex(
-                canonical_json({"token": token, "hash": session.selected_hash()})
+                canonical_json({"token": token, "hash": subset_hash})
             )[:16]
         )
         recipe = self._selected_recipe(sel)
@@ -412,7 +417,7 @@ class RecommendationService:
         package = _PendingPreview(
             token=token,
             preview_id=preview_id,
-            selection_hash=session.selected_hash(),
+            selection_hash=subset_hash,
             selected=sel,
             recipe=recipe,
             artifact=artifact,
@@ -428,7 +433,7 @@ class RecommendationService:
         return {
             "preview_id": preview_id,
             "plan_id": (artifact.plan_id if artifact is not None else plan.get("plan_id")),
-            "hash": session.selected_hash(),
+            "hash": subset_hash,
             "readiness": readiness,
             "selected_methods": list(sel),
         }
@@ -804,6 +809,36 @@ class RecommendationService:
 
     def job_lineage(self, recipe: CompressionRecipe) -> dict[str, Any]:
         return dict(self.plane.lineage(recipe))
+
+    def run_lineage(self, run_id: str) -> dict[str, Any]:
+        """Content-derived lineage for an ACTUAL completed/observable run.
+
+        Reads the persisted immutable plan artifact (recipe + run identity) and
+        computes the same reproducibility lineage the control plane derives for
+        a recipe, but keyed to the concrete persisted run — so monitor can show
+        lineage for the run it actually executed, never a hard-coded recipe={}.
+        Fails closed when the run dir is gone/unknown.
+        """
+        engine = self.plane.engine_for(run_id)
+        if not engine.plan_path.exists():
+            return {"run_id": run_id, "error": "no plan artifact", "compile": "unknown"}
+        artifact = CompiledPlanArtifact.model_validate_json(
+            engine.plan_path.read_text(encoding="utf-8")
+        )
+        base = dict(self.plane.lineage(artifact.recipe))
+        base["run_id"] = engine.compiled.run_id(dict(artifact.inputs)) or run_id
+        # recompute the deterministic id from the CANONICAL (persisted) inputs
+        base["run_lineage"] = {
+            "run_id": run_id,
+            "preview inputs": dict(artifact.inputs),
+            "recipe_sha256": artifact.recipe_sha256,
+            "plan artifact ids": {
+                "recipe_id": artifact.recipe_id,
+                "plan_id": artifact.plan_id,
+                "run_id": artifact.run_id,
+            },
+        }
+        return base
 
     def job_output(
         self,

@@ -12,12 +12,12 @@ import json
 import threading
 from http.client import HTTPConnection
 from pathlib import Path
-from urllib.parse import urlencode
 
 import pytest
 
 from model_atlas.recommend import RecommendationService
 from model_atlas.recommend.api import _profile_to_dict
+from model_atlas.recommend.policy import RecTarget
 from model_atlas.recommend.server import (
     MAX_BODY_BYTES,
     RecommendationServer,
@@ -196,18 +196,26 @@ def test_gui_page_served_no_embedded_payload(server: RecommendationServer, servi
 
 # --- preview-from-selection (token-gated) ---
 def test_preview_selection_endpoint(server: RecommendationServer, service):
+    from model_atlas.recommend.api import _selection_hash
+
     auth = _authorize(server, service)
-    token, selected = auth["token"], auth["authorized_methods"]
+    token = auth["token"]
+    authorized = auth["authorized_methods"]
+    # NONEMPTY PROPER SUBSET is allowed, and the returned hash is the subset's
+    # own deterministic hash — not the full authorized set's hash.
+    subset = authorized[:2]
+    subset_hash = _selection_hash(subset)
+    assert subset_hash != auth["selection_hash"]  # the subsets genuinely differ
     status, data = _post(
-        server, "/api/preview-selection", {"token": token, "selected": selected}
+        server, "/api/preview-selection", {"token": token, "selected": subset}
     )
     assert status == 200
     body = _json((status, data))
     assert body["preview_id"].startswith("pv-")
-    assert body["hash"] == auth["selection_hash"]
+    assert body["hash"] == subset_hash
     assert body["plan_id"] is None  # placeholder adapters -> no verified plan
     assert body["readiness"]["verified_plan"] is False
-    assert body["selected_methods"] == selected
+    assert body["selected_methods"] == subset
 
 
 def test_preview_selection_requires_token(server: RecommendationServer, service):
@@ -220,10 +228,12 @@ def test_preview_selection_requires_token(server: RecommendationServer, service)
 
 def test_preview_selection_rejects_not_authorized(server: RecommendationServer, service):
     auth = _authorize(server, service)
+    # a method OUTSIDE the authorized set — a subset is fine but this is not
+    # authorized at all.
     status, data = _post(
         server,
         "/api/preview-selection",
-        {"token": auth["token"], "selected": ["calibration"]},  # subset
+        {"token": auth["token"], "selected": ["calibration", "exl3-primary"]},
     )
     assert status == 403
     assert _json((status, data))["code"] == "selection_not_authorized"
@@ -236,6 +246,22 @@ def test_preview_selection_rejects_unknown_token(server: RecommendationServer, s
     )
     assert status == 401
     assert _json((status, data))["code"] == "token_unknown"
+
+
+def test_preview_selection_full_set_allowed(server: RecommendationServer, service):
+    """The FULL authorized set is a valid (non-empty, all-authorized) subset and
+    still previews — its hash equals the token's authorized selection hash."""
+
+    auth = _authorize(server, service)
+    status, data = _post(
+        server,
+        "/api/preview-selection",
+        {"token": auth["token"], "selected": auth["authorized_methods"]},
+    )
+    assert status == 200
+    body = _json((status, data))
+    assert body["hash"] == auth["selection_hash"]
+    assert body["selected_methods"] == auth["authorized_methods"]
 
 
 def test_preview_selection_rejects_empty(server: RecommendationServer, service):
@@ -440,17 +466,33 @@ def test_job_validate(server: RecommendationServer, service, monkeypatch):
     assert body["stage"] == "s1"
 
 
-def test_job_lineage(server: RecommendationServer, service, monkeypatch):
-    from model_atlas.recipes.builtin import glm52_no_pruning_recipe
+def test_lineage_requires_run_id(server):
+    """recipe={} lineage is REMOVED — /lineage now requires an actual run_id."""
+    status, data = _request(server, "GET", "/lineage?recipe={}")
+    assert status == 400
+    status, _ = _request(server, "GET", "/lineage")
+    assert status == 400
 
-    recipe = glm52_no_pruning_recipe()
+
+def test_job_lineage_run_id_bound(server: RecommendationServer, service, monkeypatch):
+    """/lineage?run_id=… delegates to svc.run_lineage for an actual run."""
     monkeypatch.setattr(
-        service, "job_lineage", lambda r: {"recipe_id": "recipe-x", "lineage": True}
+        service,
+        "run_lineage",
+        lambda run_id: {"run_id": run_id, "plan_id": "plan-x", "lineage": True},
     )
-    q = urlencode({"recipe": recipe.model_dump_json()})
-    status, data = _request(server, "GET", f"/lineage?{q}")
+    status, data = _request(server, "GET", "/lineage?run_id=abc")
     assert status == 200
-    assert _json((status, data))["lineage"] is True
+    body = _json((status, data))
+    assert body["run_id"] == "abc"
+    assert body["lineage"] is True
+
+    # unknown run -> run_lineage raises (fail closed)
+    monkeypatch.setattr(
+        service, "run_lineage", lambda run_id: (_ for _ in ()).throw(KeyError("no"))
+    )
+    status, data = _request(server, "GET", "/lineage?run_id=nope")
+    assert status == 404
 
 
 def test_outputs_list(server: RecommendationServer, service, monkeypatch):
@@ -507,16 +549,13 @@ def test_loopback_allowed():
 
 
 # --- endpoint-level async start via persisted job engine (feasible seeding) ---
-def test_start_async_immediate_return_monkeypatched(server: RecommendationServer, service, tmp_path):
+def test_start_async_immediate_return_monkeypatched(
+    server: RecommendationServer, service, tmp_path
+):
     """Endpoint /api/start with a seeded executable preview returns run_id
     immediately (background worker), the job is durable (status via
     /api/jobs/<id>), and a duplicate start is rejected as replay — all through
     the real HTTP server + persisted job engine."""
-    from model_atlas.recommend.api import (
-        _AuthorizationSession,
-        _PendingPreview,
-        _selection_hash,
-    )
     from model_atlas.recipe.compiler import RecipeCompiler
     from model_atlas.recipe.schema import (
         CalibrationIdentity,
@@ -525,8 +564,11 @@ def test_start_async_immediate_return_monkeypatched(server: RecommendationServer
         SourceIdentity,
     )
     from model_atlas.recipes import CompiledPlanArtifact
-    from model_atlas.recommend.policy import RecTarget
-
+    from model_atlas.recommend.api import (
+        _AuthorizationSession,
+        _PendingPreview,
+        _selection_hash,
+    )
     # executable single-stage recipe (in-repo quant probe, pinned immutable-ish)
     src = tmp_path / "src"
     src.mkdir()
