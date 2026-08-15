@@ -699,7 +699,53 @@ def test_transactional_overwrite_preserves_old_until_validated(tmp_path):
     assert not backups  # backup removed after successful swap
 
 
-# ------------------------------------------------ W64 exporter perf defect ----
+@pytest.mark.integration
+def test_derivative_index_metadata_total_size_is_exact_output_bytes(tmp_path):
+    """The rebuilt derivative index's metadata.total_size must equal the exact
+    output tensor DATA bytes, NOT the stale source (full-503GB) value. This
+    guards against copying the source total_size through to a width-reduced
+    derivative."""
+    import struct
+
+    ckpt, _ = _glm_style_fixture(tmp_path)
+    # source index with a deliberately larger (stale) total_size than any slice
+    src_idx_path = Path(ckpt) / "model.safetensors.index.json"
+    src_idx = json.loads(src_idx_path.read_text())
+    # embed a big stale total_size in the SOURCE metadata, as the real GLM index
+    # has (464795267072)
+    src_meta = {"total_parameters": 999, "total_size": 900000000000}
+    src_idx["metadata"] = src_meta
+    src_idx_path.write_text(json.dumps(src_idx))
+    manifest = load_manifest(ckpt)
+    src_by_name = {t.name: t for t in manifest.tensors}
+
+    out = tmp_path / "idxmeta"
+    r = materialize_uniform_width(ckpt, str(out), width=16)
+    assert r.structurally_complete is True
+    out_idx = json.loads((out / "model.safetensors.index.json").read_text())
+    meta = out_idx["metadata"]
+
+    # total_size must be rebuilt to the EXACT output data bytes (sum of every
+    # tensor body). Must NOT equal the stale source 900000000000.
+    expected_total = 0
+    for sh in sorted((out / "model-*.safetensors").parent.glob("model-*.safetensors")):
+        with open(sh, "rb") as fh:
+            (hl,) = struct.unpack("<Q", fh.read(8))
+            hdr = json.loads(fh.read(hl))
+        for n, spec in hdr.items():
+            if n == "__metadata__":
+                continue
+            a, b = spec["data_offsets"]
+            expected_total += b - a
+    assert int(meta["total_size"]) == expected_total, (
+        f"total_size {meta['total_size']} != exact output bytes {expected_total}"
+    )
+    assert int(meta["total_size"]) != 900000000000, "stale source total_size leaked"
+    # total_parameters preserved through from source metadata
+    assert meta.get("total_parameters") == 999
+    # weight_map census still exact
+    assert set(out_idx["weight_map"]) == set(src_by_name)
+
 # The defect: `_stream_body_window` opened the source shard once PER window. A
 # real down tensor with 6,144 rows kept 64 channels -> 6,144*4 = 24,576 windows
 # per tensor, ~236M opens across the export. The fixed exporter opens each source

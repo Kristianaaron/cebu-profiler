@@ -733,7 +733,7 @@ def materialize_uniform_width(
                         )
             except ValueError as exc:
                 raise ValueError(f"source index/object mismatch: {exc}") from exc
-        _write_index(staging, weight_map, source_cfg, width, source)
+        _write_index(staging, weight_map, source_cfg, width, source, total_bytes)
         j("slice", f"width={width} tensors={tensor_count} bytes={total_bytes}")
     except Exception:
         # preserve staging on interruption/failure (do NOT delete)
@@ -953,20 +953,24 @@ def _plan_output_shard(
 
 def _write_index(
     staging: Path, weight_map: dict[str, str], source_cfg: dict[str, object],
-    width: int, source: Path,
+    width: int, source: Path, total_bytes: int,
 ) -> None:
     cfg = json.loads(json.dumps(source_cfg))
     cfg["moe_intermediate_size"] = width
     (staging / "config.json").write_text(json.dumps(cfg, indent=2))
-    # preserve source index metadata when rebuilding (weight_map is regenerated)
+    # Preserve any non-total_size source metadata (e.g. total_parameters),
+    # but ALWAYS rebuild total_size to the exact output tensor DATA bytes. The
+    # source total_size is the full 503 GB checkpoint and would be stale on a
+    # width-reduced derivative.
     src_meta: dict[str, object] = {}
     src_idx = source / "model.safetensors.index.json"
     if src_idx.exists():
         try:
             src_idx_d = json.loads(src_idx.read_text())
-            src_meta = src_idx_d.get("metadata", {})
+            src_meta = dict(src_idx_d.get("metadata", {}))
         except ValueError:
             src_meta = {}
+    src_meta["total_size"] = int(total_bytes)
     (staging / "model.safetensors.index.json").write_text(
         json.dumps({"metadata": src_meta, "weight_map": weight_map}, indent=2)
     )

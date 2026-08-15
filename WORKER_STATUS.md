@@ -114,6 +114,16 @@ The preserved canary resumed and completed:
 > scientific result. Measured corpus keep-maps and a maintenance-window
 > load/forward remain before any scientific/runtime-readiness claim.
 
+**Post-promotion fix (round 8a):** the promoted canary's
+`model.safetensors.index.json` `metadata.total_size` was a stale copied source
+value (464,795,267,072, the full 503 GB checkpoint). This was a real exporter
+packaging bug. `loader._write_index` now rebuilds `metadata.total_size` to the
+exact output tensor-data bytes; the already-promoted index was repaired to
+69,849,116,672 and revalidated: 47 shards, 232,385 tensors, exact
+69,849,116,672 data bytes, exact census match, `weight_map` == all shard
+headers, `moe_intermediate_size=64`. Shard payloads were NOT rewritten (shard 1
+hash still `f01ccdc7…`); `total_parameters` preserved.
+
 ## Commits (round 1–3)
 
 `97f23b0` P0 · `2846b84` P1 · `e072896`+`d3a8b22` P2 · `972dbc3` handoff · `1a8de9a`
