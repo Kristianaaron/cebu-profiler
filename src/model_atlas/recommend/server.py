@@ -2,8 +2,7 @@
 
 A dependency-light (stdlib-only) JSON API over :class:`RecommendationService`
 used by agents and local tooling. It deliberately exposes only safe,
-deterministic operations — recommendations, previews, and read-only job/lineage
-lookups — and never performs mutation outside a verified start.
+deterministic operations, and start is STRICTLY token + preview bound.
 
 Security posture:
 
@@ -12,11 +11,22 @@ Security posture:
 * Request bodies are capped at 1 MiB (``413``).
 * Profile import is server-side only: the given path MUST resolve under the
   configured ``profile_root`` (``403`` otherwise). ``..`` traversal is refused.
-* Job start fails closed: the recipe + inputs are compiled through
-  :meth:`RecommendationService.start` and any compile/verify error surfaces as a
-  ``4xx`` (never a partial start).
+* ``/api/recommend`` mints an opaque, server-side authorization token bound to
+  the canonical recommendation/profile/target/constraints and the exact
+  authorized method set.
+* ``/api/preview-selection`` requires a valid token, rejects
+  empty/unknown/not-authorized/blocked selections, and stores a verified
+  compiled artifact server-side keyed by preview; returns preview_id/plan_id/
+  hash — never a recipe payload.
+* ``/api/start`` accepts ONLY ``(token, preview_id, hash, exact same selection,
+  inputs)``. There is NO arbitrary-recipe start and NO raw-selection start.
+  Stale/mismatch/replay/unknown starts are rejected deterministically. The job
+  identity is persisted before dispatch, ``run_id`` is returned immediately,
+  and execution happens in a managed background worker (never synchronous
+  request blocking); duplicate starts are rejected as replay or return
+  deterministically.
 
-All responses are JSON; errors use ``{"error": …}``.
+All responses are JSON; errors use ``{"error": …, "code": …}``.
 """
 
 from __future__ import annotations
@@ -28,7 +38,7 @@ from typing import Any
 from urllib.parse import unquote_plus, urlparse
 
 from model_atlas.recipe.schema import CompressionRecipe
-from model_atlas.recommend.api import RecommendationService
+from model_atlas.recommend.api import AuthError, RecommendationService
 from model_atlas.recommend.policy import RecTarget
 
 # --------------------------------------------------------------------------- config
@@ -122,6 +132,8 @@ class RecommendationHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             self._dispatch_get(parsed.path, self._query(parsed.query))
+        except AuthError as exc:
+            _send_json(self, exc.status, {"error": exc.message, "code": exc.code})
         except ServerError as exc:
             _send_json(self, exc.status, {"error": exc.message})
         except KeyError as exc:
@@ -133,6 +145,8 @@ class RecommendationHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             self._route_post(parsed.path, _read_json_body(self))
+        except AuthError as exc:
+            _send_json(self, exc.status, {"error": exc.message, "code": exc.code})
         except ServerError as exc:
             _send_json(self, exc.status, {"error": exc.message})
         except KeyError as exc:
@@ -216,45 +230,44 @@ class RecommendationHandler(BaseHTTPRequestHandler):
             recipe = self._recipe_from_body(body, "recipe")
             _send_json(self, _OK, svc.preview_recipe(recipe))
         elif path == "/api/preview-selection":
-            raw = body.get("selected")
-            selected: list[str] | None = None
-            if raw is not None:
-                if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
-                    raise ServerError(_BAD_REQUEST, "'selected' must be a list of method strings")
-                selected = raw
-            _send_json(self, _OK, svc.recipe_preview(selected))
+            token = self._require_str(body, "token", "preview-selection")
+            selected = self._selected_list(body)
+            # inputs mirror exactly what start must re-supply (canonical).
+            raw_inputs = body.get("inputs")
+            inputs = raw_inputs if isinstance(raw_inputs, dict) else {}
+            _send_json(self, _OK, svc.preview_selection(token, selected, inputs=inputs))
         elif path == "/api/start":
-            if "selected" in body and "recipe" not in body:
-                raw = body.get("selected")
-                if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
-                    raise ServerError(_BAD_REQUEST, "'selected' must be a list of method strings")
-                inputs = body.get("inputs", {})
-                if not isinstance(inputs, dict):
-                    raise ServerError(_BAD_REQUEST, "'inputs' must be an object")
-                # Rebuild the deterministic editable draft server-side — the
-                # browser never holds an embedded recipe (XSS/no payload).
-                recipe = svc._selected_recipe(raw)
-                try:
-                    engine = svc.start(recipe, inputs=inputs)
-                except KeyError as exc:
-                    raise ServerError(_NOT_FOUND, f"start failed: {exc}") from exc
-                except Exception as exc:  # noqa: BLE001 — fail closed
-                    raise ServerError(_BAD_REQUEST, f"start refused: {exc}") from exc
-                _send_json(self, _OK, {"run_id": engine.run_dir.name, "status": "started"})
-                return
-            recipe = self._recipe_from_body(body, "recipe")
-            inputs = body.get("inputs", {})
-            if not isinstance(inputs, dict):
-                raise ServerError(_BAD_REQUEST, "'inputs' must be an object")
-            try:
-                engine = svc.start(recipe, inputs=inputs)
-            except KeyError as exc:
-                raise ServerError(_NOT_FOUND, f"start failed: {exc}") from exc
-            except Exception as exc:  # noqa: BLE001 — fail closed
-                raise ServerError(_BAD_REQUEST, f"start refused: {exc}") from exc
-            _send_json(self, _OK, {"run_id": engine.run_dir.name, "status": "started"})
+            # Token-bound start ONLY. The full recipe/raw-selection start paths
+            # are REMOVED: a start must reference a token + the exact preview
+            # it was compiled for (preview_id + selection hash + exact same
+            # selection + inputs). Anything else is rejected, never a partial
+            # or arbitrary start.
+            token = self._require_str(body, "token", "start")
+            preview_id = self._require_str(body, "preview_id", "start")
+            hash_value = self._require_str(body, "hash", "start")
+            selected = self._selected_list(body)
+            raw_inputs = body.get("inputs")
+            inputs = raw_inputs if isinstance(raw_inputs, dict) else {}
+            result = svc.start_authorized(
+                token, preview_id, hash_value, selected, inputs=inputs
+            )
+            _send_json(self, _OK, result)
         else:
             raise ServerError(_NOT_FOUND, f"no such route: {path}")
+
+    @staticmethod
+    def _require_str(body: dict[str, Any], key: str, route: str) -> str:
+        val = body.get(key)
+        if not isinstance(val, str) or not val:
+            raise ServerError(_BAD_REQUEST, f"{route} requires '{key}'")
+        return val
+
+    @staticmethod
+    def _selected_list(body: dict[str, Any]) -> list[str]:
+        raw = body.get("selected")
+        if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+            raise ServerError(_BAD_REQUEST, "'selected' must be a list of method strings")
+        return raw
 
     def _post_import(self, svc: RecommendationService, body: dict[str, Any]) -> None:
         profile_path = body.get("path")
@@ -285,15 +298,15 @@ class RecommendationHandler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             memory_target_gib = default_mem
         raw_constraints = body.get("constraints")
-        constraints: dict[str, Any] = raw_constraints if isinstance(raw_constraints, dict) else {}
-        allow_pruning = bool(constraints.get("allow_pruning", False))
-        rec = svc.recommend(
+        constraints: dict[str, object] = (
+            raw_constraints if isinstance(raw_constraints, dict) else {}
+        )
+        result = svc.authorize(
             profile_id,
             RecTarget(memory_target_gib=memory_target_gib),
-            allow_pruning=allow_pruning,
+            constraints=constraints,
         )
-        payload = rec.to_dict() if hasattr(rec, "to_dict") else rec
-        _send_json(self, _OK, {"recommendation": payload})
+        _send_json(self, _OK, result)
 
     @staticmethod
     def _recipe_from_json(payload: str) -> CompressionRecipe:

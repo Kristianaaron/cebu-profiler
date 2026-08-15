@@ -100,9 +100,20 @@ blocked methods are greyed with the exact reason.</p>
 const esc = (v) => { const el = document.createElement('div'); el.textContent = String(v ?? ''); return el.textContent; };
 const $ = (id) => document.getElementById(id);
 
+let authToken = null; // opaque token bound to the current recommendation
 let reco = null;      // last recommendation payload
 let preview = null;   // last preview-from-selection payload
 let selection = new Set(); // user-toggled authorized methods
+
+// ANY change to profile/target/constraints/checkbox/recommendation invalidates
+// the preview AND the token binding: Compress stays disabled until a fresh
+// recommend -> preview round-trip matches the current selection hash.
+function invalidatePreview(reason) {
+  preview = null;
+  updateCompress();
+  $('previewStatus').textContent = reason ? 'preview invalidated: ' + reason : '';
+  $('recipeText').textContent = '';
+}
 
 function setRecoBtn(msg) { $('recoMeta').textContent = msg ? ' ' + msg : ''; }
 
@@ -137,10 +148,13 @@ async function recommend() {
     if (!r.ok) throw new Error((data && data.error) || ('recommend ' + r.status));
   } catch (e) {
     setRecoBtn('recommend failed: ' + esc(e.message));
+    authToken = null;
     return;
   }
+  authToken = data.token;       // opaque authorization token (server-bound)
   reco = data.recommendation || {};
-  selection = new Set();
+  selection = new Set();        // fresh selection; token now awaited
+  invalidatePreview('new recommendation');
   renderRec(reco);
   setRecoBtn('' + (reco.recommendation_id || ''));
 }
@@ -160,7 +174,8 @@ function renderRec(rec) {
     cb.disabled = isBlocked;
     cb.checked = !isBlocked;
     cb.addEventListener('change', () => {
-      if (cb.checked) selection.add(m.method); else selection.delete(m.method);
+      if (cb.checked) { selection.add(m.method); invalidatePreview('selection changed'); }
+      else { selection.delete(m.method); invalidatePreview('selection changed'); }
     });
     top.appendChild(cb);
     const b = document.createElement('b'); b.textContent = m.method; top.appendChild(b);
@@ -191,37 +206,38 @@ function renderRec(rec) {
 }
 
 async function previewSelection() {
+  if (!authToken) { $('previewStatus').textContent = 'preview requires a valid recommendation token (recommend first)'; return; }
   const selArr = Array.from(selection);
   $('previewStatus').textContent = 'previewing ' + selArr.length + ' method(s)…';
   try {
     const r = await fetch('/api/preview-selection', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ selected: selArr })
+      body: JSON.stringify({ token: authToken, selected: selArr })
     });
     const data = await r.json();
     if (!r.ok) throw new Error((data && data.error) || ('preview ' + r.status));
     preview = data;
     renderPreview(preview);
   } catch (e) {
+    preview = null;
     $('previewStatus').textContent = 'preview failed: ' + esc(e.message);
+    updateCompress();
   }
 }
 
 function renderPreview(p) {
   $('recipeText').textContent = JSON.stringify({
-    recipe_id: p.recipe_id,
-    compiles: p.compiles,
-    stages: p.stages ? p.stages.map(s => s.id) : [],
-    compile_blockers: p.compile_blockers || [],
+    preview_id: p.preview_id,
+    plan_id: p.plan_id,
+    hash: p.hash,
     readiness: p.readiness || {},
-    diff: p.diff || {}
+    selected_methods: p.selected_methods || []
   }, null, 2);
-  const ok = p.compiles && p.readiness && p.readiness.verified_plan
-    && p.readiness.pins_pass && p.readiness.executable;
+  const ok = p.readiness && p.readiness.executable && p.plan_id;
   $('previewStatus').textContent = ok
-    ? 'ready: verified plan ' + ((p.plan && p.plan.plan_id) || '')
-    : 'preview ' + (p.compiles ? 'compiles but not executable' : 'does not compile');
+    ? 'ready: verified plan ' + ((p.plan_id) || '')
+    : 'preview stored (selected id=' + (p.preview_id || '?') + ') but no verified executable plan yet';
   updateCompress();
 }
 
@@ -241,25 +257,29 @@ function updateCompress() {
 
 function computeGates() {
   const reasons = [];
+  if (!authToken) reasons.push('no valid recommendation token (recommend first)');
   if (!reco) reasons.push('no recommendation computed yet');
   if (reco && (!reco.methods || reco.methods.length === 0)) reasons.push('no policy-authorized methods recommended');
   if (reco && reco.blocked_methods && reco.blocked_methods.length)
     reasons.push(reco.blocked_methods.length + ' method(s) fatally blocked');
   if (!selection || selection.size === 0) reasons.push('no methods selected for the recipe');
   if (!preview) reasons.push('no preview: build a recipe draft from a selection');
-  if (preview && !preview.compiles) reasons.push('recipe draft does not compile');
-  if (preview && preview.compiles && !(preview.readiness && preview.readiness.verified_plan))
-    reasons.push('no verified executable plan produced');
-  if (preview && preview.compiles && preview.readiness && preview.readiness.verified_plan && !preview.readiness.pins_pass)
-    reasons.push('verified plan live pins do not pass');
+  if (preview && preview.hash && preview.selected_methods
+      && JSON.stringify([...selection].sort()) !== JSON.stringify([...preview.selected_methods].sort()))
+    reasons.push('selection changed since preview — re-preview');
+  if (preview && !(preview.readiness && preview.readiness.executable))
+    reasons.push('no verified executable plan produced for this selection');
   const ready = reasons.length === 0;
   return { ready, reasons };
 }
 
 $('recoBtn').addEventListener('click', recommend);
 $('previewBtn').addEventListener('click', previewSelection);
+// profile / target / constraints changes invalidate the preview binding
+$('profileSel').addEventListener('change', () => invalidatePreview('profile changed'));
+$('mem').addEventListener('input', () => invalidatePreview('memory target changed'));
 $('compressBtn').addEventListener('click', async () => {
-  if (!preview || !preview.recipe_id) return;
+  if (!authToken || !preview) return;
   const g = computeGates();
   if (!g.ready) { updateCompress(); return; }
   $('jobStatus').textContent = 'starting verified plan…';
@@ -268,7 +288,7 @@ $('compressBtn').addEventListener('click', async () => {
     const r = await fetch('/api/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ selected: selArr, inputs: {} })
+      body: JSON.stringify({ token: authToken, preview_id: preview.preview_id, hash: preview.hash, selected: selArr, inputs: {} })
     });
     const data = await r.json();
     if (!r.ok) throw new Error((data && data.error) || ('start ' + r.status));
@@ -286,31 +306,35 @@ function setOutput(text) { $('output').textContent = text || ''; }
 async function pollRun(runId) {
   const enc = encodeURIComponent(runId);
   try {
-    const r = await fetch('/api/jobs/' + enc);
-    const data = await r.json();
-    if (!r.ok) throw new Error((data && data.error) || ('status ' + r.status));
-    const st = data.status || '';
-    setOutput(JSON.stringify(data, null, 2));
+    const all = await Promise.allSettled([
+      fetch('/api/jobs/' + enc),
+      fetch('/api/jobs/' + enc + '/events')
+    ]);
+    const statusData = all[0].status === 'fulfilled' ? await all[0].value.json() : { error: 'status unavailable' };
+    const events = all[1].status === 'fulfilled' ? await all[1].value.json() : { events: [] };
+    const st = statusData.status || '';
+    setOutput(JSON.stringify({ status: statusData, events: events.events || [] }, null, 2));
     $('jobStatus').textContent = 'run ' + runId + ' status: ' + st;
     const term = String(st).toUpperCase();
-    if (term === 'DONE' || term === 'COMPLETED' || term === 'FAILED' || term === 'FAILED_TERMINAL' || term === 'CANCELLED' || term === 'CANCELED') {
-      fetchLineage(runId);
-      return;
+    if (term === 'DONE' || term === 'COMPLETED' || term === 'COMPLETED_WITH_WARNINGS' || term === 'FAILED' || term === 'FAILED_TERMINAL' || term === 'FAILED_RECOVERABLE' || term === 'CANCELLED' || term === 'CANCELED') {
+      fetchEvidence(runId);
+      return; // STOP polling at terminal state
     }
-    setTimeout(() => pollRun(runId), 2000);
+    setTimeout(() => pollRun(runId), 1500);
   } catch (e) {
     $('jobStatus').textContent = 'poll error: ' + esc(e.message);
+    setTimeout(() => pollRun(runId), 1500);
   }
 }
 
-async function fetchLineage(runId) {
-  try {
-    const r = await fetch('/api/jobs/' + encodeURIComponent(runId));
-    const data = await r.json();
-    setOutput(JSON.stringify({ status: data, } , null, 2));
-  } catch (e) {
-    setOutput('lineage/outputs unavailable: ' + esc(e.message));
-  }
+async function fetchEvidence(runId) {
+  // fetch + render validate/lineage/outputs for the terminal run
+  const enc = encodeURIComponent(runId);
+  const status = await (await fetch('/api/jobs/' + enc)).json();
+  const outputs = await (await fetch('/outputs?run_id=' + enc)).json();
+  let lineage = { note: 'unavailable' };
+  try { lineage = await (await fetch('/lineage?recipe={}')).json(); } catch (e) { /* best-effort */ }
+  setOutput(JSON.stringify({ status, outputs: outputs.outputs || [], lineage }, null, 2));
 }
 
 updateCompress();

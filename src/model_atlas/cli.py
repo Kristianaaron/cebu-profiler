@@ -637,12 +637,24 @@ def recommend_cli(
     memory_target_gib: float = typer.Option(115.0, "--memory-target-gib"),
 ) -> None:
     """Profile -> Recommend: deterministic versioned recommendation (no_pruning
-    default); writes machine-readable recommendation JSON."""
+    default) plus an opaque authorization token bound to the recommendation, so
+    a later preview/start can be authorized server-side. Writes machine-readable
+    JSON (recommendation + token + authorized method set + selection hash)."""
     from model_atlas.recommend import RecommendationService, RecTarget
 
     svc = RecommendationService(profile_root=profiles_dir)
-    rec = svc.recommend(profile or "default", RecTarget(memory_target_gib=memory_target_gib))
-    payload = rec.to_dict()
+    result = svc.authorize(
+        profile or "default", RecTarget(memory_target_gib=memory_target_gib)
+    )
+    payload = {
+        "token": result["token"],
+        "recommendation_id": result["recommendation_id"],
+        "profile_id": result["profile_id"],
+        "no_pruning": result["no_pruning"],
+        "authorized_methods": result["authorized_methods"],
+        "selection_hash": result["selection_hash"],
+        "recommendation": result["recommendation"],
+    }
     print(json.dumps(payload, indent=2, sort_keys=True))
     if out:
         Path(out).parent.mkdir(parents=True, exist_ok=True)
@@ -667,7 +679,9 @@ def recommend_gui(
 ) -> None:
     """Serve the local Profile -> Recommend -> Review -> Compress -> Monitor
     browser GUI. Static HTML/CSS/JS (no embedded data); the browser fetches
-    /api/profiles and /api/recommend from this loopback server."""
+    /api/profiles, /api/recommend (minting an opaque token), token-bound
+    /api/preview-selection, and token+preview-bound /api/start. Starts execute
+    in a managed background worker and poll status/events until terminal."""
     from model_atlas.recommend import RecommendationService
     from model_atlas.recommend.server import serve_forever
 

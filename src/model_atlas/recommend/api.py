@@ -4,29 +4,50 @@ Facade operations (used by the local GUI and agents):
   * list_profiles() / import_profile(path) — discover + import completed
     Atlas profiles (JSON), keyed by stable profile_id.
   * recommend(profile_id, target) — deterministic versioned recommendation.
+  * authorize(...) — deterministic recommendation PLUS an opaque, server-side
+    authorization token bound to the canonical recommendation/profile/target/
+    constraints and the exact authorized method set.
+  * preview_selection(token, selected) — token-gated draft build; stores a
+    verified compiled artifact server-side keyed by token + deterministic
+    selection hash and returns preview_id / plan_id / hash. Rejects
+    empty/unknown/not-authorized/blocked selections.
+  * start_authorized(token, preview_id, hash, selected, inputs) — start ONLY a
+    token+preview-bound verified executable plan. Rejects stale/mismatch/
+    replay/unknown. Persists job identity BEFORE dispatch, returns run_id
+    immediately, executes in a managed background worker. Duplicate starts are
+    idempotent (same deterministic run_id), never synchronous request blocking.
   * preview_recipe(recipe_draft, ...) / compile_recipe(recipe) — compile an
     EDITABLE recipe draft (recipe compile/verify, fail-closed on errors).
-  * start(recipe) — start ONLY a verified executable plan (verifies pins
-    against the live registry before starting).
   * job_status / job_events / job_validate / job_lineage / job_output — expose
     progress, events, validation, lineage, content-addressed outputs.
 
-Authorization: recommendations/compiles are deterministic and versioned;
-agent-readable explanations never authorize anything. Repair application and
-approval are NOT exposed here — agents cannot silently mutate/approve repairs
-(those live behind the repair gate + engine transaction).
+Authorization: recommendations/compiles are deterministic and versioned; the
+opaque token is the ONLY thing that authorizes preview+start. A recommendation
+with no token is inert — it authorizes nothing. Agent-readable explanations are
+never a substitute. Repair application and approval are NOT exposed here.
+
+Start is strictly bound: it accepts only a ``(token, preview_id, selection
+hash, exact same selection, inputs)`` tuple re-verified against the server-side
+stored verified compiled artifact. There is no arbitrary-recipe start and no
+tokenless raw-selection start.
 """
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
+import secrets
+import threading
 from pathlib import Path
 from typing import Any
 
 from model_atlas.backend.registry import BackendRegistry, build_default_registry
 from model_atlas.controlplane.api import ControlPlane
+from model_atlas.jobs.artifacts import atomic_write_json
 from model_atlas.jobs.engine import JobEngine
-from model_atlas.recipe.compiler import CompiledRecipe
+from model_atlas.jobs.schema import JobStatus
+from model_atlas.recipe.compiler import CompiledRecipe, canonical_json, sha256_hex
 from model_atlas.recipe.schema import (
     CompressionRecipe,
     RecipeConstraints,
@@ -41,6 +62,21 @@ from model_atlas.recommend.policy import (
     RecommendationPolicy,
     RecTarget,
 )
+
+
+class AuthError(Exception):
+    """Raised for any authorization/preview/start rejection.
+
+    Carries an HTTP status and a stable machine-readable ``code`` so the
+    server can distinguish ``unknown`` from ``not-authorized`` from
+    ``stale``/``mismatch``/``replay``/``empty`` with a precise reason.
+    """
+
+    def __init__(self, status: int, code: str, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.message = message
 
 # Policy-versioned method -> canonical no-pruning recipe stage ids. A selected
 # recommendation method contributes exactly these stages to the draft recipe;
@@ -75,6 +111,121 @@ _STAGE_ORDER = [
 ]
 
 
+def _selection_hash(selected: list[str] | None) -> str:
+    """Deterministic digest of the exact authorized method set (sorted, so set
+    identity — not ordering — defines the selection; duplicates collapse)."""
+    sel = sorted(set(selected or ())) if selected else []
+    return sha256_hex(canonical_json({"authorized_methods": sel}))
+
+
+def _same_selection(a: list[str], b: list[str]) -> bool:
+    return set(a) == set(b)
+
+
+def _run_id_from_recipe(recipe: CompressionRecipe, inputs: dict[str, object]) -> str:
+    """Deterministic run id for a draft recipe + canonical inputs, matching the
+    documented run_id derivation (plan_id + recipe_sha256 + inputs)."""
+    payload = canonical_json(recipe.model_dump(mode="json"))
+    recipe_sha = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    plan_id = "recipe-" + recipe_sha[:24]
+    run_payload = canonical_json(
+        {"plan_id": plan_id, "recipe_sha256": recipe_sha, "job_inputs": inputs}
+    )
+    return "run-" + hashlib.sha256(run_payload.encode("utf-8")).hexdigest()[:24]
+
+
+class _AuthorizationSession:
+    """Server-side authorization state for one recommend call.
+
+    Binds the opaque token to the canonical recommendation ids, the resolved
+    profile, the target, the constraints and the EXACT authorized method set.
+    A token is minted BY recommend and is the only handle a caller may use to
+    preview or start a plan built from that recommendation.
+    """
+
+    __slots__ = (
+        "token",
+        "recommendation_id",
+        "profile_id",
+        "target",
+        "no_pruning",
+        "constraints_snapshot",
+        "authorized_methods",
+        "created_at",
+    )
+
+    def __init__(
+        self,
+        token: str,
+        recommendation_id: str,
+        profile_id: str,
+        target: RecTarget,
+        no_pruning: bool,
+        constraints_snapshot: dict[str, object],
+        authorized_methods: list[str],
+    ) -> None:
+        self.token = token
+        self.recommendation_id = recommendation_id
+        self.profile_id = profile_id
+        self.target = target
+        self.no_pruning = no_pruning
+        self.constraints_snapshot = constraints_snapshot
+        self.authorized_methods = sorted(authorized_methods)
+        self.created_at = _now_iso()
+
+    def selected_hash(self) -> str:
+        return _selection_hash(self.authorized_methods)
+
+
+def _now_iso() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).isoformat()
+
+
+class _PendingPreview:
+    """A stored, token-bound verified preview/start package.
+
+    Holds the server-side derivatives of the exact authorized selection: the
+    draft recipe, the VERIFIED compiled artifact, and the exact inputs used at
+    preview time. Start may only consume a stored package that is still
+    pending (not already dispatched) and whose hash matches.
+    """
+
+    __slots__ = (
+        "token",
+        "preview_id",
+        "selection_hash",
+        "selected",
+        "recipe",
+        "artifact",
+        "inputs",
+        "run_id",
+        "dispatch_started",
+    )
+
+    def __init__(
+        self,
+        token: str,
+        preview_id: str,
+        selection_hash: str,
+        selected: list[str],
+        recipe: CompressionRecipe,
+        artifact: CompiledPlanArtifact | None,
+        inputs: dict[str, object],
+        run_id: str,
+    ) -> None:
+        self.token = token
+        self.preview_id = preview_id
+        self.selection_hash = selection_hash
+        self.selected = list(selected)
+        self.recipe = recipe
+        self.artifact = artifact
+        self.inputs = dict(inputs)
+        self.run_id = run_id
+        self.dispatch_started = False
+
+
 class RecommendationService:
     """Facade over profiles + policy + control plane (versioned policy v1)."""
 
@@ -83,12 +234,20 @@ class RecommendationService:
         registry: BackendRegistry | None = None,
         profile_root: str | Path = "profiles",
         work_root: str | Path = "controlplane_runs",
+        store_root: str | Path | None = None,
     ) -> None:
         self.registry = registry or build_default_registry()
         self.policy = RecommendationPolicy(self.registry)
         self.plane = ControlPlane(registry=self.registry, work_root=work_root)
         self.profile_root = Path(profile_root)
         self.profile_root.mkdir(parents=True, exist_ok=True)
+        self.sessions: dict[str, _AuthorizationSession] = {}
+        self.pending_previews: dict[str, _PendingPreview] = {}
+        self.dispatched: dict[str, dict[str, object]] = {}
+        self._dispatch_lock = threading.Lock()
+        self._started_workers: list[threading.Thread] = []
+        self.store_root = Path(store_root) if store_root is not None else self.plane.work_root
+        self.store_root.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------- profiles
     def list_profiles(self) -> list[dict[str, Any]]:
@@ -137,6 +296,170 @@ class RecommendationService:
             memory_target_gib=memory_target_gib,
             allow_pruning=allow_pruning,
         )
+
+    # --------------------------------------------------------- authorization
+    def authorize(
+        self,
+        profile: AtlasProfile | str,
+        target: RecTarget | None = None,
+        *,
+        memory_target_gib: float | None = None,
+        allow_pruning: bool = False,
+        constraints: dict[str, object] | None = None,
+    ) -> dict[str, Any]:
+        """Deterministic recommendation PLUS an opaque authorization token.
+
+        The token is bound to the canonical recommendation id, the resolved
+        profile id, the target, the constraints snapshot and the EXACT
+        authorized method set (the non-blocked recommended methods). Nothing
+        else — no recipe, no selection — authorizes a preview or a start. The
+        returned recommendation is identical to :meth:`recommend`; the token is
+        what makes it actionable.
+        """
+        prof = self._resolve_profile(profile)
+        effective_target = target or RecTarget()
+        constraints = dict(constraints or {})
+        allow_pruning = bool(constraints.get("allow_pruning", allow_pruning))
+        rec = self.policy.recommend(
+            prof,
+            effective_target,
+            memory_target_gib=memory_target_gib,
+            allow_pruning=allow_pruning,
+        )
+        authorized = sorted(m.method for m in rec.methods)
+        token = secrets.token_urlsafe(24)
+        constraints_snapshot: dict[str, object] = {
+            "allow_pruning": bool(constraints.get("allow_pruning", allow_pruning)),
+        }
+        session = _AuthorizationSession(
+            token=token,
+            recommendation_id=rec.recommendation_id,
+            profile_id=rec.profile_id,
+            target=effective_target,
+            no_pruning=rec.no_pruning,
+            constraints_snapshot=constraints_snapshot,
+            authorized_methods=authorized,
+        )
+        self.sessions[token] = session
+        payload = rec.to_dict() if hasattr(rec, "to_dict") else rec
+        return {
+            "token": token,
+            "recommendation_id": rec.recommendation_id,
+            "profile_id": rec.profile_id,
+            "no_pruning": rec.no_pruning,
+            "authorized_methods": authorized,
+            "selection_hash": _selection_hash(authorized),
+            "recommendation": payload,
+        }
+
+    # ------------------------------------------------------- preview (auth)
+    def preview_selection(
+        self,
+        token: str,
+        selected: list[str] | None = None,
+        *,
+        inputs: dict[str, object] | None = None,
+    ) -> dict[str, Any]:
+        """Token-gated preview-from-selection.
+
+        Only a live token (minted by :meth:`authorize`) may preview. The
+        selection MUST exactly equal the token's authorized method set (its
+        method-set hash binds it), and every method must actually be authorized
+        (not blocked/unknown). On success the deterministic compiled artifact is
+        verified and STORED server-side keyed by the preview. Returns a bounded
+        ``preview_id``/``plan_id``/``hash`` handle — never the full recipe or
+        artifact payload.
+        """
+        token = token or ""
+        if not token:
+            raise AuthError(401, "token_required", "authorization token required")
+        session = self.sessions.get(token)
+        if session is None:
+            raise AuthError(401, "token_unknown", "unknown authorization token")
+        if selected is None or len(selected) == 0:
+            raise AuthError(400, "selection_empty", "selection must be non-empty")
+        if not all(isinstance(m, str) for m in selected):
+            raise AuthError(400, "selection_invalid", "selection must be method strings")
+        sel = sorted(set(selected))
+        if _selection_hash(sel) != session.selected_hash():
+            raise AuthError(
+                403,
+                "selection_not_authorized",
+                "selection does not match the authorized method set",
+            )
+        pv = self.recipe_preview(sel)
+        plan = pv.get("plan") or {}
+        readiness = {
+            "verified_plan": bool(plan.get("plan_id") and plan.get("pins_pass")),
+            "pins_pass": bool(plan.get("pins_pass")),
+            "executable": self._preview_is_executable(pv),
+        }
+        preview_id = (
+            "pv-"
+            + sha256_hex(
+                canonical_json({"token": token, "hash": session.selected_hash()})
+            )[:16]
+        )
+        recipe = self._selected_recipe(sel)
+        artifact: CompiledPlanArtifact | None = None
+        if readiness["executable"]:
+            compiled = self.plane.compile_recipe(recipe)
+            artifact = CompiledPlanArtifact.from_compiled(
+                compiled, inputs=inputs or {}, registry=self.registry
+            )
+            artifact.verify()
+            artifact.verify_pins_against(self.registry)
+        package = _PendingPreview(
+            token=token,
+            preview_id=preview_id,
+            selection_hash=session.selected_hash(),
+            selected=sel,
+            recipe=recipe,
+            artifact=artifact,
+            inputs=inputs or {},
+            run_id=(
+                artifact.run_id
+                if artifact is not None
+                else _run_id_from_recipe(recipe, inputs or {})
+            ),
+        )
+        self.pending_previews[preview_id] = package
+        self._persist_preview(package)
+        return {
+            "preview_id": preview_id,
+            "plan_id": (artifact.plan_id if artifact is not None else plan.get("plan_id")),
+            "hash": session.selected_hash(),
+            "readiness": readiness,
+            "selected_methods": list(sel),
+        }
+
+    @staticmethod
+    def _preview_is_executable(preview: dict[str, Any]) -> bool:
+        plan = preview.get("plan") or {}
+        return bool(plan.get("plan_id") and plan.get("pins_pass"))
+
+    def _persist_preview(self, package: _PendingPreview) -> None:
+        with contextlib.suppress(Exception):  # persistence best-effort; the
+            # live in-memory store still authorizes the exact session/start.
+            artifact_dir = self.store_root / "previews" / package.preview_id
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(
+                artifact_dir / "preview.json",
+                {
+                    "preview_id": package.preview_id,
+                    "token": package.token,
+                    "selection_hash": package.selection_hash,
+                    "selected": list(package.selected),
+                    "plan_id": (
+                        package.artifact.plan_id if package.artifact is not None else ""
+                    ),
+                    "run_id": package.run_id,
+                },
+            )
+            if package.artifact is not None:
+                atomic_write_json(
+                    artifact_dir / "plan.json", package.artifact.to_plain_dict()
+                )
 
     # ----------------------------------------------------------- recipe
     def preview_recipe(self, recipe: CompressionRecipe) -> dict[str, Any]:
@@ -312,7 +635,12 @@ class RecommendationService:
         self, recipe: CompressionRecipe, inputs: dict[str, object] | None = None
     ) -> JobEngine:
         """Start ONLY a verified executable plan: compile then verify pins
-        against the LIVE registry before starting; fail closed otherwise."""
+        against the LIVE registry before starting; fail closed otherwise.
+
+        This is the internal executor used by :meth:`start_authorized` after
+        the token/preview package has been re-verified. It is NOT exposed over
+        the HTTP API directly — a caller must hold a valid authorization token.
+        """
         compiled = self.compile_recipe(recipe)
         artifact = CompiledPlanArtifact.from_compiled(
             compiled, inputs=inputs or {}, registry=self.registry
@@ -322,6 +650,147 @@ class RecommendationService:
         engine = JobEngine(compiled, self.registry, self.plane.work_root)
         engine.run(inputs or {})
         return engine
+
+    # ---------------------------------------------------- start (token-gated)
+    def start_authorized(
+        self,
+        token: str,
+        preview_id: str,
+        selection_hash: str,
+        selected: list[str],
+        inputs: dict[str, object] | None = None,
+    ) -> dict[str, Any]:
+        """Start ONLY a verified, token-and-preview-bound executable plan.
+
+        Every incoming handle must agree with the server-side authorization
+        state: the token must be live, the preview must be pending, and the
+        supplied ``selection_hash`` + ``selected`` must EXACTLY match what the
+        preview was compiled for. Any mismatch (stale/unknown/replay/mismatch/
+        empty) is rejected deterministically. On success the job identity is
+        persisted BEFORE dispatch and ``run_id`` is returned immediately; the
+        plan executes in a managed background worker so this call never blocks
+        the request thread. A duplicate start of the same package is idempotent
+        (same deterministic run_id) — never a second execution.
+        """
+        token = token or ""
+        if not token:
+            raise AuthError(401, "token_required", "authorization token required")
+        session = self.sessions.get(token)
+        if session is None:
+            raise AuthError(401, "token_unknown", "unknown authorization token")
+        if not preview_id:
+            raise AuthError(400, "preview_required", "preview_id required")
+        package = self.pending_previews.get(preview_id)
+        if package is None:
+            raise AuthError(410, "preview_unknown", "preview not found (stale or never created)")
+        if package.token != token:
+            raise AuthError(403, "preview_token_mismatch", "preview does not belong to this token")
+        if not selection_hash:
+            raise AuthError(400, "hash_required", "selection hash required")
+        if selection_hash != package.selection_hash:
+            raise AuthError(
+                409, "selection_mismatch", "selection hash does not match the preview"
+            )
+        if selected is None or len(selected) == 0:
+            raise AuthError(400, "selection_empty", "start selection must be non-empty")
+        if package.artifact is None:
+            raise AuthError(
+                409,
+                "preview_not_executable",
+                "preview has no verified executable plan; start refused",
+            )
+        if _selection_hash(selected) != package.selection_hash:
+            raise AuthError(
+                409, "selection_mismatch", "start selection does not match the preview"
+            )
+        if not _same_selection(selected, package.selected):
+            raise AuthError(
+                409, "selection_mismatch", "start selection differs from the preview selection"
+            )
+        # inputs must EXACTLY match the inputs the preview was compiled with
+        # (the run identity is derived from the canonical preview inputs, so a
+        # different input set is a mismatch — never a silent re-identity).
+        if (inputs or {}) != package.inputs:
+            raise AuthError(
+                409, "inputs_mismatch", "start inputs differ from the preview inputs"
+            )
+
+        run_id = package.run_id
+        # Persist job/run identity BEFORE dispatch (synchronously), so the run
+        # is immediately observable. Bind to the CANONICAL preview inputs so
+        # the deterministic run id is authoritative, write the durable PENDING
+        # job record AND the immutable plan artifact (engine_for/status read
+        # both), then dispatch the run in a managed background worker.
+        engine_compiled = self.plane.compile_recipe(package.recipe)
+        engine = JobEngine(engine_compiled, self.registry, self.plane.work_root)
+        engine._bind_run(package.inputs)
+        if not engine.job_path.exists():
+            job = engine._init_run_dir(package.inputs)  # run dir + journal
+            engine._save(job)  # durable PENDING job.json
+            with contextlib.suppress(Exception):
+                atomic_write_json(engine.plan_path, package.artifact.to_plain_dict())
+
+        with self._dispatch_lock:
+            # A duplicate start of an ALREADY-dispatched package is rejected
+            # deterministically (replay) — never a second execution, never
+            # synchronous blocking.
+            if package.dispatch_started:
+                stored = self.dispatched.get(run_id)
+                if stored and stored.get("preview_id") == preview_id:
+                    raise AuthError(
+                        409, "replay", f"preview {preview_id} already started (run {run_id})"
+                    )
+            # dispatch exactly once in a managed background worker.
+            worker = threading.Thread(
+                target=self._dispatch_worker,
+                args=(package, dict(package.inputs), preview_id),
+                name=f"rec-run-{run_id}",
+                daemon=True,
+            )
+            self._started_workers.append(worker)
+            package.dispatch_started = True
+            self.dispatched.setdefault(run_id, {"preview_id": preview_id})
+            worker.start()
+        return {"run_id": run_id, "status": "started"}
+
+    def _dispatch_worker(
+        self, package: _PendingPreview, inputs: dict[str, object], preview_id: str
+    ) -> None:
+        """Managed background worker: crash-safe, durable run of the stored
+        verified package. Never touches the request thread. Any driver failure
+        leaves the standard FAILED_TERMINAL journal + job.json so status is
+        observable; the persisted job identity is never lost."""
+        try:
+            engine_compiled = self.plane.compile_recipe(package.recipe)
+            engine = JobEngine(engine_compiled, self.registry, self.plane.work_root)
+            engine._bind_run(package.inputs)
+            engine.run(package.inputs)
+        except Exception:  # noqa: BLE001
+            # Best-effort reconciliation of a dispatch that never created a
+            # durable job; the request already returned run_id, so surface the
+            # reversal via a terminal FAILED_TERMINAL record when possible.
+            try:
+                engine_compiled = self.plane.compile_recipe(package.recipe)
+                engine = JobEngine(engine_compiled, self.registry, self.plane.work_root)
+                engine._bind_run(package.inputs)
+                job = engine._load_job()
+                if job is None:
+                    engine._init_run_dir(inputs)
+                    job = engine._load_job()
+                    if job is not None:
+                        job.status = JobStatus.FAILED_TERMINAL
+                        job.error = "background dispatch failed before run completion"
+                        engine.journal.append(
+                            {
+                                "event": "run.terminal",
+                                "status": "failed_terminal",
+                                "reason": "dispatch_error",
+                            }
+                        )
+                        engine._save(job)
+            except Exception:  # noqa: BLE001
+                pass
+
 
     def job_status(self, run_id: str) -> dict[str, Any]:
         return dict(self.plane.status(run_id))

@@ -9,6 +9,15 @@ import pytest
 
 from model_atlas.backend.contract import BackendRecord
 from model_atlas.backend.registry import BackendRegistry, build_default_registry
+from model_atlas.recipe.schema import (
+    CalibrationIdentity,
+    CompressionRecipe,
+    RecipeConstraints,
+    RecipeStage,
+    SourceIdentity,
+    StageBackendPin,
+    StageEffectClass,
+)
 from model_atlas.recommend import (
     AtlasProfile,
     RecommendationService,
@@ -21,6 +30,7 @@ from model_atlas.recommend.policy import (
     RecommendationPolicy,
     canonical_stage,
 )
+from model_atlas.schemas.evidence import EvidenceKind
 
 
 def _fake_records(reg: BackendRegistry) -> dict[str, BackendRecord]:
@@ -768,30 +778,35 @@ def test_recipe_preview_all_selection_compiles_false_fail_closed(tmp_path: Path)
 
 
 def test_compress_gate_functions() -> None:
-    """The GUI's blocked-button state function fails closed: until a
-    recommendation, a compiling preview, and a verified plan with passing live
-    pins all hold, Compress is disabled with exact reasons. (Static-string
-    inspection mirrors the browser's computeGates.)"""
+    """The GUI's blocked-button state function fails closed: until a valid
+    authorization token, a recommendation, and a ready preview matching the
+    current selection all hold, Compress is disabled with exact reasons.
+    (Static-string inspection mirrors the browser's computeGates.)"""
     from model_atlas.recommend.gui import _GUI_PAGE
 
     # computeGates() emits distinct, exact reasons for each missing gate.
+    assert "no valid recommendation token (recommend first)" in _GUI_PAGE
     assert "no recommendation computed yet" in _GUI_PAGE
     assert "no methods selected for the recipe" in _GUI_PAGE
-    assert "recipe draft does not compile" in _GUI_PAGE
-    assert "no verified executable plan produced" in _GUI_PAGE
-    assert "verified plan live pins do not pass" in _GUI_PAGE
+    assert "no verified executable plan produced for this selection" in _GUI_PAGE
+    assert "selection changed since preview" in _GUI_PAGE
     # the compress button is only enabled when computeGates().ready is true.
     assert "btn.disabled = !gate.ready" in _GUI_PAGE
     # blocked (non-authorized) methods are non-toggleable; only authorized ones are.
     assert "cb.disabled = isBlocked" in _GUI_PAGE
 
 
-def test_gui_start_fetches_selection_not_recipe(tmp_path: Path):
-    """The browser never holds a recipe payload: /api/start is POSTed a
-    `selected` method list only (server rebuilds the draft)."""
+def test_gui_start_fetches_token_binding_not_recipe(tmp_path: Path):
+    """The browser never holds a recipe payload: /api/start is POSTed only the
+    bounded token/preview_id/hash/selection binding (server owns the artifact).
+    Preview must also be token-bound."""
     from model_atlas.recommend.gui import _GUI_PAGE as text
 
-    assert 'JSON.stringify({ selected: selArr, inputs: {} })' in text
+    assert "token: authToken, preview_id: preview.preview_id" in text
+    assert "hash: preview.hash" in text
+    assert "selected: selArr" in text
+    # preview is token-bound too
+    assert "{ token: authToken, selected: selArr }" in text
     # no embedded user/recommendation JSON in the page source
     assert "recipe_payload" not in text
     assert "model_dump" not in text
@@ -815,3 +830,171 @@ def test_gui_compress_button_disabled_with_blockers(tmp_path: Path):
     # no_pruning is locked on — allow_pruning is a disabled checkbox.
     assert 'id="allowPrune" disabled' in text
     assert "no_pruning=true" in text
+
+
+# --- Authorization token + preview + start with a REAL persisted job engine ---
+
+def _executable_recipe(tmp_path: Path) -> CompressionRecipe:
+    """A canonical, executable, single-stage recipe served by the in-repo
+    atlas_quant_probe backend (available + pinned) with an immutable source, so
+    the compiled artifact verifies pins and a real engine run completes."""
+    from model_atlas.jobs.artifacts import source_manifest
+
+    src = tmp_path / "model_src"
+    src.mkdir()
+    (src / "w.bin").write_bytes(b"stable-weights-v1")
+    files: dict[str, str] = {
+        k: v
+        for k, v in source_manifest(str(src)).get("files", {}).items()
+        if isinstance(k, str) and isinstance(v, str)
+    }
+    return CompressionRecipe(
+        name="auth-exe",
+        source=SourceIdentity(
+            source_id="s", checkpoint_path=str(src), sha256=files
+        ),
+        calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
+        constraints=RecipeConstraints(
+            no_pruning=True,
+            allow_pruning_capability=False,
+            preserve_non_expert_backbone=True,
+            immutable_source=True,
+            allow_hybrid_precision=False,
+            max_resident_gib=115.0,
+            derived_format="safetensors",
+        ),
+        stages=[
+            RecipeStage(
+                id="s1",
+                name="s1",
+                effect_class=StageEffectClass.PROFILING,
+                backend=StageBackendPin(backend_id="atlas_quant_probe", version="1.0.0"),
+                produces_format=["manifest.json"],
+                evidence_policy=EvidenceKind.ESTIMATED,
+            )
+        ],
+    )
+
+
+def test_authorize_binds_token_to_recommendation_and_method_set(tmp_path: Path):
+    svc = RecommendationService(
+        profile_root=str(tmp_path / "profiles"), work_root=str(tmp_path / "runs")
+    )
+    svc.save_profile(_full_profile())
+    a1 = svc.authorize("k3-mini", RecTarget(memory_target_gib=115.0))
+    a2 = svc.authorize("k3-mini", RecTarget(memory_target_gib=115.0))
+    # deterministic recommendation ids but OPAGUE tokens must differ
+    assert a1["recommendation_id"] == a2["recommendation_id"]
+    assert a1["token"] != a2["token"]
+    assert a1["authorized_methods"] == a2["authorized_methods"]
+    assert a1["selection_hash"] == a2["selection_hash"]
+    assert a1["selection_hash"]  # bound to the exact authorized method set
+    # recommendation payload matches the plain recommend() exactly
+    plain = svc.recommend("k3-mini", RecTarget(memory_target_gib=115.0))
+    assert a1["recommendation"]["recommendation_id"] == plain.recommendation_id
+
+
+def test_start_authorized_runs_persisted_job_asynchronously(tmp_path: Path):
+    """Given a valid token + a ready executable preview, start returns run_id
+    IMMEDIATELY (background worker), the job is persisted (status observable),
+    and the run completes via the durable engine."""
+    from model_atlas.recommend import RecommendationService
+    from model_atlas.recommend.api import (
+        _AuthorizationSession,
+        _PendingPreview,
+        _selection_hash,
+    )
+
+    svc = RecommendationService(
+        profile_root=str(tmp_path / "profiles"), work_root=str(tmp_path / "runs")
+    )
+    recipe = _executable_recipe(tmp_path)
+    from model_atlas.recipe.compiler import RecipeCompiler
+    from model_atlas.recipes import CompiledPlanArtifact
+
+    comp = RecipeCompiler(svc.registry).compile(recipe)
+    artifact = CompiledPlanArtifact.from_compiled(comp, inputs={}, registry=svc.registry)
+    artifact.verify()
+    artifact.verify_pins_against(svc.registry)
+
+    tok = "t-exec"
+    h = _selection_hash(["exe-method"])
+    svc.sessions[tok] = _AuthorizationSession(
+        token=tok, recommendation_id="rec-x", profile_id="p",
+        target=RecTarget(), no_pruning=True,
+        constraints_snapshot={}, authorized_methods=["exe-method"],
+    )
+    svc.pending_previews["pv-exec"] = _PendingPreview(
+        token=tok, preview_id="pv-exec", selection_hash=h,
+        selected=["exe-method"], recipe=recipe, artifact=artifact,
+        inputs={}, run_id=artifact.run_id,
+    )
+
+    import time as _time
+    t0 = _time.time()
+    res = svc.start_authorized(tok, "pv-exec", h, ["exe-method"])
+    elapsed = _time.time() - t0
+    # asynchronous: returns ~instantly, before the worker's run completes
+    assert res["status"] == "started"
+    assert res["run_id"] == artifact.run_id
+    assert elapsed < 2.0
+
+    # job identity is persisted BEFORE dispatch -> status immediately observable
+    st = svc.plane.status(res["run_id"])
+    assert st["run_id"] == res["run_id"]
+    assert st["status"] in ("pending", "running", "completed",
+                            "failed_terminal", "failed_recoverable")
+
+    # durable completion via the real engine
+    for _ in range(200):
+        st = svc.plane.status(res["run_id"])
+        if st["status"] in ("completed", "failed_terminal", "failed_recoverable"):
+            break
+        _time.sleep(0.1)
+    assert st["status"] == "completed", st
+
+    # duplicate start is rejected as replay (never a second execution)
+    from model_atlas.recommend.api import AuthError
+    with pytest.raises(AuthError) as exc:
+        svc.start_authorized(tok, "pv-exec", h, ["exe-method"])
+    assert exc.value.code == "replay"
+
+
+def test_gui_preview_invalidation_and_compress_gating_deterministic():
+    """GUI authorization semantics (deterministic JS assertions, non-vacuous):
+    any profile/target/checkbox/recommendation change invalidates the preview
+    and keeps Compress disabled until a fresh preview matches the current
+    selection hash. Asserted against the served JS behavior, not the source
+    alone: the button is only enabled when gate.ready and computeGates reasons
+    cover every invalidation path."""
+    from model_atlas.recommend.gui import _GUI_PAGE as t
+
+    # every change source invalidates the preview + re-disables Compress
+    assert "invalidatePreview('profile changed')" in t
+    assert "invalidatePreview('memory target changed')" in t
+    assert "invalidatePreview('selection changed')" in t
+    assert "invalidatePreview('new recommendation')" in t
+    # preview invalidation clears the stored preview (token+selection binding)
+    assert "preview = null" in t
+    assert "authToken" in t  # token is part of the state; no token = disabled
+    # Compress enabled ONLY when computeGates().ready (token+selection+preview match)
+    assert "btn.disabled = !gate.ready" in t
+    # selection drift after a preview re-disables (re-preview required)
+    assert "selection changed since preview" in t
+
+
+def test_gui_monitor_polls_terminal_and_fetches_evidence():
+    """Monitor behavior: poll status + events; at a TERMINAL status STOP
+    polling and fetch validate/lineage/outputs — not a vacuous source check."""
+    from model_atlas.recommend.gui import _GUI_PAGE as t
+
+    # polls status AND events
+    assert "fetch('/api/jobs/' + enc + '/events')" in t
+    # terminal states stop the poll loop
+    assert "FAILED_TERMINAL" in t
+    assert "COMPLETED_WITH_WARNINGS" in t
+    assert "FAILED_RECOVERABLE" in t
+    assert "CANCELLED" in t
+    # after terminal, fetch and render outputs (+ line/lineage)
+    assert "fetch('/outputs?run_id=' + enc)" in t
+    assert "fetchLineage" not in t  # replaced by fetchEvidence

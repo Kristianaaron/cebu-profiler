@@ -73,6 +73,22 @@ def _post(server, path, payload):
     )
 
 
+def _authorize(server, service, profile_id="k3-mini"):
+    """recommend -> token (the browser/GUI flow). Returns the auth payload."""
+    service.save_profile(_full_profile())
+    status, data = _post(
+        server,
+        "/api/recommend",
+        {
+            "profile_id": profile_id,
+            "memory_target_gib": 115.0,
+            "constraints": {"allow_pruning": False},
+        },
+    )
+    assert status == 200
+    return _json((status, data))
+
+
 # --------------------------------------------------------------------------- profiles / recommend
 def test_profiles_and_recommend_round_trip(server: RecommendationServer, service):
     service.save_profile(_full_profile())
@@ -146,14 +162,15 @@ def test_oversized_body_413(server: RecommendationServer):
 
 # --------------------------------------------------------------------------- start fails closed
 def test_start_blocked_fail_closed(server: RecommendationServer):
+    # an arbitrary full-recipe start is REMOVED: /api/start only accepts the
+    # token/preview/hash/selection binding. A recipe-only body is rejected.
     from model_atlas.recipes.builtin import glm52_no_pruning_recipe
 
     recipe = glm52_no_pruning_recipe()
     status, data = _post(
         server, "/api/start", {"recipe": recipe.model_dump(mode="json"), "inputs": {}}
     )
-    # unavailable backends -> compile/verify error, never a 2xx start
-    assert status in (400, 404)
+    assert status == 400  # 'token' required — never an arbitrary start
     assert "error" in _json((status, data))
 
 
@@ -177,20 +194,55 @@ def test_gui_page_served_no_embedded_payload(server: RecommendationServer, servi
         assert "fetch('/api/profiles')" in text
 
 
-# --- preview-from-selection ---
+# --- preview-from-selection (token-gated) ---
 def test_preview_selection_endpoint(server: RecommendationServer, service):
-    service.save_profile(_full_profile())
+    auth = _authorize(server, service)
+    token, selected = auth["token"], auth["authorized_methods"]
     status, data = _post(
-        server, "/api/preview-selection", {"selected": ["calibration", "sensitivity"]}
+        server, "/api/preview-selection", {"token": token, "selected": selected}
     )
     assert status == 200
     body = _json((status, data))
-    assert body["recipe_id"].startswith("recipe-")
-    stage_ids = {s["id"] for s in body["stages"]}
-    assert {"t1-identity", "t2-calibration", "t3-sensitivity"} <= stage_ids
-    # current placeholder adapters -> not executable -> readiness false
+    assert body["preview_id"].startswith("pv-")
+    assert body["hash"] == auth["selection_hash"]
+    assert body["plan_id"] is None  # placeholder adapters -> no verified plan
     assert body["readiness"]["verified_plan"] is False
-    assert body["diff"]["no_pruning"] is True
+    assert body["selected_methods"] == selected
+
+
+def test_preview_selection_requires_token(server: RecommendationServer, service):
+    _authorize(server, service)
+    status, data = _post(
+        server, "/api/preview-selection", {"selected": ["calibration", "sensitivity"]}
+    )
+    assert status == 400  # missing token
+
+
+def test_preview_selection_rejects_not_authorized(server: RecommendationServer, service):
+    auth = _authorize(server, service)
+    status, data = _post(
+        server,
+        "/api/preview-selection",
+        {"token": auth["token"], "selected": ["calibration"]},  # subset
+    )
+    assert status == 403
+    assert _json((status, data))["code"] == "selection_not_authorized"
+
+
+def test_preview_selection_rejects_unknown_token(server: RecommendationServer, service):
+    _authorize(server, service)
+    status, data = _post(
+        server, "/api/preview-selection", {"token": "bogus", "selected": ["calibration"]}
+    )
+    assert status == 401
+    assert _json((status, data))["code"] == "token_unknown"
+
+
+def test_preview_selection_rejects_empty(server: RecommendationServer, service):
+    auth = _authorize(server, service)
+    status, data = _post(server, "/api/preview-selection", {"token": auth["token"], "selected": []})
+    assert status == 400
+    assert _json((status, data))["code"] == "selection_empty"
 
 
 def test_preview_selection_requires_list_of_strings(server: RecommendationServer):
@@ -198,37 +250,114 @@ def test_preview_selection_requires_list_of_strings(server: RecommendationServer
     assert status == 400
 
 
-def test_preview_selection_omitted_all(server: RecommendationServer, service):
+def test_preview_selection_omitted_all_requires_token(server: RecommendationServer, service):
     service.save_profile(_full_profile())
     status, data = _post(server, "/api/preview-selection", {})
-    assert status == 200
-    body = _json((status, data))
-    assert len(body["stages"]) >= 14  # all canonical no-pruning stages
-    assert body["readiness"]["verified_plan"] is False
+    assert status == 400  # no token, no selected
 
 
-# --- start from selection (server-side draft, fail closed) ---
-def test_start_from_selection_fails_closed_placeholder(server: RecommendationServer, service):
-    service.save_profile(_full_profile())
-    status, data = _post(
-        server, "/api/start", {"selected": ["calibration", "sensitivity"], "inputs": {}}
+# --- start (token + preview bound, fail closed) ---
+def test_start_requires_full_token_binding(server: RecommendationServer, service):
+    """start accepts ONLY token+preview_id+hash+exact selection+inputs. Any
+    missing handle is a 4xx — no arbitrary-recipe or raw-selection start."""
+    _authorize(server, service)
+    for payload in (
+        {"selected": ["calibration"], "inputs": {}},  # no token
+        {"token": "x", "selected": ["calibration"], "inputs": {}},  # no preview
+    ):
+        status, data = _post(server, "/api/start", payload)
+        assert status in (400, 401, 404)
+        assert "error" in _json((status, data))
+    # arbitrary full-recipe start is REMOVED
+    from model_atlas.recipes.builtin import glm52_no_pruning_recipe
+
+    status, _ = _post(
+        server, "/api/start", {"recipe": glm52_no_pruning_recipe().model_dump(mode="json")}
     )
-    # placeholder adapters -> draft compiles in dry-run but the verified-plan
-    # live-pin gate fails closed -> never a 2xx start.
-    assert status in (400, 404)
-    assert "error" in _json((status, data))
+    assert status == 400  # 'token' required
 
 
-def test_start_from_selection_bad_selected(server: RecommendationServer):
-    status, _ = _post(server, "/api/start", {"selected": "calibration", "inputs": {}})
+def test_start_rejects_mismatched_hash(server: RecommendationServer, service):
+    auth = _authorize(server, service)
+    sel = auth["authorized_methods"]
+    preview = _json(_post(
+        server, "/api/preview-selection", {"token": auth["token"], "selected": sel}
+    ))
+    status, data = _post(
+        server,
+        "/api/start",
+        {"token": auth["token"], "preview_id": preview["preview_id"],
+         "hash": "wrong", "selected": sel, "inputs": {}},
+    )
+    assert status == 409
+    assert _json((status, data))["code"] == "selection_mismatch"
+
+
+def test_start_rejects_unknown_preview(server: RecommendationServer, service):
+    auth = _authorize(server, service)
+    sel = auth["authorized_methods"]
+    status, data = _post(
+        server,
+        "/api/start",
+        {"token": auth["token"], "preview_id": "pv-never",
+         "hash": auth["selection_hash"], "selected": sel, "inputs": {}},
+    )
+    assert status == 410
+    assert _json((status, data))["code"] == "preview_unknown"
+
+
+def test_start_rejects_empty_selection(server: RecommendationServer, service):
+    auth = _authorize(server, service)
+    sel = auth["authorized_methods"]
+    preview = _json(_post(
+        server, "/api/preview-selection", {"token": auth["token"], "selected": sel}
+    ))
+    status, data = _post(
+        server,
+        "/api/start",
+        {"token": auth["token"], "preview_id": preview["preview_id"],
+         "hash": preview["hash"], "selected": [], "inputs": {}},
+    )
     assert status == 400
+    assert _json((status, data))["code"] == "selection_empty"
+
+
+def test_start_rejects_unknown_token(server: RecommendationServer, service):
+    _authorize(server, service)
+    status, data = _post(
+        server,
+        "/api/start",
+        {"token": "bogus", "preview_id": "pv-x", "hash": "h", "selected": ["a"], "inputs": {}},
+    )
+    assert status == 401
+    assert _json((status, data))["code"] == "token_unknown"
+
+
+def test_start_rejects_not_executable_preview(server: RecommendationServer, service):
+    """Placeholder adapters -> preview stored non-executable -> start refused
+    (never fakes quantization)."""
+    auth = _authorize(server, service)
+    sel = auth["authorized_methods"]
+    preview = _json(_post(
+        server, "/api/preview-selection", {"token": auth["token"], "selected": sel}
+    ))
+    assert preview["readiness"]["executable"] is False
+    status, data = _post(
+        server,
+        "/api/start",
+        {"token": auth["token"], "preview_id": preview["preview_id"],
+         "hash": preview["hash"], "selected": sel, "inputs": {}},
+    )
+    assert status == 409
+    assert _json((status, data))["code"] == "preview_not_executable"
 
 
 # --- browser-like HTTP sequence ---
 def test_browser_http_sequence(server: RecommendationServer, service):
-    """A browser session: serve GUI -> list profiles -> recommend -> preview
-    selection -> start (fail closed on placeholder adapters). This is the exact
-    HTTP sequence the static GUI drives."""
+    """A browser session: serve GUI -> list profiles -> recommend (token) ->
+    preview selection (token) -> start (token+preview bound, fail closed on
+    placeholder adapters). This is the exact HTTP sequence the static GUI
+    drives."""
     service.save_profile(_full_profile())
 
     # 1. static GUI (no embedded data)
@@ -242,7 +371,7 @@ def test_browser_http_sequence(server: RecommendationServer, service):
     profiles = _json((status, data))["profiles"]
     assert profiles and profiles[0]["profile_id"]
 
-    # 3. /api/recommend
+    # 3. /api/recommend -> token
     status, data = _post(
         server,
         "/api/recommend",
@@ -253,22 +382,32 @@ def test_browser_http_sequence(server: RecommendationServer, service):
         },
     )
     assert status == 200
-    rec = _json((status, data))["recommendation"]
-    assert rec["no_pruning"] is True
-    blocked = rec["blocked_methods"]
+    auth = _json((status, data))
+    assert auth["token"]
+    blocked = auth["recommendation"]["blocked_methods"]
     assert blocked  # placeholder adapters are fatally blocked
-
-    # 4. preview the authorized subset
-    authorized = [m["method"] for m in rec["methods"]]
+    authorized = auth["authorized_methods"]
     assert authorized
-    status, data = _post(server, "/api/preview-selection", {"selected": authorized})
+
+    # 4. preview the authorized set (token-bound)
+    status, data = _post(
+        server, "/api/preview-selection", {"token": auth["token"], "selected": authorized}
+    )
     assert status == 200
     preview = _json((status, data))
+    assert preview["preview_id"].startswith("pv-")
+    assert preview["hash"] == auth["selection_hash"]
     assert preview["readiness"]["verified_plan"] is False
 
-    # 5. start from the selection fails closed (no verified executable plan)
-    status, data = _post(server, "/api/start", {"selected": authorized, "inputs": {}})
-    assert status in (400, 404)
+    # 5. start (no verified executable plan) fails closed
+    status, data = _post(
+        server,
+        "/api/start",
+        {"token": auth["token"], "preview_id": preview["preview_id"],
+         "hash": preview["hash"], "selected": authorized, "inputs": {}},
+    )
+    assert status == 409
+    assert _json((status, data))["code"] == "preview_not_executable"
 
 
 # job read endpoints (fixture/monkeypatch)
@@ -365,3 +504,95 @@ def test_allow_non_loopback_with_unsafe_flag():
 
 def test_loopback_allowed():
     _require_loopback("127.0.0.1", unsafe=False)
+
+
+# --- endpoint-level async start via persisted job engine (feasible seeding) ---
+def test_start_async_immediate_return_monkeypatched(server: RecommendationServer, service, tmp_path):
+    """Endpoint /api/start with a seeded executable preview returns run_id
+    immediately (background worker), the job is durable (status via
+    /api/jobs/<id>), and a duplicate start is rejected as replay — all through
+    the real HTTP server + persisted job engine."""
+    from model_atlas.recommend.api import (
+        _AuthorizationSession,
+        _PendingPreview,
+        _selection_hash,
+    )
+    from model_atlas.recipe.compiler import RecipeCompiler
+    from model_atlas.recipe.schema import (
+        CalibrationIdentity,
+        CompressionRecipe,
+        RecipeConstraints,
+        SourceIdentity,
+    )
+    from model_atlas.recipes import CompiledPlanArtifact
+    from model_atlas.recommend.policy import RecTarget
+
+    # executable single-stage recipe (in-repo quant probe, pinned immutable-ish)
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "w.bin").write_bytes(b"stable")
+    from model_atlas.jobs.artifacts import source_manifest
+
+    files = {
+        k: v
+        for k, v in source_manifest(str(src)).get("files", {}).items()
+        if isinstance(k, str) and isinstance(v, str)
+    }
+    from model_atlas.recipe.schema import RecipeStage, StageBackendPin, StageEffectClass
+
+    recipe = CompressionRecipe(
+        name="endpoint-exe",
+        source=SourceIdentity(source_id="s", checkpoint_path=str(src), sha256=files),
+        calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
+        constraints=RecipeConstraints(
+            no_pruning=True, allow_pruning_capability=False,
+            preserve_non_expert_backbone=True, immutable_source=True,
+            allow_hybrid_precision=False, max_resident_gib=115.0,
+        ),
+        stages=[RecipeStage(
+            id="s1", name="s1", effect_class=StageEffectClass.PROFILING,
+            backend=StageBackendPin(backend_id="atlas_quant_probe", version="1.0.0"),
+            produces_format=["manifest.json"], evidence_policy=__import__(
+                "model_atlas.schemas.evidence", fromlist=["EvidenceKind"]
+            ).EvidenceKind.ESTIMATED,
+        )],
+    )
+    comp = RecipeCompiler(service.registry).compile(recipe)
+    artifact = CompiledPlanArtifact.from_compiled(comp, inputs={}, registry=service.registry)
+    artifact.verify()
+    artifact.verify_pins_against(service.registry)
+
+    tok = "t-ep"
+    h = _selection_hash(["m1"])
+    service.sessions[tok] = _AuthorizationSession(
+        token=tok, recommendation_id="rec-ep", profile_id="p",
+        target=RecTarget(), no_pruning=True, constraints_snapshot={},
+        authorized_methods=["m1"],
+    )
+    service.pending_previews["pv-ep"] = _PendingPreview(
+        token=tok, preview_id="pv-ep", selection_hash=h, selected=["m1"],
+        recipe=recipe, artifact=artifact, inputs={}, run_id=artifact.run_id,
+    )
+
+    status, data = _post(
+        server, "/api/start",
+        {"token": tok, "preview_id": "pv-ep", "hash": h, "selected": ["m1"], "inputs": {}},
+    )
+    assert status == 200
+    body = _json((status, data))
+    assert body["status"] == "started"
+    run_id = body["run_id"]
+    assert run_id == artifact.run_id
+
+    # durable + observable
+    status, data = _request(server, "GET", "/api/jobs/" + run_id)
+    assert status == 200
+    assert _json((status, data))["run_id"] == run_id
+
+    # replay rejected deterministically
+    status, data = _post(
+        server, "/api/start",
+        {"token": tok, "preview_id": "pv-ep", "hash": h, "selected": ["m1"], "inputs": {}},
+    )
+    assert status == 409
+    assert _json((status, data))["code"] == "replay"
