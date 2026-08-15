@@ -377,10 +377,10 @@ def _builtin_records() -> dict[str, BackendRecord]:
         architectures=("glm-5.2", "k3", "any"),
         compute_archs=("gb10-sm121", "any"),
         topologies=("2x-spark", "single", "any"),
-        # EXL3 output is consumed by the EXL2/exllama serving runtime (its name
-        # at conversion/serving), not a compute-arch string. Conversion runs on
-        # the local CPU; serving runs via exllamav2.
-        runtime_compat=("exllamav2", "cpu-conversion", "any"),
+        # EXL3 output is served by the EXL2/exllama serving runtime; conversion
+        # is a SEPARATE dimension (conversion_tool_compat). No wildcard.
+        runtime_compat=("exllamav2",),
+        conversion_tool_compat=("exl3-converter",),
         status=RecipeStatus.DISCOVERED,
         version="unpinned",
         declared_capabilities=(),
@@ -404,8 +404,10 @@ def _builtin_records() -> dict[str, BackendRecord]:
         compute_archs=("gb10-sm121", "any"),
         topologies=("2x-spark", "single", "any"),
         # runtime_compat names the ACTUAL serving runtime implementations that
-        # can run ModelOpt-NVFP4 output, not a compute-arch/telemetry string.
-        runtime_compat=("vllm-modelopt", "tensorrt-llm", "any"),
+        # can run ModelOpt-NVFP4 output — no wildcard. vllm-modelopt is only
+        # usable when a backend ACTUALLY declares it; nothing is auto-allowed.
+        runtime_compat=("vllm-modelopt", "tensorrt-llm"),
+        conversion_tool_compat=("modelopt-nvfp4-converter",),
         status=RecipeStatus.DISCOVERED,
         version="unpinned",
         declared_capabilities=(_HYBRID_PREFIX + "fp8_e4m3+modelopt_nvfp4",),
@@ -424,10 +426,11 @@ def _builtin_records() -> dict[str, BackendRecord]:
         architectures=("glm-5.2", "k3", "any"),
         compute_archs=("gb10-sm121", "any"),
         topologies=("2x-spark", "single", "any"),
-        # LLM Compressor produces compressed-tensors checkpoints servable by
-        # vLLM (compressed-tensors backend) — a real runtime implementation, not
-        # a compute arch.
-        runtime_compat=("vllm-compressed-tensors", "cpu-conversion", "any"),
+        # LLM Compressor produces compressed-tensors checkpoints servable by the
+        # vLLM compressed-tensors runtime — conversion is the separate
+        # conversion_tool_compat dimension. No wildcard.
+        runtime_compat=("vllm-compressed-tensors",),
+        conversion_tool_compat=("llm-compressor",),
         status=RecipeStatus.DISCOVERED,
         version="unpinned",
         declared_capabilities=(),

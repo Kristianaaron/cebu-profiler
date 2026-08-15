@@ -27,7 +27,7 @@ import hashlib
 import json
 import struct
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from model_atlas.jobs.artifacts import sha256_file
@@ -57,7 +57,7 @@ class CheckpointValidationResult:
     detail: str = ""
     tensor_count: int = 0
     shard_count: int = 0
-    shard_hashes: dict[str, str] = None  # type: ignore[assignment]
+    shard_hashes: dict[str, str] = field(default_factory=dict)
     checkpoint_digest: str = ""
 
     def to_dict(self) -> dict[str, object]:
@@ -66,7 +66,7 @@ class CheckpointValidationResult:
             "detail": self.detail,
             "tensor_count": self.tensor_count,
             "shard_count": self.shard_count,
-            "shard_hashes": dict(self.shard_hashes or {}),
+            "shard_hashes": dict(self.shard_hashes),
             "checkpoint_digest": self.checkpoint_digest,
         }
 
@@ -75,25 +75,42 @@ class CheckpointValidationResult:
 # registry
 # --------------------------------------------------------------------------
 
-# Validator kind -> function(backend_id, staged_dir, format) -> CheckpointValidationResult
+# Validator kind -> (version, function(backend_id, staged_dir, format) ->
+# CheckpointValidationResult)
 RegisterValidator = Callable[[str, Path, str], CheckpointValidationResult]
 
-_VALIDATORS: dict[tuple[str, str], RegisterValidator] = {}
+_VALIDATORS: dict[tuple[str, str], str] = {}  # (backend_id, kind) -> version
+_VALIDATOR_FNS: dict[tuple[str, str], RegisterValidator] = {}
+_VALIDATOR_VERSION = "v1"
 
 
 def register_checkpoint_validator(backend_id: str, kind: str, validator: RegisterValidator) -> None:
-    _VALIDATORS[(backend_id, kind)] = validator
+    """Register a validator. Duplicate (backend_id, kind) registration is a
+    FATAL error UNLESS the validator is identical to the already-registered one
+    (same callable + same version), so correctness is never silently
+    reconsidered."""
+    existing = _VALIDATORS.get((backend_id, kind))
+    if existing is not None:
+        if _VALIDATOR_FNS[(backend_id, kind)] is not validator:
+            raise ValueError(
+                f"checkpoint validator {backend_id}:{kind} already registered with a "
+                "different implementation; refusing duplicate registration "
+                "(versioned identity required)"
+            )
+        return  # identical re-registration is a no-op
+    _VALIDATORS[(backend_id, kind)] = _VALIDATOR_VERSION
+    _VALIDATOR_FNS[(backend_id, kind)] = validator
 
 
 def get_checkpoint_validator(backend_id: str, kind: str) -> RegisterValidator | None:
     """Resolve a REAL registered validator; None when not wired (run fails
     closed — an algorithm adapter is never falsely marked available)."""
-    return _VALIDATORS.get((backend_id, kind))
+    return _VALIDATOR_FNS.get((backend_id, kind))
 
 
 def registered_validators() -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
-    for backend_id, kind in _VALIDATORS:
+    for backend_id, kind in _VALIDATOR_FNS:
         out.setdefault(backend_id, []).append(kind)
     return out
 

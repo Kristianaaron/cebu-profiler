@@ -107,9 +107,7 @@ def compile_recipe(
             artifact.verify()
             artifact.verify_pins_against(plane.registry)
             Path(out).parent.mkdir(parents=True, exist_ok=True)
-            Path(out).write_text(
-                json.dumps(artifact.model_dump(mode="json"), indent=2, sort_keys=True)
-            )
+            Path(out).write_text(json.dumps(artifact.to_plain_dict(), indent=2, sort_keys=True))
             print(f"wrote (verified compiled-plan artifact): {out}")
         else:
             print("  note: pass --out to write a versioned compiled-plan artifact")

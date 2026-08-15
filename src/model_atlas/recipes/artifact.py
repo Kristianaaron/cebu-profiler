@@ -41,7 +41,9 @@ class CompiledPlanArtifact(BaseModel):
     MappingProxyType so no caller can mutate a loaded artifact's pins/status.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    _ = None
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: int = PLAN_ARTIFACT_SCHEMA
     recipe: CompressionRecipe
@@ -53,12 +55,63 @@ class CompiledPlanArtifact(BaseModel):
     inputs: dict[str, object] = Field(default_factory=dict)
     run_id: str
     reproduce_command: str = ""
+    canonical_identity: str = Field(default="", repr=False, exclude=True)
+
+    def __init__(self, **data: object) -> None:
+        """Freeze the mutable mappings + compute the canonical immutable payload
+        once at construction; mutation attempts on nested dicts cannot change
+        the artifact's identity because the canonical payload is captured here."""
+        serializable: dict[str, object] = {}
+        for k, v in data.items():
+            if k in {"reproduce_command", "canonical_identity"}:
+                continue
+            if isinstance(v, BaseModel):
+                serializable[k] = v.model_dump(mode="json")
+            elif isinstance(v, dict):
+                serializable[k] = {
+                    kk: (vv.model_dump(mode="json") if isinstance(vv, BaseModel) else vv)
+                    for kk, vv in v.items()
+                }
+            else:
+                serializable[k] = v
+        data["canonical_identity"] = canonical_json(serializable)
+        super().__init__(**data)
+        object.__setattr__(
+            self,
+            "resolved_pins",
+            MappingProxyType({k: MappingProxyType(dict(v)) for k, v in self.resolved_pins.items()}),
+        )
+        object.__setattr__(
+            self, "backend_status_snapshot", MappingProxyType(dict(self.backend_status_snapshot))
+        )
+        object.__setattr__(self, "inputs", MappingProxyType(dict(self.inputs)))
+
+    def to_plain_dict(self) -> dict[str, object]:
+        """Plain JSON-serializable dict (converts frozen MappingProxy fields to
+        plain dicts) for persistence without exposing mutable views."""
+        return {
+            "schema_version": self.schema_version,
+            "recipe": self.recipe.model_dump(mode="json"),
+            "recipe_sha256": self.recipe_sha256,
+            "recipe_id": self.recipe_id,
+            "plan_id": self.plan_id,
+            "resolved_pins": {k: dict(v) for k, v in self.resolved_pins.items()},
+            "backend_status_snapshot": dict(self.backend_status_snapshot),
+            "inputs": dict(self.inputs),
+            "run_id": self.run_id,
+            "reproduce_command": self.reproduce_command,
+            "canonical_identity": self.canonical_identity,
+        }
 
     def frozen_pins(self) -> MappingProxyType[str, MappingProxyType[str, str]]:
         """Read-only view of resolved_pins (nested frozen)."""
-        return MappingProxyType(
-            {k: MappingProxyType(dict(v)) for k, v in self.resolved_pins.items()}
-        )
+        return self.resolved_pins  # type: ignore[return-value]
+
+    @property
+    def canonical_payload(self) -> str:
+        """Canonical immutable payload captured at construction — mutating any
+        nested member of this artifact does NOT change identity."""
+        return self.canonical_identity
 
     @classmethod
     def from_compiled(
@@ -87,10 +140,6 @@ class CompiledPlanArtifact(BaseModel):
             ),
         )
 
-    def canonical_payload(self) -> str:
-        """Deterministic canonical serialization of everything that matters."""
-        return canonical_json(self.model_dump(exclude={"reproduce_command"}))
-
     def verify(self) -> None:
         """Self-consistency: ids/hash must match the embedded recipe and the
         deterministic run_id from recipe+inputs. Raises on any mismatch."""
@@ -110,11 +159,11 @@ class CompiledPlanArtifact(BaseModel):
                 f"compiled-plan artifact ids inconsistent: recipe_id {self.recipe_id} "
                 f"plan_id {self.plan_id} vs recomputed {rid}"
             )
-        expected_run = _run_id_from_payload(sha, self.plan_id, self.inputs)
+        expected_run = _run_id_from_payload(sha, self.plan_id, dict(self.inputs))
         if self.run_id != expected_run:
             raise ValueError(
                 f"compiled-plan artifact run_id {self.run_id} != recomputed "
-                f"{expected_run} from inputs {self.inputs}"
+                f"{expected_run} from inputs {dict(self.inputs)}"
             )
 
     def verify_pins_against(self, registry: object) -> None:
@@ -134,6 +183,15 @@ class CompiledPlanArtifact(BaseModel):
             "adapter_identity",
             "capability_hash",
         )
+        # EXACT stage-id pin set: every recipe stage must have exactly one pin
+        # record (no missing, no extra).
+        expected_stages = {s.id for s in self.recipe.stages}
+        pinned_stages = set(self.resolved_pins)
+        if pinned_stages != expected_stages:
+            raise ValueError(
+                f"artifact pins must cover EXACTLY the recipe stages: expected "
+                f"{sorted(expected_stages)} but pins cover {sorted(pinned_stages)}"
+            )
         for stage_id, pin in self.resolved_pins.items():
             missing = [f for f in required_fields if not pin.get(f)]
             if missing:

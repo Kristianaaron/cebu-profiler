@@ -128,7 +128,13 @@ class BackendRecord:
     architectures: tuple[str, ...] = ("glm-5.2", "k3", "k3-mini", "any")
     compute_archs: tuple[str, ...] = ("gb10-sm121", "any")
     topologies: tuple[str, ...] = ("2x-spark", "single", "any")
-    runtime_compat: tuple[str, ...] = ("cpu", "sm121", "two-spark")
+    # SERVING runtime implementations that can RUN the backend's output (truthful
+    # only; never telemetry/compute-arch strings; no wildcard).
+    runtime_compat: tuple[str, ...] = ()
+    # CONVERSION-tool compatibility — a SEPARATE dimension from serving runtime:
+    # which conversion tool produces the backend's format (e.g. exl3.exe,
+    # llm-compressor). Never conflated with runtime_compat.
+    conversion_tool_compat: tuple[str, ...] = ()
 
     # lifecycle status: UNAVAILABLE / DISCOVERED / EXPERIMENTAL / VALIDATED / RECOMMENDED
     status: RecipeStatus = RecipeStatus.UNAVAILABLE

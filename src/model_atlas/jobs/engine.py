@@ -325,7 +325,7 @@ class JobEngine:
             self.compiled, inputs=inputs, registry=self.registry
         )
         artifact.verify()
-        atomic_write_json(self.plan_path, artifact.model_dump(mode="json"))
+        atomic_write_json(self.plan_path, artifact.to_plain_dict())
         self._write_reproduce(job)
         # write-ahead: journal run.created BEFORE the job snapshot
         self.journal.append({"event": "run.created", "stages": job.stage_order})
@@ -547,12 +547,20 @@ class JobEngine:
                     for k, v in declared_sha.items()
                     if isinstance(k, str) and isinstance(v, str)
                 }
-                # exact membership + per-path hash equality
+                # EXACT path-set equality: the declared mapping must contain
+                # exactly the complete recursive measured path set (no missing,
+                # no extra paths), plus per-path hash equality.
+                declared_paths = set(declared_map)
+                measured_paths = set(files)
+                if declared_paths != measured_paths:
+                    raise SourceIntegrityError(
+                        "executable source sha256 path set must equal the complete "
+                        f"recursive measured path set: declared {len(declared_paths)} "
+                        f"paths ({sorted(declared_paths - measured_paths)} extra, "
+                        f"{sorted(measured_paths - declared_paths)} missing) — or "
+                        "provide the canonical full manifest_digest instead"
+                    )
                 for rel, digest in declared_map.items():
-                    if rel not in files:
-                        raise SourceIntegrityError(
-                            f"declared source path {rel!r} is not present in the source manifest"
-                        )
                     if files[rel] != digest:
                         raise SourceIntegrityError(
                             f"declared path {rel!r} hash {digest[:16]}… != measured "
@@ -872,7 +880,19 @@ class JobEngine:
         return job
 
     # ------------------------------------------------------------- repair
-    def apply_repair(
+    def apply_repair(self, proposal: RepairProposal, stage_id: str, target_output: str) -> Job:
+        """Public: acquire the run lock, delegate to the private locked
+        implementation, release the lock. Serializes against other repair
+        transactions on the same run (no lost updates)."""
+        acquired = acquire_file_lock(self.run_dir / "run.lock")
+        if not acquired:
+            raise RuntimeError(f"run {self.run_dir.name} is locked by another engine")
+        try:
+            return self._apply_repair_locked(proposal, stage_id, target_output)
+        finally:
+            release_file_lock(self.run_dir / "run.lock")
+
+    def _apply_repair_locked(
         self,
         proposal: RepairProposal,
         stage_id: str,
@@ -880,12 +900,10 @@ class JobEngine:
         *,
         repair_gate: RepairGate | None = None,
     ) -> Job:
-        """Apply a deterministic repair inside the DURABLE job transaction,
-        under the SAME run lock as execution (the caller must be inside a
-        locked run context; the engine additionally refuses to apply to a
-        corrupt record). The gate persists restore+new CAS refs, the produced
-        blob is re-read from the CAS (full-digest verified), and the target
-        StageOutput ref is atomically updated with a content-derived
+        """Apply a deterministic repair inside the DURABLE job transaction
+        (caller holds the run lock). The gate persists restore+new CAS refs,
+        the produced blob is re-read from the CAS (full-digest verified), and
+        the target StageOutput ref is atomically updated with a content-derived
         (collision-free) repair_id, journaled + save + manifest. No caller
         bytes are retained."""
         gate = repair_gate or RepairGate()
@@ -905,10 +923,25 @@ class JobEngine:
         # persist the repaired blob and atomically update the target ref
         new_ref = self.store.put_bytes(orig_ref.name, produced)
         gate.publish_apply(res.compiled, target=so, new_ref=new_ref)
-        # CONTENT-DERIVED, collision-free repair id = hash(canonical proposal +
-        # stage + output + before.Ref). A target may only ever have ONE active
-        # (applied, not-reverted) repair, so re-applying to the same output is
-        # refused before any persistence.
+        # CONTENT-DERIVED, collision-free repair id = hash(canonical full
+        # proposal params + registered transform identity/version + stage +
+        # output + BEFORE and AFTER full hash digests). A target may only have
+        # ONE active (applied, not-reverted) repair; and the same digest id must
+        # be UNIQUE across ALL repair history (apply + rollback) so rollback can
+        # look up the exact unique record.
+        repair_id = _repair_sha256(
+            canonical_json(
+                {
+                    "kind": proposal.kind,
+                    "transform_identity": f"{proposal.kind}@{res.compiled.transform_version}",
+                    "params": dict(proposal.params),
+                    "stage": stage_id,
+                    "target": target_output,
+                    "before_sha256": res.compiled.restore_key,
+                    "after_sha256": res.compiled.new_key,
+                }
+            ).encode("utf-8")
+        )
         if any(
             r.applied and r.stage_id == stage_id and r.target == target_output for r in job.repair
         ):
@@ -916,16 +949,10 @@ class JobEngine:
                 f"target {stage_id}:{target_output} already has an applied repair; "
                 "refusing a second (collision-free record lookup)"
             )
-        repair_id = _repair_sha256(
-            canonical_json(
-                {
-                    "kind": proposal.kind,
-                    "stage": stage_id,
-                    "target": target_output,
-                    "restore": res.compiled.restore_key,
-                }
-            ).encode("utf-8")
-        )
+        if any(r.repair_id == repair_id for r in job.repair):
+            raise RuntimeError(
+                f"repair {repair_id!r} already exists in repair history (collision-free)"
+            )
         record = RepairRecord(
             repair_id=repair_id,
             kind=proposal.kind,
@@ -958,16 +985,30 @@ class JobEngine:
         return job
 
     def rollback_repair(self, repair_id: str) -> Job:
-        """Roll back an applied repair by loading the recorded restore CAS ref,
-        verifying its full digest, and atomically restoring the target
-        StageOutput ref + record state. No caller-retained bytes: everything is
-        read from the CAS and the persisted RepairRecord."""
+        """Public: acquire the run lock, delegate to the private locked
+        implementation, release the lock (serialized, no lost updates)."""
+        acquired = acquire_file_lock(self.run_dir / "run.lock")
+        if not acquired:
+            raise RuntimeError(f"run {self.run_dir.name} is locked by another engine")
+        try:
+            return self._rollback_repair_locked(repair_id)
+        finally:
+            release_file_lock(self.run_dir / "run.lock")
+
+    def _rollback_repair_locked(self, repair_id: str) -> Job:
+        """Roll back an applied repair by loading the recorded restore CAS ref
+        (caller holds the run lock), verifying its full digest, and atomically
+        restoring the target StageOutput ref + record state. No caller-retained
+        bytes: everything is read from the CAS and the persisted RepairRecord."""
         job = self._load_job()
         if job is None:
             raise RuntimeError("no run to roll back")
-        rec = next((r for r in job.repair if r.repair_id == repair_id), None)
-        if rec is None:
-            raise RuntimeError(f"repair {repair_id!r} not found")
+        matches = [r for r in job.repair if r.repair_id == repair_id]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"repair {repair_id!r}: expected exactly one unique record, found {len(matches)}"
+            )
+        rec = matches[0]
         if not rec.restore_ref:
             raise RuntimeError(f"repair {repair_id!r} has no restore ref")
         # find the target StageOutput via the recorded stage_id (collision-free)

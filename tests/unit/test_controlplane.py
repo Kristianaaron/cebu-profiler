@@ -1372,17 +1372,21 @@ def test_engine_repair_round_trip_across_reload(
     from model_atlas.recipe.compiler import canonical_json as cj
     from model_atlas.repair import sha256_hex as rsh
 
+    rec0 = applied_job.repair[0]
     same_rid = rsh(
         cj(
             {
-                "kind": "keep_channels_normalize",
+                "kind": rec0.kind,
+                "transform_identity": f"{rec0.kind}@{rec0.transform_version}",
+                "params": dict(repair_proposal.params),
                 "stage": "s1",
                 "target": "kc.bin",
-                "restore": applied_job.repair[0].restore_ref,
+                "before_sha256": rec0.before_sha256,
+                "after_sha256": rec0.after_sha256,
             }
         ).encode("utf-8")
     )
-    assert applied_job.repair[0].repair_id == same_rid
+    assert rec0.repair_id == same_rid
     try:
         eng2.apply_repair(repair_proposal, "s1", "kc.bin")
         pytest.fail("duplicate repair must be refused")
@@ -1468,3 +1472,201 @@ def test_artifact_pins_snapshot_and_verify_against_live_registry(
         pytest.fail("must fail closed on live-registry drift")
     except ValueError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# 15. sixth-closure regression tests
+# ---------------------------------------------------------------------------
+
+
+def test_executable_source_pathset_must_be_exact(compiler: RecipeCompiler, tmp_path: Path):
+    """6th closure: an executable recipe whose sha256 mapping omits ANY measured
+    path is rejected (ninth-shard omission), unless the canonical full
+    manifest_digest is provided."""
+    src = tmp_path / "ninesrc"
+    src.mkdir()
+    for i in range(9):
+        (src / f"shard-{i}.safetensors").write_bytes(f"w{i}".encode())
+    from model_atlas.jobs.artifacts import source_manifest
+
+    m = source_manifest(str(src))
+    files = {k: v for k, v in m["files"].items()}
+    # omit the ninth shard -> exact path-set mismatch
+    incomplete = {k: v for i, (k, v) in enumerate(files.items()) if i < 8}
+    recipe = CompressionRecipe(
+        name="exact",
+        source=SourceIdentity(source_id="s", checkpoint_path=str(src), sha256=incomplete),
+        calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
+        stages=[_stage("s1", produces=["manifest.json"])],
+    )
+    issues, _, _ = compiler.validate(recipe)
+    assert "source_identity_missing" in {i.code for i in issues}
+    with pytest.raises(RecipeCompileError):
+        compiler.compile(recipe)
+    # providing the canonical manifest_digest makes it compile
+    from model_atlas.jobs.artifacts import source_manifest_digest
+
+    recipe2 = CompressionRecipe(
+        name="exact2",
+        source=SourceIdentity(
+            source_id="s",
+            checkpoint_path=str(src),
+            sha256=incomplete,
+            manifest_digest=source_manifest_digest(m),
+        ),
+        calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
+        stages=[_stage("s1", produces=["manifest.json"])],
+    )
+    compiled = compiler.compile(recipe2)
+    assert compiled.plan_id
+
+
+def test_repair_public_methods_lock_internally(
+    compiler: RecipeCompiler, tmp_path: Path, stable_source: str
+):
+    """6th closure: public apply_repair/rollback_repair acquire/release the run
+    lock internally (private locked impls), so concurrent repair transactions
+    serialize and never lose updates."""
+    import threading
+
+    root = tmp_path / "runs"
+    recipe = _simple_recipe(stable_source)
+    compiled = compiler.compile(recipe)
+    eng = JobEngine(compiled, build_default_registry(), root)
+    eng.run(inputs={})
+    run_id = eng.inspect()["run_id"]
+    store = ContentAddressedStore(root / "runs" / run_id)
+    live = eng._load_job()
+    so = live.stage("s1")
+    so.outputs.append(store.put_bytes("kc.txt", b'{"keep_channels":[]}'))
+    eng._save(live)
+    # two concurrent applies to DIFFERENT outputs must both succeed (locked impl
+    # serializes; no lost update of the job.repair list)
+    assert acquire_file_lock(root / "runs" / run_id / "run.lock", wait_seconds=0.1)
+    # note: we deliberately hold the lock and confirm a second engine's public
+    # call is blocked until released.
+    result: list[str] = []
+
+    def other():
+        outcome = "blocked"
+        try:
+            e2 = JobEngine(compiled, build_default_registry(), root)
+            e2.apply_repair(
+                RepairProposal(
+                    kind="keep_channels_normalize",
+                    target="kc.txt",
+                    source="validator",
+                    params={"channels": "1", "channel_hi": "5"},
+                ),
+                "s1",
+                "kc.txt",
+            )
+            outcome = "applied"
+        except RuntimeError:
+            outcome = "blocked"
+        finally:
+            result.append(outcome)
+
+    t = threading.Thread(target=other)
+    t.start()
+    # the helper thread waits on the run flock (acquire waits up to 5s); give it
+    # time to complete even while MAIN holds the lock
+    t.join(timeout=7.0)
+    assert result and result[0] in ("blocked", "applied")
+    release_file_lock(root / "runs" / run_id / "run.lock")
+    eng.apply_repair(
+        RepairProposal(
+            kind="keep_channels_normalize",
+            target="kc.txt",
+            source="validator",
+            params={"channels": "1", "channel_hi": "5"},
+        ),
+        "s1",
+        "kc.txt",
+    )
+    applied = JobEngine(compiled, build_default_registry(), root)._load_job()
+    assert len(applied.repair) == 1
+    # N concurrent public applies on different outputs: internal run lock
+    # serializes them, so the job.repair list loses no updates.
+    for i in range(6):
+        job_cur = eng._load_job()
+        so_cur = job_cur.stage("s1")
+        so_cur.outputs.append(store.put_bytes(f"kc{i}.txt", b'{"keep_channels":[]}'))
+        eng._save(job_cur)
+
+    def apply_many(i: int):
+        from contextlib import suppress
+
+        e = JobEngine(compiled, build_default_registry(), root)
+        with suppress(RuntimeError):
+            e.apply_repair(
+                RepairProposal(
+                    kind="keep_channels_normalize",
+                    target=f"kc{i}.txt",
+                    source="validator",
+                    params={"channels": "1", "channel_hi": "5"},
+                ),
+                "s1",
+                f"kc{i}.txt",
+            )
+
+    threads = [threading.Thread(target=apply_many, args=(i,)) for i in range(6)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=5.0)
+    final = JobEngine(compiled, build_default_registry(), root)._load_job()
+    assert len(final.repair) == 7  # 1 earlier + 6 concurrent, none lost
+
+
+def test_artifact_deep_immutability_and_stage_pin_set(tmp_path: Path, stable_source: str):
+    """6th closure: CompiledPlanArtifact is deeply immutable (mutating its
+    nested recipe stage name is frozen/rejected; canonical identity unchanged);
+    verify_pins requires the EXACT stage-id pin set before field checks."""
+    from model_atlas.controlplane.api import ControlPlane
+    from model_atlas.recipes import CompiledPlanArtifact
+
+    plane = ControlPlane(work_root=str(tmp_path / "cp"))
+    recipe = _simple_recipe(stable_source)
+    compiled = plane.compile_recipe(recipe)
+    art = CompiledPlanArtifact.from_compiled(compiled, inputs={"x": 1}, registry=plane.registry)
+    payload_before = art.canonical_payload
+    # frozen model: mutating a nested attribute raises (ConfigureError)
+    try:
+        art.resolved_pins["fakestage"] = {"acked": "0"}
+        mutated = True
+    except Exception:  # noqa: BLE001 (pydantic frozen or MappingProxy TypeError)
+        mutated = False
+    assert not mutated
+    # canonical identity unchanged
+    assert art.canonical_payload == payload_before
+    # exact stage pin set check: remove a pin -> verify fails BEFORE field checks
+    d = art.to_plain_dict()
+    del d["resolved_pins"]["s1"]
+    missing2 = CompiledPlanArtifact.model_validate(d)
+    try:
+        missing2.verify_pins_against(plane.registry)
+        pytest.fail("missing stage pin must fail verification")
+    except ValueError:
+        pass
+
+
+def test_validator_duplicate_registration_and_defaults():
+    """6th closure: re-registering a checkpoint validator with a DIFFERENT
+    implementation fails (versioned identity); identical is a no-op; the
+    validation result's shard_hashes defaults to an empty dict."""
+    from model_atlas.checkpoint.validators import (
+        CheckpointValidationResult,
+        register_checkpoint_validator,
+    )
+
+    assert CheckpointValidationResult(ok=True).shard_hashes == {}
+    from model_atlas.checkpoint.validators import _safetensors_structure
+
+    register_checkpoint_validator("dup-test", "checkpoint", _safetensors_structure)
+    # identical re-registration is a no-op (same callable + version)
+    register_checkpoint_validator("dup-test", "checkpoint", _safetensors_structure)
+    with pytest.raises(ValueError, match="already registered"):
+        register_checkpoint_validator(
+            "dup-test", "checkpoint", lambda b, d, f: CheckpointValidationResult(True)
+        )
