@@ -78,9 +78,17 @@ def register_backends() -> dict[str, BackendRecord]:
 * `CommandBackedAdapter` only *drives* a genuine dependency. Give it a
   `run_cmd` only when you have integration + tests that prove it. Without one,
   `execute` raises `BackendUnavailable` — never fabricate output.
-* Declare hybrid support **only** for the exact format combination you can run
-  and have tested, using `hybrid:<sorted,+-joined formats>` (see
-  `modelopt_nvfp4` declaring `hybrid:fp8_e4m3+modelopt_nvfp4`).
+* Set `produces_derivative=True` ONLY for an adapter that produces a REAL
+  derivative checkpoint. A compression stage (quantization / refinement /
+  residual / conditioning) pinned to a probe/analysis-only backend
+  (`produces_derivative=False`, e.g. the in-repo `atlas_quant_probe`) is a
+  **compile error** — no compression stage/job may succeed without a real
+  derivative.
+* Declare hybrid support **only** for the exact format combination the SELECTED
+  (available + version-pinned) backend can run and has tested, using
+  `hybrid:<sorted,+-joined formats>` (see `modelopt_nvfp4` declaring
+  `hybrid:fp8_e4m3+modelopt_nvfp4`). A declaration on an unrelated/unavailable
+  record never authorizes a recipe hybrid.
 * Declare `pruning` only for a real TENP/FlexMoE structural-pruning backend.
   Pruning recipes then require `no_pruning=false` + `allow_pruning_capability`
   + a capability-declaring backend for each pruning stage.

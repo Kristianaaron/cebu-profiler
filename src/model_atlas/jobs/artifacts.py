@@ -15,6 +15,7 @@ Guarantees:
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 from pathlib import Path
@@ -51,14 +52,25 @@ class ContentAddressedStore:
 
     def put_bytes(self, name: str, data: bytes) -> OutputRef:
         digest = hashlib.sha256(data).hexdigest()
-        key = digest[:24]
-        dst = self.blobs / key[:2] / (key + ".blob")
+        dst = self._dst_for(digest)
         if not dst.exists():
             dst.parent.mkdir(parents=True, exist_ok=True)
-            # atomic write + fsync
+            # atomic write + fsync; collision-guarded: if a DIFFERENT blob ever
+            # claimed the same key the full-digest filename would mismatch and
+            # the write would be refused below before overwriting.
             tmp = dst.with_suffix(".blob.tmp")
+            if tmp.exists():
+                tmp.unlink()
             tmp.write_bytes(data)
             os.replace(tmp, dst)
+        # collision guard: a pre-existing slot whose content does NOT match the
+        # advertised full digest is corruption — never overwrite it.
+        existing = dst.read_bytes() if dst.exists() else b""
+        if hashlib.sha256(existing).hexdigest() != digest:
+            raise RuntimeError(
+                f"CAS collision guard: slot for digest {digest[:16]}… already holds "
+                "different content; refusing to overwrite"
+            )
         return OutputRef(
             name=name,
             sha256=digest,
@@ -73,11 +85,12 @@ class ContentAddressedStore:
 
     def put_file(self, name: str, src: Path, format: str = "") -> OutputRef:
         digest = sha256_file(src)
-        key = digest[:24]
-        dst = self.blobs / key[:2] / (key + ".blob")
+        dst = self._dst_for(digest)
         if not dst.exists():
             dst.parent.mkdir(parents=True, exist_ok=True)
             tmp = dst.with_suffix(".blob.tmp")
+            if tmp.exists():
+                tmp.unlink()
             with open(src, "rb") as fin, open(tmp, "wb") as fout:
                 while True:
                     chunk = fin.read(_IO_CHUNK)
@@ -85,6 +98,12 @@ class ContentAddressedStore:
                         break
                     fout.write(chunk)
             os.replace(tmp, dst)
+        existing = dst.read_bytes() if dst.exists() else b""
+        if hashlib.sha256(existing).hexdigest() != digest:
+            raise RuntimeError(
+                f"CAS collision guard: slot for digest {digest[:16]}… already holds "
+                "different content; refusing to overwrite"
+            )
         return OutputRef(
             name=name,
             sha256=digest,
@@ -107,9 +126,23 @@ class ContentAddressedStore:
             return False
         return sha256_file(path) == ref.sha256
 
+    def _dst_for(self, digest: str) -> Path:
+        """Content-addressed slot for the FULL digest; consumes the full 64-hex
+        digest so an accidental truncation collision cannot conflate two blobs.
+        The object key is the full digest; only the directory layer trims to 2
+        chars for sharding (collision safety uses the full digest, not [:24]).
+        """
+        return self.blobs / digest[:2] / (digest + ".blob")
+
 
 class StageStager:
-    """Stages files for one stage and atomically promotes them on commit."""
+    """Stages files for one stage and atomically promotes them on commit.
+
+    Staging is a private scratch space that never leaks to run outputs until
+    ``commit``. Commit publishes ONLY after every staged file has been
+    content-addressed and full-digest verified by the store; the returned stage
+    manifest is the record consumed by the job engine (never the staging tree).
+    """
 
     def __init__(self, run_dir: Path, stage_id: str) -> None:
         self.run_dir = Path(run_dir)
@@ -117,35 +150,42 @@ class StageStager:
         self.staging = self.stage_dir / "staging"
         self.final = self.stage_dir / "output"
         self.staging.mkdir(parents=True, exist_ok=True)
+        self.final.mkdir(parents=True, exist_ok=True)
 
     def path(self, name: str) -> Path:
         safe = Path(name).name
         return self.staging / safe
 
     def commit(self, store: ContentAddressedStore) -> list[OutputRef]:
-        """Atomically move staged files into content-addressed slots and return
-        their refs. Never touches an existing output (idempotent)."""
+        """Publish every staged file via the store's full-digest CAS path.
+
+        The store consumes full sha256 keys (collision-guarded); nothing is
+        moved into the content-addressed tree until the digest has been computed
+        and the slot verified. Returns the stage output manifest.
+        """
         refs: list[OutputRef] = []
-        self.final.mkdir(parents=True, exist_ok=True)
         for src in sorted(self.staging.iterdir()):
             if not src.is_file():
                 continue
             digest = sha256_file(src)
-            key = digest[:24]
-            dst = self.staging / (key + ".blob")
-            # relink via hardlink first so we can verify without copying
-            os.replace(src, dst)  # staged blob owned by this stage
-            ref = OutputRef(
-                name=src.name,
-                sha256=digest,
-                size_bytes=dst.stat().st_size,
-                format="file",
-                relpath=str(dst.relative_to(self.run_dir)),
-            )
-            # idempotent copy into content-addressed store
-            stored = store.put_file(ref.name, dst)
+            # publish through the CAS store (full-digest, atomic, guarded)
+            stored = store.put_file(src.name, src, format="file")
+            if stored.sha256 != digest or not store.verify(stored):
+                raise RuntimeError(
+                    f"stage {self.stage_dir.name} publish failed integrity for {src.name}"
+                )
             refs.append(stored)
+        # the finalized public manifest of this stage's outputs (CAS refs only,
+        # never raw staging paths)
+        self._write_stage_manifest(refs)
         return refs
+
+    def _write_stage_manifest(self, refs: list[OutputRef]) -> None:
+        manifest = {
+            "stage": self.stage_dir.name,
+            "outputs": [r.model_dump(mode="json") for r in refs],
+        }
+        atomic_write_json(self.final / "manifest.json", manifest)
 
 
 def atomic_write_text(path: Path, text: str) -> None:
@@ -200,26 +240,47 @@ def assert_source_readonly(source_snapshot_before: dict[str, object], source_pat
         raise RuntimeError(f"source {source_path} is missing")
 
 
+# open fd per lock path; flock is per open-file-description so release MUST
+# unlock the exact fd that acquired the lock (a new fd's LOCK_UN does nothing).
+_LOCK_FDS: dict[str, int] = {}
+
+
 def acquire_file_lock(lock_path: Path, wait_seconds: float = 5.0) -> bool:
-    """Advisory lock via O_EXCL lockfile; returns True when acquired."""
+    """Advisory OS lock (flock, LOCK_EX|LOCK_NB) on a dedicated lockfile.
+
+    The lock is held by the process via an open fd (auto-released on crash) and
+    released explicitly through the SAME fd by ``release_file_lock``. There are
+    no stale lockfile markers to recover — the previous O_EXCL behavior left a
+    stale lockfile forever. Returns True when acquired within ``wait_seconds``.
+    """
     import time
 
-    path = Path(lock_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path = str(Path(lock_path))
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
     deadline = time.monotonic() + wait_seconds
-    while time.monotonic() < deadline:
+    while True:
         try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.ftruncate(fd, 0)
             os.write(fd, f"{os.getpid()}".encode())
-            os.close(fd)
+            _LOCK_FDS[path] = fd
             return True
-        except FileExistsError:
+        except OSError:  # EAGAIN / EACCES
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                return False
             time.sleep(0.05)
-    return False
 
 
 def release_file_lock(lock_path: Path) -> None:
     from contextlib import suppress
 
-    with suppress(FileNotFoundError):
-        os.unlink(lock_path)
+    path = str(Path(lock_path))
+    fd = _LOCK_FDS.pop(path, None)
+    if fd is None:
+        return
+    with suppress(OSError):
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    with suppress(OSError):
+        os.close(fd)

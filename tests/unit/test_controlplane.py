@@ -41,12 +41,14 @@ from model_atlas.recipe.compiler import (
 from model_atlas.recipe.schema import (
     CalibrationIdentity,
     CompressionRecipe,
+    HardwareEnvelope,
     RecipeConstraints,
     RecipeStage,
     RecipeStatus,
     SourceIdentity,
     StageBackendPin,
     StageEffectClass,
+    ValidationGate,
 )
 from model_atlas.repair.gate import CompiledRepair, RepairGate, RepairProposal
 from model_atlas.schemas.evidence import EvidenceKind
@@ -551,6 +553,126 @@ def test_engine_lock_blocks_second_run(
     release_file_lock(run_dir_path / "run.lock")
 
 
+def test_advisory_lock_no_stale_state_recovery_needed(tmp_path: Path):
+    """flock is held by the open fd — crash/close frees the lock automatically,
+    and the lockfile itself is never a usable stale marker (previous O_EXCL
+    would leave a forever-stale file)."""
+    lock = tmp_path / "run.lock"
+    # a child acquires then exits (fd closed by exec/exit => lock released), no
+    # stale marker left to recover.
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; sys.path.insert(0, 'src'); "
+        "from pathlib import Path; "
+        "from model_atlas.jobs.artifacts import acquire_file_lock; "
+        f"print(acquire_file_lock(Path({str(lock)!r}), wait_seconds=0.5)); "
+        "# keep the fd open, then exit without explicit unlock\n"
+    )
+    for _ in range(2):
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        assert out.stdout.strip() == "True"  # each fresh engine acquires fine
+        assert lock.exists()  # lockfile persists but is NOT a stale lock
+
+
+def test_engine_source_content_hash_mismatch_terminal(compiler: RecipeCompiler, tmp_path: Path):
+    from model_atlas.jobs.engine import _source_content_hashes
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "tensor.bin").write_bytes(b"v1")
+    declared = _source_content_hashes(str(src))
+    # watch: tamper the file AFTER declaring its hash -> immutable_source must
+    # fail closed at a stage boundary.
+    recipe = CompressionRecipe(
+        name="hash-mismatch",
+        source=SourceIdentity(
+            source_id="s",
+            checkpoint_path=str(src),
+            sha256=[declared["tensor.bin"]],
+        ),
+        calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
+        stages=[_stage("s1", produces=["manifest.json"], policy=EvidenceKind.PREDICTED)],
+    )
+    compiled = compiler.compile(recipe)
+    reg = build_default_registry()
+
+    def tamper_then_ok(context, handle):
+        (src / "tensor.bin").write_bytes(b"v2-CHANGED")
+        return {"ok": True}
+
+    reg.adapter_for("atlas_quant_probe").execute = tamper_then_ok  # type: ignore[method-assign]
+    eng = JobEngine(compiled, reg, tmp_path / "runs")
+    job = eng.run(inputs={})
+    assert job.status is JobStatus.FAILED_RECOVERABLE
+    assert "content-hash mismatch" in job.error or "changed" in job.error
+
+
+def test_validation_gate_missing_fails_closed(
+    compiler: RecipeCompiler, tmp_path: Path, stable_source: str
+):
+    """A DECLARED validation gate that cannot be executed must fail the stage
+    (never DONE, never promoting)."""
+    recipe = CompressionRecipe(
+        name="gate",
+        source=SourceIdentity(source_id="s", checkpoint_path=stable_source),
+        calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
+        stages=[
+            RecipeStage(
+                id="sg",
+                name="sg",
+                effect_class=StageEffectClass.PROFILING,
+                backend=StageBackendPin(backend_id="atlas_quant_probe", version="unpinned"),
+                produces_format=["manifest.json"],
+                evidence_policy=EvidenceKind.PREDICTED,
+                validation_gates=[
+                    ValidationGate(gate_id="eq-control", kind="eq_control", params={})
+                ],
+            )
+        ],
+    )
+    compiled = compiler.compile(recipe)
+    eng = JobEngine(compiled, build_default_registry(), tmp_path / "runs")
+    job = eng.run(inputs={})
+    assert job.status is JobStatus.FAILED_RECOVERABLE
+    assert job.stage("sg").status is StageStatus.FAILED
+    assert "eq_control gate" in job.stage("sg").message
+
+
+def test_require_available_false_is_dry_run_only(
+    compiler: RecipeCompiler, tmp_path: Path, stable_source: str
+):
+    recipe = CompressionRecipe(
+        name="dryonly",
+        source=SourceIdentity(source_id="s", checkpoint_path=stable_source),
+        calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
+        stages=[
+            RecipeStage(
+                id="dry",
+                name="dry",
+                effect_class=StageEffectClass.PROFILING,
+                backend=StageBackendPin(
+                    backend_id="atlas_quant_probe",
+                    version="unpinned",
+                    require_available=False,
+                ),
+                produces_format=["manifest.json"],
+                evidence_policy=EvidenceKind.PREDICTED,
+            )
+        ],
+    )
+    # compiles (dry-run planning) but execution is non-executable
+    compiled = compiler.compile(recipe)
+    eng = JobEngine(compiled, build_default_registry(), tmp_path / "runs")
+    job = eng.run(inputs={})
+    # the dry-run-only stage fails closed at execution; because the failure is
+    # an explicit refusal (fail-closed), the job is FAILED_TERMINAL.
+    assert job.status is JobStatus.FAILED_TERMINAL
+    assert job.stage("dry").status is StageStatus.FAILED
+    assert "dry-run-only (require_available=false)" in job.stage("dry").message
+
+
 # ---------------------------------------------------------------------------
 # 9. atomic promotion + content addressing
 # ---------------------------------------------------------------------------
@@ -644,12 +766,19 @@ def test_repair_non_allowlisted_rejected():
     bad = RepairProposal(kind="delete_all_weights", target="s1", params={})
     validation = gate.validate_proposal(bad)
     assert not validation.ok
-    assert any("not on the deterministic allowlist" in e for e in validation.errors)
+    assert any("not a registered deterministic" in e for e in validation.errors)
 
 
 def test_repair_allowlisted_compile_and_apply():
     gate = RepairGate()
-    proposal = RepairProposal(kind="keep_channels_normalize", target="s1", params={})
+    # a NON-registered kind is rejected
+    bad = RepairProposal(kind="delete_all_weights", target="s1", params={})
+    assert not gate.validate_proposal(bad).ok
+    proposal = RepairProposal(
+        kind="keep_channels_normalize",
+        target="s1",
+        params={"channels": "4,1,4,3", "channel_hi": "5"},
+    )
     validation = gate.validate_proposal(proposal)
     assert validation.ok
     compiled = validation.compiled
@@ -660,8 +789,13 @@ def test_repair_allowlisted_compile_and_apply():
     assert result.compiled is not None
     after_key = result.compiled.new_key
     assert after_key != result.compiled.restore_key
-    # the repaired content is canonicalized
-    assert json.loads(gate._builtin_apply(proposal, before))["keep_channels"] == [1, 3, 4]
+    # REAL verification: the produced bytes digest must equal the recorded
+    # new_key; a tampered blob must FAIL verification (no or-True).
+    t = gate.transform_for("keep_channels_normalize")
+    assert t is not None and t.transform is not None
+    produced = t.transform(proposal.params, before)
+    assert gate.verify(result.compiled, produced)
+    assert not gate.verify(result.compiled, b"tampered-bytes")
 
 
 def test_repair_rollback_restores_and_refuses_tampered():
@@ -672,15 +806,48 @@ def test_repair_rollback_restores_and_refuses_tampered():
     before = json.dumps({"evidence_kind": "measured"}).encode()
     ok, result = gate.apply(compiled, before_bytes=before)
     assert ok
-    after = gate._builtin_apply(proposal, before)
-    assert json.loads(after)["evidence_kind"] == "inferred"
-    # rollback with the ORIGINAL bytes succeeds
-    rb = gate.rollback(result.compiled, before_bytes=before)
+    # CAS-backed rollback: a lookup returning the ORIGINAL bytes (verified by
+    # full digest against restore_key) authorizes restoration; a tampered blob
+    # is refused.
+    lookup = lambda k: before if k == result.compiled.restore_key else b""  # noqa: E731
+    rb = gate.rollback(result.compiled, lookup)
     assert rb.ok
-    # rollback with tampered bytes is refused
-    tampered = json.dumps({"evidence_kind": "measured", "zz": 1}).encode()
-    rb2 = gate.rollback(result.compiled, before_bytes=tampered)
+    rb2 = gate.rollback(result.compiled, lambda k: b"tampered-cas-content")
     assert not rb2.ok
+
+
+def test_evidence_downgrade_monotonic_and_channel_range():
+    gate = RepairGate()
+    # downgrade ok
+    p = RepairProposal(kind="evidence_downgrade", target="s1", params={"to": "inferred"})
+    before_m = b'{"evidence_kind":"measured"}'
+    ok, _ = gate.apply(gate.validate_proposal(p).compiled, before_bytes=before_m)
+    assert ok
+    # upgrade refused (monotonic non-escalation)
+    p2 = RepairProposal(kind="evidence_downgrade", target="s1", params={"to": "causally_tested"})
+    ok2, _ = gate.apply(gate.validate_proposal(p2).compiled, before_bytes=before_m)
+    assert not ok2
+    # channel range enforced
+    p3 = RepairProposal(
+        kind="keep_channels_normalize",
+        target="s1",
+        params={"channels": "10,5,5", "channel_hi": "5"},
+    )
+    ok3, _ = gate.apply(gate.validate_proposal(p3).compiled, before_bytes=b'{"keep_channels":[]}')
+    assert not ok3
+    # in-range channels canonicalize
+    p4 = RepairProposal(
+        kind="keep_channels_normalize",
+        target="s1",
+        params={"channels": "4,1,4,3", "channel_hi": "5"},
+    )
+    ok4, res4 = gate.apply(
+        gate.validate_proposal(p4).compiled, before_bytes=b'{"keep_channels":[]}'
+    )
+    assert ok4
+    t = gate.transform_for("keep_channels_normalize")
+    assert t is not None and t.transform is not None
+    assert gate.verify(res4.compiled, t.transform(p4.params, b'{"keep_channels":[]}'))
 
 
 # ---------------------------------------------------------------------------
@@ -787,3 +954,122 @@ def test_builtin_glm52_recipe_is_dryrun_plan_only(compiler: RecipeCompiler):
     assert "no_pruning_violation" not in codes  # never self-violates
     with pytest.raises(RecipeCompileError):
         compiler.compile(recipe)  # fails closed until deps/validation exist
+
+
+def test_quant_probe_cannot_serve_compression(compiler: RecipeCompiler):
+    """P0: the in-repo quant probe is probe-only math — a compression stage
+    pinned to it must fail closed at compile (never succeeds)."""
+    recipe = CompressionRecipe(
+        name="probe-compress",
+        source=SourceIdentity(source_id="s", checkpoint_path="/nonexistent"),
+        calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
+        stages=[
+            _stage(
+                "q",
+                backend="atlas_quant_probe",
+                effect=StageEffectClass.QUANTIZATION,
+                produces=["int8"],
+                policy=EvidenceKind.PREDICTED,
+            )
+        ],
+    )
+    issues, _, _ = compiler.validate(recipe)
+    assert "backend_not_derivative_producer" in {i.code for i in issues}
+    with pytest.raises(RecipeCompileError):
+        compiler.compile(recipe)
+
+
+def test_backend_contract_enforcement(compiler: RecipeCompiler):
+    """P1: exact version pin, minimum status, format, param, resource, and
+    arch/runtime compatibility are ALL enforced by the compiler."""
+    # wrong pinned version
+    recipe = _recipe(
+        _stage("v", backend="atlas_quant_probe", produces=["manifest.json"]),
+    )
+    recipe.stages[0].backend.version = "9.9.9-mismatch"
+    issues, _, _ = compiler.validate(recipe)
+    assert "backend_version_mismatch" in {i.code for i in issues}
+    # unknown param
+    recipe2 = _recipe(_stage("p", produces=["manifest.json"]))
+    recipe2.stages[0].parameters["nope"] = "1"
+    issues2, _, _ = compiler.validate(recipe2)
+    assert "backend_param_unknown" in {i.code for i in issues2}
+    # arch-incompatible real-format stage (modelopt declares glm-5.2/any only)
+    recipe3 = CompressionRecipe(
+        name="arch",
+        source=SourceIdentity(source_id="s", checkpoint_path="/nonexistent"),
+        calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
+        hardware=HardwareEnvelope(architecture="x86-unknown", runtime_backend="two-spark"),
+        stages=[
+            _stage(
+                "a",
+                backend="modelopt_nvfp4",
+                effect=StageEffectClass.QUANTIZATION,
+                produces=["modelopt_nvfp4"],
+                policy=EvidenceKind.PREDICTED,
+            )
+        ],
+    )
+    issues3, _, _ = compiler.validate(recipe3)
+    # modelopt declares architectures ("glm-5.2","any") — "x86-unknown" not in it
+    assert "backend_arch_incompatible" in {i.code for i in issues3}
+
+
+def test_backend_format_contract_enforced(compiler: RecipeCompiler):
+    """P1: a stage producing a real serialization format the backend does not
+    declare must fail closed on format mismatch."""
+    recipe = _recipe(
+        _stage(
+            "f",
+            backend="atlas_quant_probe",
+            produces=["not-a-real-atlas-format"],
+        ),
+    )
+    issues, _, _ = compiler.validate(recipe)
+    assert "backend_format_mismatch" in {i.code for i in issues}
+
+
+def test_compiled_plan_deeply_immutable(compiler: RecipeCompiler):
+    """P2: mutating a reconstructed plan copy must never affect the compiled
+    plan's canonical payload or its reconstructable content."""
+    recipe = _simple_recipe()
+    compiled = compiler.compile(recipe)
+    recipe_id = compiled.recipe_id
+    # mutate a stage name on the reconstructed copy
+    rp = compiled.recipe
+    rp.stages[0].name = "MUTATED"
+    assert compiled.recipe.stages[0].name != "MUTATED"  # fresh copy each access
+    # re-constructing repeatedly yields identical canonical content
+    pristine = compiled.recipe
+    assert canonical_json(pristine.model_dump(mode="json")) == compiled._recipe_payload
+    assert compiled.recipe_id == recipe_id
+
+
+def test_resume_refused_if_done_output_corrupted(
+    compiler: RecipeCompiler, tmp_path: Path, stable_source: str
+):
+    """P2: on resume, a previously-DONE stage whose output blob was
+    corrupted/lost must NOT be silently trusted as done."""
+    root = tmp_path / "runs"
+    recipe = _simple_recipe(stable_source)
+    compiled = compiler.compile(recipe)
+    eng = JobEngine(compiled, build_default_registry(), root)
+    job = eng.run(inputs={})
+    assert job.status is JobStatus.COMPLETED
+    # corrupt one published output blob in place
+    first_ref = job.stage("s1").outputs[0]
+    blob = root / "runs" / job.run_id / first_ref.relpath
+    blob.write_bytes(b"CORRUPTED-BLOB")
+    eng2 = JobEngine(compiled, build_default_registry(), root)
+    with pytest.raises(RuntimeError, match="failed verification"):
+        eng2.resume()
+
+
+def test_reproduce_not_emitted_for_uncompilable(compiler: RecipeCompiler):
+    from model_atlas.controlplane.api import ControlPlane
+    from model_atlas.recipes.builtin import glm52_no_pruning_recipe
+
+    plane = ControlPlane(registry=build_default_registry())
+    lin = plane.lineage(glm52_no_pruning_recipe())
+    assert lin["compiles"] is False
+    assert lin["reproduce_command"] == ""  # no unsupported --recipe-id command

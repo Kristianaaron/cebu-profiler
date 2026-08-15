@@ -122,6 +122,25 @@ def job(
 
     plane = ControlPlane(work_root=out)
     if action == "start":
+        if plan:
+            # Functional --plan path: safely load + VERIFY the immutable plan,
+            # then start the run; fail closed on any plan fault.
+            from model_atlas.recipe.schema import CompressionRecipe
+
+            try:
+                r = CompressionRecipe.model_validate_json(Path(plan).read_text(encoding="utf-8"))
+            except Exception as exc:  # noqa: BLE001
+                print(f"FAIL-CLOSED: cannot load plan {plan!r}: {exc}")
+                raise typer.Exit(1) from exc
+            try:
+                engine = plane.start(r, inputs={})
+            except Exception as exc:  # noqa: BLE001 — fail-closed is the CLI contract
+                print(f"FAIL-CLOSED: could not start run from plan: {exc}")
+                raise typer.Exit(1) from exc
+            st = engine.inspect()
+            print(f"run_id: {st['run_id']}")
+            print(f"status: {st['status']} (started from plan {plan!r})")
+            return
         recipes = {
             "glm52-no-pruning": glm52_no_pruning_recipe,
             "tenp-pruning-optin": tenp_pruning_optin_recipe,

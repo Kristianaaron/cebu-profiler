@@ -1,4 +1,5 @@
-"""Deterministic repair framework: typed proposals, allowlist, rollback."""
+"""Deterministic repair framework: typed proposals, registered transforms,
+real verification, atomic CAS rollback."""
 
 from model_atlas.repair.gate import (
     ALLOWLIST,
@@ -6,7 +7,11 @@ from model_atlas.repair.gate import (
     CompiledRepair,
     RepairGate,
     RepairProposal,
+    RepairTransform,
     RepairValidation,
+    known_repairs,
+    register_transform,
+    sha256_hex,
 )
 
 __all__ = [
@@ -15,5 +20,9 @@ __all__ = [
     "DETERMINISTIC_REPAIRS",
     "RepairGate",
     "RepairProposal",
+    "RepairTransform",
     "RepairValidation",
+    "known_repairs",
+    "register_transform",
+    "sha256_hex",
 ]

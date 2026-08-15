@@ -63,11 +63,15 @@ compile today is a *valid plan expressed honestly*, not a bug.
 
 ## Repair
 
-Validators may emit typed `RepairProposal`s. Only allowlisted deterministic
-kinds (`router_bias_reorder`, `keep_channels_normalize`, `bit_count_rebaseline`,
-`index_total_size_rebuild`, `evidence_downgrade`) can be compiled/applied.
-Agent suggestions are proposals until compiled; before/after hashes are kept and
-rollback is hash-verified. Never apply a non-allowlisted repair.
+Validators may emit typed `RepairProposal`s. Only **registered deterministic
+transforms** (`router_bias_reorder`, `keep_channels_normalize`,
+`bit_count_rebaseline`, `index_total_size_rebuild`, `evidence_downgrade`) can be
+compiled/applied; each transform carries a contract, a mandatory evidence-kind
+ceiling, and (for channels) range bounds. Agent suggestions are proposals until
+compiled. Every applied repair records before/after **full-digest** hashes and
+rollback restores the recorded CAS ref (hash-verified) — never flags. Evidence
+downgrades are monotonic (an upgrade is refused); out-of-range channels are
+refused. Never apply a non-registered repair.
 
 ## Reporting
 

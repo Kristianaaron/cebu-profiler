@@ -137,6 +137,11 @@ class BackendRegistry:
         key = _hybrid_key(formats)
         return any(key in r.declared_capabilities for r in self._records.values())
 
+    def backend_declares_hybrid(self, backend_id: str, formats: set[str]) -> bool:
+        key = _hybrid_key(formats)
+        rec = self.get(backend_id)
+        return rec is not None and key in rec.declared_capabilities
+
     def capabilities(self) -> dict[str, object]:
         out: dict[str, object] = {}
         for r in self._records.values():
@@ -212,6 +217,8 @@ def _atlas_quant_adapter() -> BackendAdapter:
 
     class AtlasQuantAdapter(BackendAdapter):
         backend_id = "atlas_quant_probe"
+        # P0: probe-only math — explicitly NOT a compression/derivative producer.
+        produces_derivative = False
 
         def prepare(self, context: dict[str, object]) -> str:
             return "atlas-quant::ready"

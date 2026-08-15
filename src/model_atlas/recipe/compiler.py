@@ -29,6 +29,12 @@ from typing import Protocol, runtime_checkable
 
 from model_atlas.recipe.schema import CompressionRecipe, RecipeStatus, StageEffectClass
 
+# The compiled plan must be DEEPLY immutable: its embedded recipe tree is frozen
+# so no caller can mutate a plan field (or a nested stage/constraint) after
+# compilation. Fresh immutable copies are made on each compile to avoid freezing
+# the caller's original (which may still be authored/re-edited).
+_IMMUTABLE_RECIPE_CFG = {"frozen": True, "extra": "forbid"}
+
 
 @runtime_checkable
 class BackendRecordLike(Protocol):
@@ -36,6 +42,39 @@ class BackendRecordLike(Protocol):
 
     status: RecipeStatus
     version: str
+    formats: tuple[str, ...]
+    supported_formats: tuple[str, ...]
+    architectures: tuple[str, ...]
+    runtime_compat: tuple[str, ...]
+    produces_derivative: bool
+    fail_closed: bool
+    declared_capabilities: tuple[str, ...]
+    parameters: tuple[ParameterSpecLike, ...]
+    resource_limits: ResourceLimitsLike | None
+
+
+@runtime_checkable
+class ParameterSpecLike(Protocol):
+    """Parameter-schema subset the compiler validates against."""
+
+    name: str
+    type: str
+    required: bool
+    enum: tuple[str, ...]
+    minimum: float | None
+    maximum: float | None
+    default: str | None
+
+    def validate(self, value: str) -> list[str]: ...
+
+
+@runtime_checkable
+class ResourceLimitsLike(Protocol):
+    """Bounded resource envelope a backend may serve."""
+
+    max_host_gb: float
+    max_scratch_gb: float
+    max_workers: int
 
 
 @runtime_checkable
@@ -47,7 +86,7 @@ class CapabilityRegistryLike(Protocol):
     def get(self, backend_id: str) -> BackendRecordLike | None: ...
     def is_backend_available(self, backend_id: str) -> bool: ...
     def declares_capability(self, capability: str) -> bool: ...
-    def declares_hybrid(self, formats: set[str]) -> bool: ...
+    def backend_declares_hybrid(self, backend_id: str, formats: set[str]) -> bool: ...
     def backend_status_value(self, backend_id: str) -> str: ...
 
 
@@ -78,16 +117,28 @@ class CompileIssue:
 
 @dataclass(frozen=True)
 class CompiledRecipe:
-    """Immutable compiled plan. Nothing here may change after compilation."""
+    """Immutable compiled plan. Nothing here may change after compilation.
 
-    recipe: CompressionRecipe
+    Deep immutability: the authored recipe is stored ONLY as its canonical JSON
+    payload (``_recipe_payload``) + the plan-level ids. ``recipe`` is a property
+    that reconstructs a fresh ``CompressionRecipe`` from that payload each
+    access, so no caller can mutate a nested stage/constraint/dict inside the
+    compiled plan — mutating a returned copy never affects the plan.
+    """
+
+    _recipe_payload: str = field(repr=False, compare=False)
     recipe_id: str
     recipe_sha256: str
-    plan_id: str  # == recipe_id (the compiled plan is the canonical recipe)
-    resolved_backends: dict[str, str] = field(default_factory=dict)  # stage_id -> backend_id
-    issues: tuple[CompileIssue, ...] = ()  # non-fatal warnings recorded
-    backend_status_snapshot: dict[str, str] = field(default_factory=dict)
+    plan_id: str
+    resolved_backends: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
+    issues: tuple[CompileIssue, ...] = ()
+    backend_status_snapshot: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
     compiled_by: str = "model-atlas"
+
+    @property
+    def recipe(self) -> CompressionRecipe:
+        """Fresh, value-semantics copy reconstructed from the frozen payload."""
+        return CompressionRecipe.model_validate_json(self._recipe_payload)
 
     def run_id(self, job_inputs: dict[str, object]) -> str:
         """Stable run id derived from the compiled plan + concrete job inputs."""
@@ -105,9 +156,9 @@ class CompiledRecipe:
             "recipe_id": self.recipe_id,
             "recipe_sha256": self.recipe_sha256,
             "plan_id": self.plan_id,
-            "resolved_backends": self.resolved_backends,
+            "resolved_backends": dict(self.resolved_backends),
             "issues": [i.to_dict() for i in self.issues],
-            "backend_status_snapshot": self.backend_status_snapshot,
+            "backend_status_snapshot": dict(self.backend_status_snapshot),
             "compiled_by": self.compiled_by,
             "name": self.recipe.name,
         }
@@ -164,7 +215,7 @@ class RecipeCompiler:
             s.id: self._registry.backend_status_value(s.backend.backend_id) for s in recipe.stages
         }
         return CompiledRecipe(
-            recipe=recipe,
+            _recipe_payload=canonical_json(recipe.model_dump(mode="json")),
             recipe_id=rid,
             recipe_sha256=sha,
             plan_id=rid,
@@ -191,12 +242,35 @@ class RecipeCompiler:
     def _check_no_pruning(self, recipe: CompressionRecipe) -> list[CompileIssue]:
         issues: list[CompileIssue] = []
         pruning = [s for s in recipe.stages if s.effect_class is StageEffectClass.PRUNING]
+        # Build the full format-consumption DAG: edge A -> B when a format
+        # produced by A is required by B. Pruning taint flows downstream through
+        # the whole DAG, so a stage that only transitively consumes a
+        # pruning-produced format (through an intermediate) is also illegal.
+        produced_by: dict[str, str] = {}
+        for s in recipe.stages:
+            for f in s.produces_format:
+                produced_by[f] = s.id
+        requires_of: dict[str, list[str]] = {s.id: [] for s in recipe.stages}
+        for s in recipe.stages:
+            for f in s.requires_formats:
+                producer = produced_by.get(f)
+                if producer is not None and producer != s.id:
+                    requires_of[s.id].append(producer)
+        # downstream reachability from each pruning stage
+        tainted: set[str] = set()
+        stack: list[str] = [s.id for s in pruning]
+        while stack:
+            node = stack.pop()
+            if node in tainted:
+                continue
+            tainted.add(node)
+            for other in recipe.stages:
+                if node in requires_of[other.id]:
+                    stack.append(other.id)
 
         if recipe.constraints.allow_pruning_capability:
-            # Opt-in capability recipe: require the capability to be actually
-            # declared on the registry, AND the specific backend serving each
-            # pruning stage to declare it (else a non-pruning backend could
-            # masquerade as a pruning step).
+            # Opt-in capability recipe: require the capability actually declared
+            # AND each pruning-stage backend to declare it.
             declared = self._registry.declares_capability("pruning")
             if not pruning:
                 issues.append(
@@ -241,17 +315,16 @@ class RecipeCompiler:
                         s.id,
                     )
                 )
-            # transitive: any stage requiring a pruning-produced format is also illegal
-            produced_pruning_fmt = {f for s in pruning for f in s.produces_format}
-            for s in recipe.stages:
-                overlap = set(s.requires_formats) & produced_pruning_fmt
-                if overlap:
+            # transitive taint: any stage reachable from a pruning stage is illegal
+            for stage in recipe.stages:
+                if stage.id in tainted and stage.effect_class is not StageEffectClass.PRUNING:
                     issues.append(
                         CompileIssue(
                             "error",
                             "no_pruning_violation_transitive",
-                            f"stage consumes a pruning-produced format {sorted(overlap)}",
-                            s.id,
+                            "stage transitively depends on a pruning-produced format "
+                            "(full DAG reachability)",
+                            stage.id,
                         )
                     )
         return issues
@@ -283,8 +356,8 @@ class RecipeCompiler:
         issues: list[CompileIssue] = []
         # Only real serialized precision/serialization formats count as a
         # "precision mix". Maps, profiles, and intermediate plan artifacts never
-        # make a recipe hybrid — a hybrid claim requires the recipe to actually
-        # write multiple on-disk precision encodings of weights.
+        # make a recipe hybrid — a hybrid claim requires multiple on-disk
+        # precision encodings of weights.
         _PRECISION_FORMATS = frozenset(
             {
                 "exl3",
@@ -311,33 +384,36 @@ class RecipeCompiler:
 
         combos = ",".join(sorted(quant_fmts))
         # The ONLY way an unsupported composition compiles is an explicit
-        # capability declaration by the selected backend/runtime for that exact
-        # combination. An author flag must NEVER demote unsupported hybrid to a
-        # warning — execution would still fail at run time, but a warning could
-        # be dismissed and an unsupported recipe promoted. Both paths are errors
-        # unless a runtime/backend explicitly declares support.
-        declared = self._registry.declares_hybrid(quant_fmts)
-        if not declared:
+        # capability declared by the SELECTED backend for that exact format set,
+        # with that backend AVAILABLE and version-PINNED at compile time. A
+        # declaration on some other registry record never authorizes it; the
+        # author flag alone never weakens this.
+        declared = False
+        declaring: list[str] = []
+        for stage_id in recipe.stages:
+            sid = stage_id.id
+            pin = stage_id.backend
+            rec = self._registry.get(pin.backend_id)
+            if rec is None:
+                continue
+            if not self._registry.is_backend_available(pin.backend_id):
+                continue
+            if pin.version and pin.version != "unpinned" and rec.version != pin.version:
+                continue
+            if self._registry.backend_declares_hybrid(pin.backend_id, quant_fmts):
+                declared = True
+                declaring.append(sid)
+
+        if not declared or len(declaring) == 0:
             message = (
-                f"recipe mixes precision formats {{{combos}}} but no backend "
-                "explicitly declares support for that exact combination. "
-                "(EXL3+NVFP4+FP8 is rejected unless a runtime/backend declares "
-                "it.) allow_hybrid_precision alone never authorizes an "
-                "unsupported composition."
+                f"recipe mixes precision formats {{{combos}}} but no SELECTED, "
+                "available, version-pinned backend explicitly declares support for "
+                "that exact combination. (EXL3+NVFP4+FP8 is rejected unless a "
+                "runtime/backend declares it.) allow_hybrid_precision alone never "
+                "authorizes an unsupported composition, nor does a declaration on "
+                "an unrelated/unavailable registry record."
             )
-            if recipe.constraints.allow_hybrid_precision:
-                message += (
-                    " allow_hybrid_precision=true was set, but that only records "
-                    "author intent — it does not substitute for a declared "
-                    "runtime/backend capability, so compile still fails closed."
-                )
-            issues.append(
-                CompileIssue(
-                    "error",
-                    "unsupported_hybrid_precision",
-                    message,
-                )
-            )
+            issues.append(CompileIssue("error", "unsupported_hybrid_precision", message))
         return issues
 
     def _check_backends(self, recipe: CompressionRecipe) -> list[CompileIssue]:
@@ -355,6 +431,8 @@ class RecipeCompiler:
                     )
                 )
                 continue
+
+            # -- availability (fail closed unless explicitly dry-run-only) --
             if pin.require_available and not self._registry.is_backend_available(pin.backend_id):
                 issues.append(
                     CompileIssue(
@@ -366,17 +444,191 @@ class RecipeCompiler:
                         s.id,
                     )
                 )
+
+            # -- minimum lifecycle status (e.g. stage requires validated) --
+            if _STATUS_RANK.get(record.status, 99) < _STATUS_RANK.get(pin.minimum_status, 0):
+                issues.append(
+                    CompileIssue(
+                        "error",
+                        "backend_status_below_minimum",
+                        f"backend {pin.backend_id!r} status {record.status.value} is "
+                        f"below stage minimum {pin.minimum_status.value}",
+                        s.id,
+                    )
+                )
+
+            # -- version pin: only an exact pinned version is acceptable --
             if pin.version and pin.version != "unpinned" and record.version != pin.version:
                 issues.append(
                     CompileIssue(
-                        "warning",
+                        "error",
                         "backend_version_mismatch",
-                        f"stage pins backend version {pin.version!r} but registry has "
-                        f"{record.version!r}",
+                        f"stage pins backend version {pin.version!r} but the selected "
+                        f"backend is {record.version!r}; exact pins required for "
+                        "reproducible execution",
+                        s.id,
+                    )
+                )
+
+            # -- format compatibility: only REAL serialization/weight formats a
+            #    stage claims to produce must be declared by the backend. Plan
+            #    artifacts (research maps/profiles/plans, manifests) exchange
+            #    JSON internally and are not backend-format contracts.
+            supported = set(record.formats) | set(record.supported_formats)
+            produced = set()
+            for _f in s.produces_format:
+                if _f not in _PLAN_ARTIFACTS and _f not in {"manifest.json", "jsonl-events"}:
+                    produced.add(_f)
+            for f in produced:
+                if f not in supported:
+                    issues.append(
+                        CompileIssue(
+                            "error",
+                            "backend_format_mismatch",
+                            f"stage produces format {f!r} but backend "
+                            f"{pin.backend_id!r} does not declare it",
+                            s.id,
+                        )
+                    )
+
+            # -- parameter schema --
+            allowed = {p.name for p in record.parameters}
+            for p in record.parameters:
+                if p.required and p.name not in s.parameters:
+                    issues.append(
+                        CompileIssue(
+                            "error",
+                            "backend_required_param_missing",
+                            f"stage missing required parameter {p.name!r} for "
+                            f"backend {pin.backend_id!r}",
+                            s.id,
+                        )
+                    )
+            for k in s.parameters:
+                if k not in allowed:
+                    issues.append(
+                        CompileIssue(
+                            "error",
+                            "backend_param_unknown",
+                            f"stage parameter {k!r} not declared by backend {pin.backend_id!r}",
+                            s.id,
+                        )
+                    )
+            for param in record.parameters:
+                if param.name in s.parameters:
+                    for err in param.validate(s.parameters[param.name]):
+                        issues.append(CompileIssue("error", "backend_param_invalid", err, s.id))
+            # -- resource bounds: a stage may not exceed its backend's declared
+            #    capabilities (bounded-resource contract) --
+            if record.resource_limits is not None:
+                lim = record.resource_limits
+                if s.resources.max_host_gb > lim.max_host_gb:
+                    issues.append(
+                        CompileIssue(
+                            "error",
+                            "backend_resource_exceeded",
+                            f"stage host_gb {s.resources.max_host_gb} exceeds backend "
+                            f"limit {lim.max_host_gb}",
+                            s.id,
+                        )
+                    )
+                if s.resources.max_workers > lim.max_workers:
+                    issues.append(
+                        CompileIssue(
+                            "error",
+                            "backend_resource_exceeded",
+                            f"stage workers {s.resources.max_workers} exceeds backend "
+                            f"limit {lim.max_workers}",
+                            s.id,
+                        )
+                    )
+
+            # -- architecture/runtime compatibility: only stages producing REAL
+            #    serialization/weight formats must be compatible with the target
+            #    serving runtime + architecture. Analysis/profiling/eval/plan
+            #    stages run on the local CPU regardless of the serving runtime.
+            real_formats = [f for f in s.produces_format if f not in _PLAN_ARTIFACTS]
+            if real_formats:
+                arch = recipe.hardware.architecture
+                # exact match required: "any" is a *documentation* term, not a
+                # wildcard that silently papers over an uninventoried target.
+                if arch not in record.architectures:
+                    issues.append(
+                        CompileIssue(
+                            "error",
+                            "backend_arch_incompatible",
+                            f"backend {pin.backend_id!r} not compatible with target "
+                            f"architecture {arch!r} (declared {record.architectures})",
+                            s.id,
+                        )
+                    )
+                if (
+                    recipe.hardware.runtime_backend not in record.runtime_compat
+                    and "any" not in record.runtime_compat
+                ):
+                    issues.append(
+                        CompileIssue(
+                            "error",
+                            "backend_runtime_incompatible",
+                            f"backend {pin.backend_id!r} not compatible with runtime "
+                            f"{recipe.hardware.runtime_backend!r}",
+                            s.id,
+                        )
+                    )
+
+            # -- P0 derivative gate: a compression stage must be served by a
+            #    backend that produces a REAL derivative; a probe-only producer
+            #    can never make a compression stage succeed at compile time --
+            if (
+                s.effect_class
+                in {
+                    StageEffectClass.QUANTIZATION,
+                    StageEffectClass.REFINEMENT,
+                    StageEffectClass.RESIDUAL,
+                    StageEffectClass.CONDITIONING,
+                }
+                and not record.produces_derivative
+            ):
+                issues.append(
+                    CompileIssue(
+                        "error",
+                        "backend_not_derivative_producer",
+                        f"stage {s.id} is a compression stage but backend "
+                        f"{pin.backend_id!r} is probe/analysis-only "
+                        "(produces_derivative=False); no real derivative can result",
                         s.id,
                     )
                 )
         return issues
+
+
+_STATUS_RANK = {
+    RecipeStatus.UNAVAILABLE: 0,
+    RecipeStatus.DISCOVERED: 1,
+    RecipeStatus.EXPERIMENTAL: 2,
+    RecipeStatus.VALIDATED: 3,
+    RecipeStatus.RECOMMENDED: 4,
+}
+
+# Non-serialized plan artifacts: analysis maps, profiles, plans, and manifests
+# exchanged as JSON. They are NOT backend format contracts (a backend producing
+# an "exl3" or "modelopt_nvfp4" serialization is what the format gate checks).
+_PLAN_ARTIFACTS = frozenset(
+    {
+        "manifest.json",
+        "jsonl-events",
+        "corpus-profile",
+        "sensitivity-map",
+        "representation-map",
+        "bit-allocation",
+        "kv-plan",
+        "routing-trace",
+        "keep-map",
+        "runtime-profile",
+        "eval-results",
+        "conditioned-weights",
+    }
+)
 
 
 def _summarize(issues: list[CompileIssue]) -> str:

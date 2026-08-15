@@ -113,9 +113,11 @@ class StageBackendPin(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     backend_id: str
-    version: str  # backend_version pin; "" means "unpinned" at authoring time
+    version: str  # backend_version pin; "" or "unpinned" = not pinned at authoring time
     minimum_status: RecipeStatus = RecipeStatus.DISCOVERED
-    require_available: bool = True  # fail-closed when backend unavailable
+    # FAIL-CLOSED by default. Setting False makes the stage dry-run-only: it can
+    # compile for inspection/planning but can never EXECUTE in a job.
+    require_available: bool = True
 
 
 class RecipeStage(BaseModel):
@@ -232,6 +234,12 @@ class CompressionRecipe(BaseModel):
     stages: list[RecipeStage] = Field(default_factory=list)
     publish: PublishRule = Field(default_factory=PublishRule)
     backend_pins: dict[str, str] = Field(default_factory=dict)  # backend_id -> version
+    # Authoring metadata. NOTE: created_at is NOT part of the canonical content
+    # that derives recipe_id/recipe_sha256 (the id is content-addressed, not
+    # time-addressed), so two authoring times never change a recipe's identity.
+    # recipe_id is None while the recipe is being authored; it is assigned by
+    # the compiler (recipe_id_of) and is never read back as authoritative from
+    # this authoring structure at compile time.
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     recipe_id: str | None = None
 

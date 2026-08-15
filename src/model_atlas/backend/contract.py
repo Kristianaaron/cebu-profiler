@@ -136,6 +136,11 @@ class BackendRecord:
     supported_formats: tuple[str, ...] = ()
     # failure-closed guarantee
     fail_closed: bool = True
+    # P0: only true for adapters that produce a REAL derivative checkpoint.
+    produces_derivative: bool = False
+    # P1: bounded resource envelope this backend can serve (host/workers); None =
+    # unbounded-declared (compiler skips the resource-bounds check).
+    resource_limits: ResourceEstimate | None = None
     # probe
     availability_probe: AvailabilityProbe | None = None
     _availability_cached: tuple[bool, str | None, str] | None = field(default=None, repr=False)
@@ -211,6 +216,10 @@ class BackendAdapter(ABC):
     """Concrete executable backend. All methods may raise BackendUnavailable."""
 
     backend_id: str = ""
+    # P0: whether execute() produces a real derivative checkpoint. Probe-only
+    # math / analysis adapters must keep this False; the job engine refuses to
+    # mark a compression stage DONE from a non-derivative producer.
+    produces_derivative: bool = False
 
     @abstractmethod
     def prepare(self, context: dict[str, object]) -> str:

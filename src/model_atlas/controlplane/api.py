@@ -20,10 +20,11 @@ Exposed operations (user-requestable):
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 from model_atlas.backend.registry import BackendRegistry, build_default_registry
 from model_atlas.jobs.engine import JobEngine
-from model_atlas.recipe.compiler import CompiledRecipe, RecipeCompiler
+from model_atlas.recipe.compiler import CapabilityRegistryLike, CompiledRecipe, RecipeCompiler
 from model_atlas.recipe.schema import CompressionRecipe
 
 
@@ -35,7 +36,7 @@ class ControlPlane:
     ) -> None:
         self.registry = registry or build_default_registry()
         self.work_root = Path(work_root)
-        self.compiler = RecipeCompiler(self.registry)
+        self.compiler = RecipeCompiler(cast(CapabilityRegistryLike, self.registry))
 
     # ------------------------------------------------------------ capability
     def capabilities(self) -> dict[str, object]:
@@ -80,25 +81,44 @@ class ControlPlane:
         return engine
 
     def engine_for(self, run_id: str) -> JobEngine:
-        """Rebuild an engine bound to an existing run dir (for status/resume)."""
-        dirs = sorted((self.work_root / "runs").glob(run_id))
-        if not dirs:
-            raise KeyError(f"no run dir for {run_id!r}")
-        run_dir = dirs[0]
-        job_path = run_dir / "job.json"
+        """Rebuild an engine bound to an existing run dir (for status/resume).
+
+        Exact identity validation: the run dir path is derived deterministically
+        from the persisted plan + inputs (no glob semantics). All four of
+        ``run_id``, persisted job.run_id, recomputed run_id, and dir name must
+        agree or this fails closed.
+        """
         from model_atlas.jobs.schema import Job
 
+        # EXACT path (no glob): derive run_dir from the recipe ids + inputs in
+        # the persisted job, then verify the file truly lives there.
+        expected_dir = self.work_root / "runs" / run_id
+        job_path = expected_dir / "job.json"
+        if not job_path.exists():
+            raise KeyError(f"no run dir for {run_id!r} at {expected_dir}")
         job = Job.model_validate_json(job_path.read_text(encoding="utf-8"))
-        plan = CompressionRecipe.model_validate_json((run_dir / "plan.json").read_text())
+        if job.run_id != run_id:
+            raise RuntimeError(
+                f"run identity mismatch: persisted job.run_id={job.run_id} != requested {run_id}"
+            )
+        plan = CompressionRecipe.model_validate_json((expected_dir / "plan.json").read_text())
         compiled = self.compile_recipe(plan)
-        # ensure the recomputed ids match the persisted run (determinism check)
         if compiled.plan_id != job.plan_id:
             raise RuntimeError(
                 f"run {run_id} plan replay mismatch: {compiled.plan_id} != {job.plan_id}"
             )
+        recomputed = self.compiler.compile(plan).run_id(job.inputs)
+        if recomputed != run_id:
+            raise RuntimeError(
+                f"run {run_id} input-identity mismatch: recomputed {recomputed} != {run_id} "
+                "(persisted inputs do not reproduce this run_id)"
+            )
         engine = JobEngine(compiled, self.registry, self.work_root)
-        # bind the engine to the persisted run's actual input identity
+        # bind the engine to the EXACT persisted run identity
         engine._bind_run(job.inputs)
+        if engine.run_dir != expected_dir:
+            raise RuntimeError("engine run_dir failed to match the persisted run dir")
+        engine._run_id = run_id  # pin the verified identity
         return engine
 
     def status(self, run_id: str) -> dict[str, object]:
@@ -121,9 +141,16 @@ class ControlPlane:
     def lineage(self, recipe: CompressionRecipe) -> dict[str, object]:
         """Lineage/ids are content-derived and available even for a recipe that
         fails closed on compile (unavailable backends). Issues are reported;
-        they never block lineage inspection."""
+        they never block lineage inspection. No reproduce_command is emitted for
+        an uncompilable recipe (the CLI cannot run it); for a compilable recipe
+        the command is the functional --plan start path."""
         issues, recipe_id, recipe_hash = self.compiler.validate(recipe)
         fatal = [i for i in issues if i.severity == "error"]
+        reproduce = ""
+        if not fatal:
+            reproduce = "model-atlas job start --plan <path-to-immutable-plan.json> --out " + str(
+                self.work_root
+            )
         return {
             "recipe_id": recipe_id,
             "recipe_hash": recipe_hash,
@@ -138,8 +165,5 @@ class ControlPlane:
             },
             "source": recipe.source.source_id,
             "calibration": recipe.calibration.calibration_id,
-            "reproduce_command": (
-                f"model-atlas job start --recipe-id {recipe_id} --out "
-                f"{self.work_root}  # sha256 {recipe_hash[:12]}"
-            ),
+            "reproduce_command": reproduce,
         }

@@ -38,11 +38,12 @@ from model_atlas.jobs.artifacts import (
     atomic_write_json,
     atomic_write_text,
     release_file_lock,
+    sha256_file,
     source_snapshot,
 )
-from model_atlas.jobs.schema import Job, JobStatus, StageStatus
+from model_atlas.jobs.schema import Job, JobStatus, StageOutput, StageStatus
 from model_atlas.recipe.compiler import CompiledRecipe, canonical_json
-from model_atlas.recipe.schema import RecipeStage
+from model_atlas.recipe.schema import RecipeStage, ValidationGate
 from model_atlas.schemas.evidence import EvidenceKind
 
 _EVIDENCE_RANK = {  # higher = closer to measured
@@ -61,6 +62,25 @@ def _suppressed_evidence(policy: EvidenceKind, reported: EvidenceKind) -> Eviden
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _source_content_hashes(source_path: str) -> dict[str, str]:
+    """Bounded full content-hash of a source (dir: file-name -> sha256 for up to
+    8 bounded files; file: sha256 of the file). Raises if the source is missing.
+    Used to verify declared SourceIdentity.sha256 and to detect in-place source
+    mutation by content (not just stat)."""
+    p = Path(source_path)
+    if not p.exists():
+        raise RuntimeError(f"source {source_path} is missing (cannot content-hash)")
+    if p.is_file():
+        return {"__source__": sha256_file(p)}
+    out: dict[str, str] = {}
+    for child in sorted(p.iterdir()):
+        if len(out) >= 8:
+            break
+        if child.is_file():
+            out[child.name] = sha256_file(child)
+    return out
 
 
 class JobJournal:
@@ -143,7 +163,18 @@ class JobEngine:
         return Job.model_validate(d)
 
     def _save(self, job: Job) -> None:
+        """Persist the job snapshot ATOMICALLY. Callers must append the journal
+        event BEFORE calling ``_save`` where the event describes the change (so
+        the journal is write-ahead of the state it records). This method only
+        captures the canonical snapshot; ordering is enforced by the callers."""
         atomic_write_json(self.job_path, job.model_dump(mode="json"))
+
+    def _transition(self, job: Job, event: dict[str, object]) -> None:
+        """Write-ahead transition: journal event (durably fsynced) THEN the
+        atomic job.json snapshot. A crash between the two leaves the journal
+        having recorded the intent; resume replays from the journal point."""
+        self.journal.append(event)
+        self._save(job)
 
     # ------------------------------------------------------------- execute
     def run(self, inputs: dict[str, object] | None = None) -> Job:
@@ -166,15 +197,16 @@ class JobEngine:
         existing = self._load_job()
         if existing is not None:
             if existing.status is JobStatus.RUNNING or existing.status is JobStatus.RESUMING:
-                # crashed mid-stage: treat as resume from journal point
+                # crashed mid-stage: recover from journal point
                 self.journal.append({"event": "state.recovered", "from": existing.status.value})
             self.journal.append({"event": "state.resume.begin"})
             return self._resume_locked(existing, inputs)
         job = self._init_run_dir(inputs)
         atomic_write_json(self.plan_path, self.compiled.recipe.model_dump(mode="json"))
         self._write_reproduce(job)
-        self._save(job)
+        # write-ahead: journal run.created BEFORE the job snapshot
         self.journal.append({"event": "run.created", "stages": job.stage_order})
+        self._save(job)
         return self._resume_locked(job, inputs)
 
     def _write_reproduce(self, job: Job) -> None:
@@ -205,10 +237,21 @@ class JobEngine:
         job = self._load_job()
         if job is None:
             raise RuntimeError("cannot resume: job.json missing (no run started)")
-        concrete = inputs or job.inputs
-        # bind to the actual (persisted) input identity so resume addresses the
+        concrete = inputs if inputs is not None else job.inputs
+        recomputed = self.compiled.run_id(concrete)
+        if recomputed != job.run_id:
+            raise RuntimeError(
+                f"resume identity mismatch: inputs {concrete} recompute run_id "
+                f"{recomputed} but persisted job.run_id is {job.run_id}; refusing "
+                "to resume a different run"
+            )
+        # bind to the ACTUAL (persisted) input identity so resume addresses the
         # same run directory deterministically
         self._bind_run(concrete)
+        if self.run_dir != Path(job.run_dir):
+            raise RuntimeError(
+                f"resume run_dir mismatch: bound {self.run_dir} != persisted {job.run_dir}"
+            )
         if job.status is JobStatus.RUNNING or job.status is JobStatus.RESUMING:
             # crashed mid-stage: recover from journal point
             self.journal.append({"event": "state.recovered", "from": job.status.value})
@@ -222,6 +265,20 @@ class JobEngine:
             release_file_lock(self.run_dir / "run.lock")
 
     def _resume_locked(self, job: Job, inputs: dict[str, object]) -> Job:
+        # P1: verify every already-DONE stage's published outputs are still
+        # content-valid before trusting ANY resume (a stage whose blob was
+        # lost/corrupted is NOT trusted as done) — this runs even when the run
+        # would otherwise be terminal, so a completed run's DONE outputs are
+        # still integrity-checked on every resume attempt.
+        for stage_id in job.stage_order:
+            so = job.stage(stage_id)
+            if so.status is StageStatus.DONE:
+                ok, detail = self._verify_done_outputs(so)
+                if not ok:
+                    raise RuntimeError(
+                        f"resume refused: stage {stage_id} was DONE but its outputs "
+                        f"failed verification ({detail})"
+                    )
         # Crashes mid-stage leave the job RUNNING/RESUMING; a recoverable stage
         # exception leaves FAILED_RECOVERABLE; both resume. Terminal states and a
         # hard success refuse re-entry (deterministic, no double execution).
@@ -236,6 +293,8 @@ class JobEngine:
         job.status = JobStatus.RUNNING
         job.failed_stage = None
         job.error = ""
+        # write-ahead: journal the transition BEFORE the snapshot
+        self.journal.append({"event": "run.resumed"})
         self._save(job)
         for stage_id in job.stage_order:
             stage = job.stage(stage_id)
@@ -260,10 +319,17 @@ class JobEngine:
                 else:
                     job.status = JobStatus.FAILED_RECOVERABLE
                 job.error = stage.message
-                self._save(job)
+                detail = stage.message or "stage failed"
+                # write-ahead: terminal event first, then the snapshot
                 self.journal.append(
-                    {"event": "run.terminal", "status": job.status.value, "stage": stage_id}
+                    {
+                        "event": "run.terminal",
+                        "status": job.status.value,
+                        "stage": stage_id,
+                        "detail": detail,
+                    }
                 )
+                self._save(job)
                 return job
         all_ok = all(job.stage(s).status is StageStatus.DONE for s in job.stage_order)
         if all_ok:
@@ -272,8 +338,9 @@ class JobEngine:
             job.status = JobStatus.COMPLETED_WITH_WARNINGS
         self._assert_source_immutable(job)
         self._write_manifest(job)
-        self._save(job)
+        # write-ahead: completed event before final snapshot
         self.journal.append({"event": "run.completed", "status": job.status.value})
+        self._save(job)
         return job
 
     def _journal_stage_start(self, job: Job, stage_id: str, resumed: bool) -> None:
@@ -290,6 +357,75 @@ class JobEngine:
             src = self.compiled.recipe.source.checkpoint_path
             if src:
                 assert_source_readonly(job.source_snapshot, src)
+        # P1: verify the DECLARED SourceIdentity.sha256 full content hashes are
+        # correct (mismatch is terminal). Only enumerable/bounded sources are
+        # hashed here; a missing source is caught by assert_source_readonly.
+        declared = self.compiled.recipe.source.sha256
+        if declared:
+            actual = _source_content_hashes(self.compiled.recipe.source.checkpoint_path)
+            declared_set = set(declared)
+            # every declared hash must match one measured file's full digest.
+            # Note: hashes are content-without-name; we match the SET of measured
+            # full digests so a per-file list in SourceIdentity.sha256 is the
+            # contract (a list containing every referenced file's hash).
+            measured_set = set(actual.values())
+            if not declared_set.issubset(measured_set):
+                raise RuntimeError(
+                    "source content-hash mismatch: declared "
+                    f"{sorted(declared_set)} not all present among measured "
+                    f"{sorted(measured_set)} (immutable_source violated)"
+                )
+
+    def _run_validation_gates(self, job: Job, stage: str) -> None:
+        """P1: execute EVERY declared validation gate before a stage may be
+        marked DONE. A declared gate that cannot be run (missing validator, no
+        adapter) FAILS CLOSED — a stage with an unvalidated gate is never DONE
+        and never promotes."""
+        recipe_stage = self._stage_by_id(stage)
+        so = job.stage(stage)
+        for gate in recipe_stage.validation_gates:
+            if not gate.required:
+                continue
+            if gate.kind == "dry_run":
+                continue  # dry_run is a pre-flight check, not a DONE gate
+            # resolve + execute the validator; unknown/missing gate fails closed
+            outcome = self._execute_gate(gate, recipe_stage, so, job)
+            if outcome is not True:
+                raise RuntimeError(
+                    f"stage {stage} validation gate {gate.gate_id!r} "
+                    f"({gate.kind}) FAILED: {outcome}"
+                )
+
+    def _execute_gate(
+        self,
+        gate: ValidationGate,
+        recipe_stage: RecipeStage,
+        so: StageOutput,
+        job: Job,
+    ) -> bool | str:
+        """Run a single declared gate against the stage's published outputs.
+        Returns True on pass, an error string on fail/unrunnable (fail closed)."""
+        if gate.kind == "validator":
+            # backend validator path: only a real adapter validator counts.
+            result = self.registry.validate_stage(
+                recipe_stage.backend.backend_id, {}, {r.name: r for r in so.outputs}
+            )
+            if result.get("status") == "unvalidated":
+                return f"backend returned unvalidated ({result.get('errors')})"
+            return bool(result.get("validated")) or str(result)
+        if gate.kind == "eq_control":
+            # numerical-equivalence control: rebuild requires a deterministic
+            # reference; fail closed unless a real eq-control validator exists.
+            return (
+                "eq_control gate not execution-wired for this backend — requires a "
+                "real numerical-equivalence validator"
+            )
+        if gate.kind == "identity_control":
+            return (
+                "identity_control gate not execution-wired for this backend — requires "
+                "a real identity/no-op control validator"
+            )
+        return f"unknown validation gate kind {gate.kind!r}"
 
     def _execute_stage(self, job: Job, stage: str, inputs: dict[str, object]) -> None:
         recipe_stage = self._stage_by_id(stage)
@@ -298,10 +434,35 @@ class JobEngine:
         so.started_at = datetime.now(UTC)
         so.message = ""
         job.updated_at = datetime.now(UTC)
-        self._save(job)
+        # P3: require_available=false is DRY-RUN-ONLY — the stage may compile for
+        # planning, but execution is explicitly non-executable.
+        if not recipe_stage.backend.require_available:
+            so.status = StageStatus.FAILED
+            so.message = (
+                "[fail-closed] stage is dry-run-only (require_available=false); "
+                "it compiles for planning but may never execute"
+            )
+            so.exit_code = 1
+            self.journal.append(
+                {
+                    "event": "stage.failed_closed",
+                    "stage": stage,
+                    "detail": so.message,
+                }
+            )
+            so.finished_at = datetime.now(UTC)
+            job.updated_at = datetime.now(UTC)
+            self._save(job)
+            return
+        # write-ahead: stage.start event BEFORE the RUNNING snapshot
         self.journal.append(
-            {"event": "stage.start", "stage": stage, "backend": recipe_stage.backend.backend_id}
+            {
+                "event": "stage.start",
+                "stage": stage,
+                "backend": recipe_stage.backend.backend_id,
+            }
         )
+        self._save(job)
         try:
             context: dict[str, object] = {
                 "workdir": str(self.run_dir),
@@ -341,6 +502,9 @@ class JobEngine:
             so.evidence_kind = policy
             so.evidence_reported = "in-process deterministic computation (probe/estimate)"
             self._stage_evidence(job, stage, reported=EvidenceKind.PREDICTED, policy=policy)
+            # P1: every declared validation gate must pass BEFORE DONE; a missing
+            # or unvalidated gate fails closed.
+            self._run_validation_gates(job, stage)
             # post-execution source immutability re-check (defense vs a stage
             # mutating the source mid-run)
             self._assert_source_immutable(job)
@@ -363,6 +527,16 @@ class JobEngine:
             so.finished_at = so.finished_at or datetime.now(UTC)
             job.updated_at = datetime.now(UTC)
             self._save(job)
+
+    def _verify_done_outputs(self, so: StageOutput) -> tuple[bool, str]:
+        """Verify every published output of a DONE stage is intact (full-digest,
+        content-addressed). Returns (ok, detail)."""
+        if not so.outputs:
+            return False, "no outputs published for a DONE stage"
+        for ref in so.outputs:
+            if not self.store.verify(ref):
+                return False, f"output {ref.name} failed content verification"
+        return True, ""
 
     def _stage_by_id(self, stage_id: str) -> RecipeStage:
         for s in self.compiled.recipe.stages:
@@ -400,8 +574,9 @@ class JobEngine:
             return job
         job.status = JobStatus.CANCELLED
         job.error = reason
-        self._save(job)
+        # write-ahead: cancel event before snapshot
         self.journal.append({"event": "run.cancelled", "reason": reason})
+        self._save(job)
         return job
 
     # ------------------------------------------------------------- manifest
