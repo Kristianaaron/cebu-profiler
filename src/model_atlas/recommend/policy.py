@@ -46,12 +46,83 @@ RECOMMENDATION_POLICY_VERSION = "policy-v1"
 
 @dataclass(frozen=True)
 class StageEvidence:
-    """Minimal typed evidence summary pulled from an Atlas profile."""
+    """Minimal typed evidence summary pulled from an Atlas profile.
+
+    ``kind`` is always one of the valid ``EvidenceKind`` values. Any evidence
+    item that cannot be parsed into a valid, present claim (missing fields,
+    unknown/arbitrary kind, malformed coverage) is represented deterministically
+    as ``kind="unknown"``, ``present=False`` — never silently estimated. When a
+    claim is rejected, ``detail`` records the reason so a run can be audited
+    (and so profile identity reflects the malformed input rather than hiding it).
+    """
 
     stage_id: str
-    kind: str  # from EvidenceKind (measured/estimated/predicted/inferred/causally_tested)
+    # from EvidenceKind; "unknown" for rejected items
+    kind: str
     present: bool = True
     coverage: float | None = None  # calibration coverage (0..1)
+    detail: str = ""  # reason a claim was rejected, else ""
+
+    @classmethod
+    def from_dict(cls, key: str, v: Any) -> StageEvidence:
+        """Deterministically parse ONE evidence item from a real Atlas run.
+
+        Fail-closed semantics — a malformed item never fabricates support:
+          * a plain string is a valid kind only if it names a real EvidenceKind;
+            any other string is ``unknown``/absent (never ``estimated``).
+          * a dict with a missing ``kind`` or ``present`` is ``unknown``/absent.
+          * a ``kind`` that is not a valid EvidenceKind is ``unknown``, never
+            promoted to ``estimated``.
+          * ``coverage`` must be a numeric 0..1; a bool or out-of-range value is
+            rejected and the item is treated as absent.
+          * any other value type is refused (no invented claim).
+        Rejected items set ``detail`` to the reason.
+        """
+        if isinstance(v, str):
+            if v not in EvidenceKind._value2member_map_:
+                return cls(
+                    stage_id=key, kind="unknown", present=False,
+                    detail=f"unknown kind {v!r}",
+                )
+            return cls(stage_id=key, kind=v, present=True)
+        if isinstance(v, dict):
+            kind = v.get("kind")
+            present = v.get("present")
+            if kind is None or present is None:
+                return cls(
+                    stage_id=key, kind="unknown", present=False,
+                    detail="missing kind/present",
+                )
+            if kind not in EvidenceKind._value2member_map_:
+                return cls(
+                    stage_id=key, kind="unknown", present=False,
+                    detail=f"unknown kind {kind!r}",
+                )
+            coverage: float | None = None
+            detail = ""
+            cov = v.get("coverage")
+            if cov is not None:
+                if isinstance(cov, bool) or not isinstance(cov, (int, float)):
+                    detail = f"invalid coverage {cov!r}"
+                    coverage = None
+                elif not (0.0 <= float(cov) <= 1.0):
+                    detail = f"coverage out of range {cov!r}"
+                    coverage = None
+                else:
+                    coverage = float(cov)
+            if detail:
+                # malformed coverage: fail closed — the item carries no usable
+                # coverage, so it must not count as supporting evidence.
+                return cls(
+                    stage_id=key, kind="unknown", present=False, coverage=None, detail=detail
+                )
+            return cls(stage_id=key, kind=kind, present=bool(present), coverage=coverage)
+        # non-string/non-dict evidence value: refuse to guess — treat as
+        # absent rather than invent a claim (unknown stays unknown).
+        return cls(
+            stage_id=key, kind="unknown", present=False,
+            detail=f"unsupported evidence value {v!r}",
+        )
 
 
 @dataclass(frozen=True)
@@ -76,7 +147,7 @@ class AtlasProfile:
         """
         evidence: dict[str, StageEvidence] = {}
         for k, v in (data.get("evidence") or {}).items():
-            st = cls._parse_evidence(k, v)
+            st = StageEvidence.from_dict(k, v)
             canonical = canonical_stage(k)
             if canonical in evidence and st.present:
                 prev = evidence[canonical]
@@ -98,37 +169,24 @@ class AtlasProfile:
             notes=str(data.get("notes", "")),
         )
 
-    @staticmethod
-    def _parse_evidence(key: str, v: Any) -> StageEvidence:
-        present = True
-        coverage: float | None = None
-        kind = "estimated"
-        if isinstance(v, str):
-            kind = v
-        elif isinstance(v, dict):
-            kind = str(v.get("kind", "estimated"))
-            present = bool(v.get("present", True))
-            cov = v.get("coverage")
-            if isinstance(cov, (int, float)) and not isinstance(cov, bool):
-                coverage = float(cov)
-        else:
-            # non-string/non-dict evidence value: refuse to guess — treat as
-            # absent rather than invent a claim (unknown stays unknown).
-            return StageEvidence(stage_id=key, kind=kind, present=False, coverage=None)
-        return StageEvidence(
-            stage_id=key,
-            kind=kind,
-            present=present,
-            coverage=coverage,
-        )
-
     def profile_id_of(self) -> str:
         payload = canonical_json(
             {
                 "model": self.model,
-                "seed": self.seed,
-                "stages": sorted((k, v.kind, v.present) for k, v in self.evidence.items()),
                 "hardware_model_arch": self.hardware_model_arch,
+                "notes": self.notes,
+                "declared": self.profile_id,
+                "routing_consistency": self.routing_consistency_passed,
+                "stages": sorted(
+                    (
+                        k,
+                        v.kind,
+                        v.present,
+                        v.coverage,
+                        v.detail,
+                    )
+                    for k, v in self.evidence.items()
+                ),
             }
         )
         return "profile-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]

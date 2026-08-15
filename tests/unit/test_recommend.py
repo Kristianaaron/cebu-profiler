@@ -76,7 +76,7 @@ def test_v3_string_and_object_evidence_parsing():
         "evidence": {
             "identity": "measured",  # string kind
             "spectral": {"kind": "estimated", "present": True, "coverage": 0.8},  # object
-            "mystery_key": {"kind": "predicted"},  # unknown key kept as-is
+            "mystery_key": {"kind": "predicted", "present": True},  # unknown key kept as-is
         },
     }
     prof = _profile_from_dict(data)
@@ -104,7 +104,7 @@ def test_nvfp4_alias_maps_to_canonical_stage():
                 "routing_consistency": "measured",
                 "global_bit_budget": "predicted",
                 "kv_budget": "estimated",
-                "nvfp4": {"kind": "estimated"},  # V3 alias, NOT nvfp4_suitability
+                "nvfp4": {"kind": "estimated", "present": True},  # V3 alias, NOT nvfp4_suitability
             },
         }
     )
@@ -243,6 +243,162 @@ def test_profile_identity_stable_and_content_sensitive():
         },
     )
     assert p3.profile_id_of() != p1.profile_id_of()
+
+
+# --- Atlas recommendation profile identity + evidence semantics ----
+# Every field the profile consumes must change its stable identity, and
+# malformed evidence must be fail-closed (never fabricated as support).
+
+
+def test_from_dict_rejects_missing_kind_or_present_as_unknown() -> None:
+    """An evidence dict missing `kind` or `present` cannot carry a claim. It
+    must parse as unknown/absent (never silently estimated)."""
+    st = StageEvidence.from_dict("spectral", {})
+    assert st.kind == "unknown"
+    assert st.present is False
+    assert st.detail  # reason recorded
+    st2 = StageEvidence.from_dict("spectral", {"kind": "measured"})  # no present
+    assert st2.kind == "unknown"
+    assert st2.present is False
+
+
+def test_from_dict_accepts_only_valid_evidence_kinds() -> None:
+    """Only real EvidenceKind strings are accepted. An arbitrary string is
+    unknown/absent, never promoted to estimated."""
+    for good in ("measured", "estimated", "predicted", "inferred", "causally_tested"):
+        st = StageEvidence.from_dict("x", good)
+        assert st.kind == good
+        assert st.present is True
+    st = StageEvidence.from_dict("x", "definitely-real-kind")
+    assert st.kind == "unknown"
+    assert st.present is False
+    assert "unknown kind" in st.detail
+
+
+def test_from_dict_rejects_bool_and_out_of_range_coverage() -> None:
+    """coverage must be numeric in 0..1; bool and out-of-range values fail
+    closed (unknown/absent) rather than becoming support."""
+    for bad in (True, False, -0.1, 1.5, 2):
+        st = StageEvidence.from_dict("x", {"kind": "measured", "present": True, "coverage": bad})
+        assert st.kind == "unknown"
+        assert st.present is False
+        assert "coverage" in st.detail
+    # valid endpoints accepted
+    for val in (0.0, 1.0, 0.4):
+        st = StageEvidence.from_dict("x", {"kind": "measured", "present": True, "coverage": val})
+        assert st.kind == "measured"
+        assert st.present is True
+        assert st.coverage == float(val)
+
+
+def test_from_dict_refuses_unsupported_value_type() -> None:
+    """A non-string/non-dict evidence value (e.g. a number or list) is refused
+    as unknown/absent, never guessed."""
+    st = StageEvidence.from_dict("x", 123)
+    assert st.kind == "unknown"
+    assert st.present is False
+
+
+def test_from_dict_uses_detail_for_non_evidence_marker() -> None:
+    """A present flag may be a non-truthy marker; reject via detail when the
+    coverage is malformed, and keep absent claims unknown."""
+    st = StageEvidence.from_dict("spectral", {"kind": "estimated", "present": False})
+    assert st.present is False
+    assert st.kind == "estimated"  # valid kind; deliberately absent
+    bad = StageEvidence.from_dict(
+        "spectral", {"kind": "estimated", "present": True, "coverage": "0.9"}
+    )
+    assert bad.present is False
+    assert bad.kind == "unknown"
+
+
+def test_profile_identity_consumes_every_relevant_field() -> None:
+    """Changing model, hardware_model_arch, notes, declared profile_id, or
+    routing_consistency must each produce a different stable identity."""
+    base = _full_profile()
+
+    def ident(**kw: object) -> str:
+        return AtlasProfile(**{**base.__dict__, **kw}).profile_id_of()
+
+    assert base.profile_id_of() == ident()
+    # model
+    assert ident(model="other") != base.profile_id_of()
+    # hardware
+    assert ident(hardware_model_arch="other") != base.profile_id_of()
+    # notes
+    assert ident(notes="changed") != base.profile_id_of()
+    # declared profile_id
+    assert ident(profile_id="other") != base.profile_id_of()
+    # routing consistency
+    assert ident(routing_consistency_passed=True) != base.profile_id_of()
+
+
+def test_profile_identity_changes_with_each_evidence_field() -> None:
+    """For one evidence item, changing name, kind, present, coverage, or detail
+    must each change identity — identity reflects the evidence exactly."""
+
+    def build(kind: str, present: bool = True, coverage: float | None = None,
+              detail: str = "", name: str = "identity") -> str:
+        return AtlasProfile(
+            profile_id="p", model="k3-mini",
+            evidence={name: StageEvidence(name, kind, present=present,
+                                          coverage=coverage, detail=detail)},
+        ).profile_id_of()
+
+    base = build("measured")
+    # present
+    assert build("measured", present=False) != base
+    # coverage
+    assert build("measured", coverage=0.5) != base
+    # detail
+    assert build("measured", detail="note") != base
+    # kind
+    assert build("estimated") != base
+    # stage name
+    assert build("measured", name="spectral") != base
+    # sanity: identical inputs still collide
+    assert build("measured") == base
+
+
+def test_malformed_from_dict_evidence_blocks_recommendation() -> None:
+    """An unknown/absent evidence item must not satisfy a required stage:
+    the decision is BLOCKED (fail-closed), never supported by the malformed
+    item on the theory it 'was estimated'."""
+    reg = build_default_registry()
+    pol = RecommendationPolicy(reg)
+    prof = AtlasProfile(
+        profile_id="p", model="k3-mini",
+        evidence={
+            # corrupt evidence: arbitrary kind string
+            "identity": StageEvidence.from_dict("identity", "made-up-kind"),
+            "corpus_semantic": StageEvidence("corpus_semantic", "estimated"),
+            "spectral": StageEvidence.from_dict(
+                "spectral",
+                {"kind": "estimated", "present": True, "coverage": 99},
+            ),
+            "shared_structure": StageEvidence("shared_structure", "estimated"),
+            "routing_consistency": StageEvidence.from_dict(
+                "routing_consistency", {}  # missing kind/present
+            ),
+        },
+    )
+    rec = pol.recommend(prof, RecTarget())
+    # methods whose required stages include a corrupted (unknown/absent) item
+    # must be BLOCKED as missing_evidence — malformed evidence never fabricates
+    # support for the stage it names.
+    sensitivity = [m for m in list(rec.methods) + list(rec.blocked_methods)
+                   if m.method == "sensitivity"]
+    assert sensitivity
+    assert sensitivity[0].confidence is RecConfidence.INSUFFICIENT
+    assert any(b.code == "missing_evidence" for b in sensitivity[0].blockers)
+    # routing_consistency (required by sensitivity) was absent too
+    assert "routing_consistency" in sensitivity[0].confidence_text
+    assert "spectral" in sensitivity[0].confidence_text
+    # calibration only needs corpus_semantic (valid estimated) -> not fabricated-blocked
+    calibration = [m for m in list(rec.methods) + list(rec.blocked_methods)
+                   if m.method == "calibration"]
+    assert calibration
+    assert not any(b.code == "missing_evidence" for b in calibration[0].blockers)
 
 
 def test_missing_evidence_blocks_decision():
