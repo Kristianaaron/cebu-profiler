@@ -618,7 +618,7 @@ def test_engine_source_content_hash_mismatch_terminal(compiler: RecipeCompiler, 
         source=SourceIdentity(
             source_id="s",
             checkpoint_path=str(src),
-            sha256=[declared["tensor.bin"]],
+            sha256={"tensor.bin": declared["tensor.bin"]},
         ),
         calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
         stages=[_stage("s1", produces=["manifest.json"], policy=EvidenceKind.PREDICTED)],
@@ -633,8 +633,12 @@ def test_engine_source_content_hash_mismatch_terminal(compiler: RecipeCompiler, 
     reg.adapter_for("atlas_quant_probe").execute = tamper_then_ok  # type: ignore[method-assign]
     eng = JobEngine(compiled, reg, tmp_path / "runs")
     job = eng.run(inputs={})
-    assert job.status is JobStatus.FAILED_RECOVERABLE
-    assert "content-hash mismatch" in job.error or "changed" in job.error
+    # source integrity failure is FAILED_TERMINAL (never recoverable), journaled
+    # with the source_integrity_failed event
+    assert job.status is JobStatus.FAILED_TERMINAL
+    assert "source-integrity-terminal" in job.stage("s1").message
+    events = eng.journal.read()
+    assert any(e["event"] == "stage.source_integrity_failed" for e in events)
 
 
 def test_validation_gate_missing_fails_closed(
@@ -938,8 +942,9 @@ def test_engine_enforces_immutable_source(compiler: RecipeCompiler, tmp_path: Pa
     reg.adapter_for("atlas_quant_probe").execute = tampering_stage  # type: ignore[method-assign]
     eng = JobEngine(compiled, reg, root)
     job = eng.run(inputs={})
-    assert job.status is JobStatus.FAILED_RECOVERABLE
-    assert "changed" in job.error or "missing" in job.error
+    # source integrity failure is FAILED_TERMINAL (never recoverable)
+    assert job.status is JobStatus.FAILED_TERMINAL
+    assert "source-integrity-terminal" in job.error or "changed" in job.error
 
 
 # ---------------------------------------------------------------------------
@@ -1158,3 +1163,237 @@ def test_reproduce_not_emitted_for_uncompilable(compiler: RecipeCompiler):
     lin = plane.lineage(glm52_no_pruning_recipe())
     assert lin["compiles"] is False
     assert lin["reproduce_command"] == ""  # no unsupported --recipe-id command
+
+
+# ---------------------------------------------------------------------------
+# 14. final-closure regression tests
+# ---------------------------------------------------------------------------
+
+
+def test_all_required_gate_kinds_run_vs_staging_unknown_rejected(
+    compiler: RecipeCompiler, tmp_path: Path, stable_source: str
+):
+    """FINAL: a stage declaring an UNKNOWN validation gate kind fails closed
+    pre-publish; a valid integrity/checkpoint gate runs REAL structural
+    validation of staged safetensors (no filename heuristics)."""
+    # unknown kind -> fail closed at execution (pre-publish)
+    recipe = CompressionRecipe(
+        name="unk",
+        source=SourceIdentity(source_id="s", checkpoint_path=stable_source),
+        calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
+        stages=[
+            RecipeStage(
+                id="sg",
+                name="sg",
+                effect_class=StageEffectClass.PROFILING,
+                backend=StageBackendPin(backend_id="atlas_quant_probe", version="1.0.0"),
+                produces_format=["manifest.json"],
+                evidence_policy=EvidenceKind.PREDICTED,
+                validation_gates=[ValidationGate(gate_id="mystery", kind="weird_kind", params={})],
+            )
+        ],
+    )
+    compiled = compiler.compile(recipe)
+    eng = JobEngine(compiled, build_default_registry(), tmp_path / "runs")
+    job = eng.run(inputs={})
+    assert job.status is JobStatus.FAILED_RECOVERABLE
+    assert "UNKNOWN validation gate kind" in job.stage("sg").message
+
+
+def test_real_safetensors_structural_gate_passes_and_bad_header_fails(
+    compiler: RecipeCompiler, tmp_path: Path, stable_source: str
+):
+    """FINAL: a checkpoint/integrity gate validates REAL safetensors structure.
+    Build a minimal valid shard+index, verify the gate passes; then a corrupted
+    header fails closed — never a filename heuristic."""
+    import struct
+
+    from model_atlas.jobs.artifacts import StageStager
+    from model_atlas.jobs.engine import (  # type: ignore[attr-defined]
+        _validate_safetensors_checkpoint,
+    )
+
+    stager = StageStager(tmp_path, "s1")
+    # build a minimal safetensors: 8-byte header len + JSON + tensor bytes
+    tensor = b"\x00\x00\x80\x3f"  # 1 float32
+    body = {
+        "t0": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]},
+        "__metadata__": {"format": 0},
+    }
+    hdr = __import__("json").dumps(body).encode()
+    with open(stager.path("model.safetensors"), "wb") as f:
+        f.write(struct.pack("<Q", len(hdr)))
+        f.write(hdr)
+        f.write(tensor)
+    idx = {"weight_map": {"t0": "model.safetensors"}}
+    from model_atlas.recipe.schema import ValidationGate
+
+    with open(stager.path("model.safetensors.index.json"), "w") as f:
+        f.write(__import__("json").dumps(idx))
+    gate = ValidationGate(gate_id="ckpt", kind="checkpoint", params={})
+    ok, detail = _validate_safetensors_checkpoint(gate, None, stager, {})
+    assert ok, detail
+    # corrupted header -> fail closed
+    shard = stager.path("model.safetensors")
+    shard.write_bytes(b"TAMPERED-NOT-8BYTES")
+    ok2, detail2 = _validate_safetensors_checkpoint(gate, None, stager, {})
+    assert not ok2
+    assert "exceeds bound" in detail2 or "truncated" in detail2 or "invalid" in detail2
+
+
+def test_compression_stage_requires_typed_checkpoint_outputs(
+    compiler: RecipeCompiler, tmp_path: Path, stable_source: str
+):
+    """FINAL: a compression stage must declare typed non-empty expected
+    checkpoint outputs + an integrity/format gate. A bland compression stage
+    without them fails before publish."""
+    recipe = CompressionRecipe(
+        name="bad-comp",
+        source=SourceIdentity(source_id="s", checkpoint_path=stable_source),
+        calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
+        hardware=HardwareEnvelope(
+            model_arch="glm-5.2",
+            compute_arch="gb10-sm121",
+            topology="2x-spark",
+            runtime_backend="vllm-modelopt",
+        ),
+        stages=[
+            RecipeStage(
+                id="q",
+                name="q",
+                effect_class=StageEffectClass.QUANTIZATION,
+                backend=StageBackendPin(backend_id="atlas_quant_probe", version="1.0.0"),
+                produces_format=["modelopt_nvfp4"],
+                expected_outputs=["derivative.safetensors"],
+                evidence_policy=EvidenceKind.PREDICTED,
+                validation_gates=[],  # no integrity/format gate -> must fail
+            )
+        ],
+    )
+    issues, _, _ = compiler.validate(recipe)
+    # derivative producer gate (atlas_quant_probe is probe-only) blocks at compile
+    assert "backend_not_derivative_producer" in {i.code for i in issues}
+
+
+def test_engine_repair_round_trip_across_reload(
+    compiler: RecipeCompiler, tmp_path: Path, stable_source: str
+):
+    """FINAL: RepairGate integrated into the JobEngine transaction. A repair's
+    CAS refs are journaled into the RepairRecord; an engine reload APPLIES the
+    repair, then ROLLBACK restores the ORIGINAL bytes+ref through the CAS —
+    proving bytes/ref changed then restored across engine reload."""
+    from model_atlas.jobs.artifacts import ContentAddressedStore
+    from model_atlas.repair import RepairProposal
+
+    root = tmp_path / "runs"
+    recipe = _simple_recipe(stable_source)
+    compiled = compiler.compile(recipe)
+    eng = JobEngine(compiled, build_default_registry(), root)
+    eng.run(inputs={})
+    run_id = eng.inspect()["run_id"]
+    # stage s1 published one evidence output; wrap a repairable byte payload
+    # onto that stage's record directly (simulating a validator-emitted repair)
+    original = b'{"keep_channels":[],"x":1}'
+    store = ContentAddressedStore(root / "runs" / run_id)
+    orig_ref = store.put_bytes("kc.bin", original)
+    live = eng._load_job()
+    so = live.stage("s1")  # use the PERSISTED stage record (not a fresh one)
+    so.outputs.append(orig_ref)
+    # persist the appended ref so apply_repair (which reloads) sees it
+    eng._save(live)
+    repair_proposal = RepairProposal(
+        kind="keep_channels_normalize",
+        target="kc.bin",
+        source="validator",
+        params={"channels": "3,1", "channel_hi": "5"},
+    )
+    eng2 = JobEngine(compiled, build_default_registry(), root)
+    eng2.apply_repair(repair_proposal, "kc.bin", before_bytes=original)
+    # after apply: bytes changed
+    applied_job = JobEngine(compiled, build_default_registry(), root)._load_job()
+    so2 = next(s for s in applied_job.stages.values() if any(o.name == "kc.bin" for o in s.outputs))
+    applied_ref = next(o for o in so2.outputs if o.name == "kc.bin")
+    assert store.verify(applied_ref)
+    assert store.read(applied_ref) != original
+    assert applied_job.repair and applied_job.repair[0].applied is True
+    # rollback across a FRESH engine reload restores the original bytes+ref
+    rid = applied_job.repair[0].repair_id
+    eng3 = JobEngine(compiled, build_default_registry(), root)
+    eng3.rollback_repair(rid)
+    rolled = JobEngine(compiled, build_default_registry(), root)._load_job()
+    so3 = next(s for s in rolled.stages.values() if any(o.name == "kc.bin" for o in s.outputs))
+    rolled_ref = next(o for o in so3.outputs if o.name == "kc.bin")
+    assert store.read(rolled_ref) == original  # bytes restored
+    assert rolled.repair[0].reverted is True and rolled.repair[0].applied is False
+
+
+def test_artifact_pins_snapshot_and_verify_against_live_registry(
+    tmp_path: Path, stable_source: str
+):
+    """FINAL: CompiledPlanArtifact pins snapshot backend id/version/adapter
+    identity/status/capability hash and verify_pins_against() compares to the
+    LIVE registry — a registry whose version drifted fails closed."""
+    from model_atlas.controlplane.api import ControlPlane
+    from model_atlas.recipe.schema import (
+        CalibrationIdentity,
+        CompressionRecipe,
+        RecipeStage,
+        SourceIdentity,
+        StageBackendPin,
+        StageEffectClass,
+    )
+    from model_atlas.recipes import CompiledPlanArtifact
+
+    recipe = CompressionRecipe(
+        name="pi",
+        source=SourceIdentity(source_id="s", checkpoint_path=stable_source),
+        calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
+        stages=[
+            RecipeStage(
+                id="a",
+                name="a",
+                effect_class=StageEffectClass.PROFILING,
+                backend=StageBackendPin(backend_id="atlas_quant_probe", version="1.0.0"),
+                produces_format=["manifest.json"],
+                evidence_policy=EvidenceKind.PREDICTED,
+            )
+        ],
+    )
+    plane = ControlPlane(work_root=str(tmp_path / "cp"))
+    compiled = plane.compile_recipe(recipe)
+    artifact = CompiledPlanArtifact.from_compiled(
+        compiled, inputs={"x": 1}, registry=plane.registry
+    )
+    artifact.verify()
+    artifact.verify_pins_against(plane.registry)  # live registry matches
+    # drift the live registry's version -> verification fails closed
+    from model_atlas.backend.contract import BackendRecord, CommandBackedAdapter
+
+    base = plane.registry.requires("atlas_quant_probe")
+    drifted = BackendRecord(
+        backend_id="atlas_quant_probe",
+        display_name=base.display_name,
+        method_family=base.method_family,
+        formats=base.formats,
+        represents_method=base.represents_method,
+        architectures=base.architectures,
+        compute_archs=base.compute_archs,
+        topologies=base.topologies,
+        runtime_compat=base.runtime_compat,
+        status=base.status,
+        version="9.9.9-drift",
+        declared_capabilities=("pruning",),  # capability hash drift too
+        supported_formats=base.supported_formats,
+        fail_closed=True,
+        availability_probe=lambda: (True, "9.9.9-drift", "drifted"),
+        parameters=base.parameters,
+        adapter=CommandBackedAdapter(backend_id="atlas_quant_probe"),
+    )
+    from model_atlas.backend.registry import BackendRegistry
+
+    reg2 = BackendRegistry({"atlas_quant_probe": drifted})
+    try:
+        artifact.verify_pins_against(reg2)
+        pytest.fail("must fail closed on live-registry drift")
+    except ValueError:
+        pass

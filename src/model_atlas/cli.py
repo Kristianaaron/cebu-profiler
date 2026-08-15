@@ -99,8 +99,13 @@ def compile_recipe(
         if out:
             from model_atlas.recipes import CompiledPlanArtifact
 
-            artifact = CompiledPlanArtifact.from_compiled(compiled, inputs={})
+            artifact = CompiledPlanArtifact.from_compiled(
+                compiled,
+                inputs={},
+                registry=plane.registry,
+            )
             artifact.verify()
+            artifact.verify_pins_against(plane.registry)
             Path(out).parent.mkdir(parents=True, exist_ok=True)
             Path(out).write_text(
                 json.dumps(artifact.model_dump(mode="json"), indent=2, sort_keys=True)
@@ -142,11 +147,17 @@ def job(
                     Path(plan).read_text(encoding="utf-8")
                 )
                 artifact.verify()
+                # compare the artifact's recorded pins (backend id, exact
+                # version, adapter identity, status, capability hash) against the
+                # LIVE registry — never discard pin metadata + recompile-only
+                artifact.verify_pins_against(plane.registry)
             except Exception as exc:  # noqa: BLE001
                 print(f"FAIL-CLOSED: cannot load/verify plan {plan!r}: {exc}")
                 raise typer.Exit(1) from exc
             try:
-                engine = plane.start(artifact.recipe, inputs=dict(artifact.inputs))
+                engine = plane.start(
+                    artifact.recipe, inputs=dict(artifact.inputs), verify_artifact=artifact
+                )
             except Exception as exc:  # noqa: BLE001 — fail-closed is the CLI contract
                 print(f"FAIL-CLOSED: could not start run from plan: {exc}")
                 raise typer.Exit(1) from exc

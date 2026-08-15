@@ -26,6 +26,7 @@ from model_atlas.backend.registry import BackendRegistry, build_default_registry
 from model_atlas.jobs.engine import JobEngine
 from model_atlas.recipe.compiler import CapabilityRegistryLike, CompiledRecipe, RecipeCompiler
 from model_atlas.recipe.schema import CompressionRecipe
+from model_atlas.recipes.artifact import CompiledPlanArtifact
 
 
 class ControlPlane:
@@ -68,8 +69,17 @@ class ControlPlane:
 
     # ------------------------------------------------------------------ jobs
     def start(
-        self, recipe: CompressionRecipe, inputs: dict[str, object] | None = None
+        self,
+        recipe: CompressionRecipe,
+        inputs: dict[str, object] | None = None,
+        verify_artifact: CompiledPlanArtifact | None = None,
     ) -> JobEngine:
+        # When a compiled-plan artifact is supplied we verify its pinned backend
+        # metadata against the LIVE registry BEFORE executing anything — the
+        # artifact, not a silent recompile, is the authoritative execution
+        # source.
+        if verify_artifact is not None:
+            verify_artifact.verify_pins_against(self.registry)
         compiled = self.compile_recipe(recipe)
         return self.start_compiled(compiled, inputs)
 

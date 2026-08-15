@@ -280,7 +280,7 @@ def glm52_no_pruning_recipe(
             source_id="glm-5.2-nvfp4",
             checkpoint_path=source_path,
             checkpoint_revision="0.46.0.dev65+g977d34dc3",
-            sha256=[],  # filled by a census step, never guessed
+            sha256={},  # path-bound {rel_path: sha256}, filled by a census step
             params_estimate=0,  # unmeasured here
         ),
         calibration=CalibrationIdentity(

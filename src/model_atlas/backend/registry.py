@@ -396,7 +396,11 @@ def _builtin_records() -> dict[str, BackendRecord]:
         formats=("modelopt_nvfp4", "safetensors"),
         represents_method="NVFP4 block-scaled 4-bit quantization + SM121-aware substitution",
         architectures=("glm-5.2", "any"),
-        runtime_compat=("sm121", "two-spark"),
+        compute_archs=("gb10-sm121", "any"),
+        topologies=("2x-spark", "single", "any"),
+        # runtime_compat names the ACTUAL serving runtime implementations that
+        # can run ModelOpt-NVFP4 output, not a compute-arch/telemetry string.
+        runtime_compat=("vllm-modelopt", "tensorrt-llm", "any"),
         status=RecipeStatus.DISCOVERED,
         version="unpinned",
         declared_capabilities=(_HYBRID_PREFIX + "fp8_e4m3+modelopt_nvfp4",),

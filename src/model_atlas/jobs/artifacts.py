@@ -118,6 +118,19 @@ class ContentAddressedStore:
         path = self.root / ref.relpath
         return path.read_bytes()
 
+    def read_from_key(self, key: str) -> bytes:
+        """Read a blob by its full sha256 content key directly (used by repair
+        rollback to restore the recorded original bytes)."""
+        if not key:
+            raise FileNotFoundError("empty content key")
+        dst = self._dst_for(key)
+        if not dst.exists():
+            raise FileNotFoundError(f"content key {key[:16]}… has no blob in CAS")
+        data = dst.read_bytes()
+        if hashlib.sha256(data).hexdigest() != key:
+            raise ValueError(f"CAS blob for key {key[:16]}… failed full-digest check")
+        return data
+
     def verify(self, ref: OutputRef) -> bool:
         if not ref.relpath:
             return False
@@ -211,6 +224,12 @@ def _fsync_dir(path: Path) -> None:
         pass
 
 
+class SourceIntegrityError(RuntimeError):
+    """Raised when an immutable source fails any integrity check (snapshot
+    equality, path-bound declared hashes, or canonical manifest digest). The
+    run boundary treats it as FAILED_TERMINAL — never recoverable."""
+
+
 def source_snapshot(source_path: str) -> dict[str, object]:
     """Complete recursive immutable-source hash+stat snapshot.
 
@@ -255,12 +274,15 @@ def source_manifest_digest(manifest: dict[str, object]) -> str:
 
 
 def assert_source_readonly(source_snapshot_before: dict[str, object], source_path: str) -> None:
-    """Fail closed if a source changed underneath a run (immutable_source=true)."""
+    """Fail closed (SourceIntegrityError) if a source changed underneath a run
+    (immutable_source=true) or is missing."""
     after = source_manifest(source_path)
     if after != source_snapshot_before:
-        raise RuntimeError(f"source {source_path} changed during run (immutable_source violated)")
+        raise SourceIntegrityError(
+            f"source {source_path} changed during run (immutable_source violated)"
+        )
     if after.get("type") == "missing":
-        raise RuntimeError(f"source {source_path} is missing")
+        raise SourceIntegrityError(f"source {source_path} is missing")
 
 
 # open fd per lock path; flock is per open-file-description so release MUST

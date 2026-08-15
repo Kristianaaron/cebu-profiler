@@ -92,15 +92,20 @@ class StageEvidence(BaseModel):
 
 
 class RepairRecord(BaseModel):
-    """One applied (or reverted) deterministic repair."""
+    """One applied (or reverted) deterministic repair, persisted with its CAS
+    restore/new refs so the engine's journal/manifest record the exact bytes and
+    a crash-recoverable rollback can restore the original ref/state."""
 
     model_config = ConfigDict(extra="forbid")
 
     repair_id: str
-    kind: str  # must be on the deterministic-allowlist
-    target: str  # stage_id or artifact ref
+    kind: str  # must be a registered deterministic transform
+    transform_version: str = "v1"
+    target: str  # stage_id or artifact-ref name (StageOutput output)
     before_sha256: str = ""
     after_sha256: str = ""
+    restore_ref: str = ""  # CAS key of the ORIGINAL bytes (persisted)
+    new_ref: str = ""  # CAS key of the REPAIRED bytes (persisted)
     authorized_by: str = "compiler"
     applied: bool = False
     reverted: bool = False

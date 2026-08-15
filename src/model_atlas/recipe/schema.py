@@ -148,14 +148,22 @@ class RecipeStage(BaseModel):
 
 
 class SourceIdentity(BaseModel):
-    """Immutable source/checkpoint identity (path + hashes)."""
+    """Immutable source/checkpoint identity (path + hashes).
+
+    ``sha256`` is a path-bound dict {relative_path -> sha256} (exact
+    membership + per-path hash equality enforced at run time), OR one may
+    declare ``manifest_digest`` — the canonical digest of the whole recursive
+    source manifest. At least one of the two must be provided for a
+    mutable-verifiable source; both are verified when present.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     source_id: str
     checkpoint_path: str
     checkpoint_revision: str | None = None
-    sha256: list[str] = Field(default_factory=list)  # content hashes (shards/config)
+    sha256: dict[str, str] = Field(default_factory=dict)
+    manifest_digest: str = ""
     params_estimate: int = Field(default=0, ge=0)  # estimated parameters; 0 = unmeasured
 
 

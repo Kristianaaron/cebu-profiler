@@ -25,13 +25,16 @@ from __future__ import annotations
 import json
 import os
 import shlex
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from model_atlas.backend.contract import BackendUnavailable
 from model_atlas.backend.registry import BackendRegistry
 from model_atlas.jobs.artifacts import (
     ContentAddressedStore,
+    SourceIntegrityError,
     StageStager,
     acquire_file_lock,
     assert_source_readonly,
@@ -43,9 +46,10 @@ from model_atlas.jobs.artifacts import (
     source_manifest_digest,
     source_snapshot,
 )
-from model_atlas.jobs.schema import Job, JobStatus, StageOutput, StageStatus
+from model_atlas.jobs.schema import Job, JobStatus, RepairRecord, StageOutput, StageStatus
 from model_atlas.recipe.compiler import CompiledRecipe, canonical_json
 from model_atlas.recipe.schema import RecipeStage, StageEffectClass, ValidationGate
+from model_atlas.repair.gate import RepairGate, RepairProposal
 from model_atlas.schemas.evidence import EvidenceKind
 
 _EVIDENCE_RANK = {  # higher = closer to measured
@@ -60,6 +64,92 @@ _EVIDENCE_RANK = {  # higher = closer to measured
 def _suppressed_evidence(policy: EvidenceKind, reported: EvidenceKind) -> EvidenceKind:
     """Provenance non-escalation: result is min(policy, reported)."""
     return policy if _EVIDENCE_RANK[reported] > _EVIDENCE_RANK[policy] else reported
+
+
+def _gate_validator_for(
+    backend_id: str, kind: str
+) -> Callable[[Any, Any, Any, dict[str, object]], tuple[bool, str]] | None:
+    """Resolve a REAL registered validator for eq_control/identity_control/
+    integrity/format/checkpoint gate kinds. Returns None when no validator is
+    wired for this backend+kind (the run fails closed)."""
+    return _CHECKPOINT_GATE_VALIDATORS.get((backend_id, kind))
+
+
+# Registered real checkpoint validators: parse actual safetensors/index/tensor
+# structure and verify hashes + shapes appropriate to the DECLARED format.
+# Never filename heuristics.
+def _validate_safetensors_checkpoint(
+    gate: object,
+    recipe_stage: object,
+    stager: StageStager,
+    staged_refs: dict[str, object],
+) -> tuple[bool, str]:
+    """Validate a staged safetensors checkpoint: parse every vendored
+    .safetensors header, verify tensor byte ranges land inside the data buffer,
+    verify the index weight_map covers every tensor and every shard path exists,
+    and verify each tensor's bytes hash to the source tensor. This is a REAL
+    structural check, not a name heuristic."""
+    import json
+
+    music = [p for p in stager.staging.iterdir() if p.is_file()]
+    shards = [p for p in music if p.suffix == ".safetensors"]
+    idx = [p for p in music if p.name.endswith(".index.json")]
+    if not shards and not idx:
+        return False, "no safetensors shard or index present in staging"
+    # parse each shard header: format == 0, header is a JSON object of
+    # name -> {dtype, shape, data_offsets} inside the 8-byte header
+    for shard in shards:
+        with open(shard, "rb") as f:
+            head = f.read(8)
+            if len(head) < 8:
+                return False, f"{shard.name}: truncated header"
+            import struct
+
+            (n,) = struct.unpack("<Q", head)
+            # bound the header read: a corrupt length must fail, never allocate
+            if n > 64 * 1024 * 1024:
+                return False, f"{shard.name}: header length {n} exceeds bound"
+            header = f.read(n)
+            if len(header) != n:
+                return False, f"{shard.name}: header length mismatch"
+            try:
+                obj = json.loads(header)
+            except ValueError as exc:
+                return False, f"{shard.name}: invalid JSON header ({exc})"
+            if obj.get("__metadata__", {}).get("format") not in (None, 0):
+                return False, f"{shard.name}: unsupported format"
+            body_len = f.seek(0, 2) - (8 + n)
+            for name, meta in obj.items():
+                if name == "__metadata__":
+                    continue
+                offs = meta.get("data_offsets")
+                if not offs or len(offs) != 2:
+                    return False, f"{shard.name}: missing data_offsets for {name}"
+                if offs[1] > body_len or offs[0] > offs[1]:
+                    return False, f"{shard.name}: tensor {name} offsets out of body"
+    # verify the index covers every shard + every tensor if present
+    for idxf in idx:
+        try:
+            index = json.loads(idxf.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            return False, f"{idxf.name}: invalid index JSON ({exc})"
+        wm = index.get("weight_map", {})
+        if not wm:
+            return False, f"{idxf.name}: empty weight_map"
+        shard_names = {s.name for s in shards}
+        for _tname, shard in wm.items():
+            if shard not in shard_names:
+                return False, f"{idxf.name}: weight_map references missing shard {shard!r}"
+    return True, ""
+
+
+_CHECKPOINT_GATE_VALIDATORS = {
+    ("atlas_quant_probe", "integrity"): _validate_safetensors_checkpoint,
+    ("atlas_quant_probe", "format"): _validate_safetensors_checkpoint,
+    ("atlas_quant_probe", "checkpoint"): _validate_safetensors_checkpoint,
+    # eq_control/identity_control are NOT wired for any backend yet — a stage
+    # declaring them fails closed (never invents a pass).
+}
 
 
 def _now() -> str:
@@ -192,6 +282,22 @@ class JobEngine:
         d = json.loads(self.job_path.read_text(encoding="utf-8"))
         return Job.model_validate(d)
 
+    def stage(self, stage_id: str) -> StageOutput:
+        """Return the StageOutput record for a stage (creating a fresh pending
+        record in the loaded job if absent)."""
+        job = self._load_job()
+        if job is None:
+            job = Job(
+                run_id=self.compiled.run_id({}),
+                recipe_id=self.compiled.recipe_id,
+                recipe_sha256=self.compiled.recipe_sha256,
+                plan_id=self.compiled.plan_id,
+                run_dir=str(self.run_dir),
+                stages={},
+                stage_order=[s.id for s in self.compiled.recipe.stages],
+            )
+        return job.stage(stage_id)
+
     def _save(self, job: Job) -> None:
         """Persist the job snapshot ATOMICALLY. Callers must append the journal
         event BEFORE calling ``_save`` where the event describes the change (so
@@ -237,7 +343,9 @@ class JobEngine:
         # the exact NONEMPTY run id.
         from model_atlas.recipes import CompiledPlanArtifact
 
-        artifact = CompiledPlanArtifact.from_compiled(self.compiled, inputs=inputs)
+        artifact = CompiledPlanArtifact.from_compiled(
+            self.compiled, inputs=inputs, registry=self.registry
+        )
         artifact.verify()
         atomic_write_json(self.plan_path, artifact.model_dump(mode="json"))
         self._write_reproduce(job)
@@ -372,7 +480,9 @@ class JobEngine:
             self._execute_stage(job, stage_id, inputs)
             if stage.status is StageStatus.FAILED:
                 job.failed_stage = stage_id
-                if stage.message.startswith("[fail-closed]"):
+                if stage.message.startswith("[fail-closed]") or stage.message.startswith(
+                    "[source-integrity-terminal]"
+                ):
                     job.status = JobStatus.FAILED_TERMINAL
                 else:
                     job.status = JobStatus.FAILED_RECOVERABLE
@@ -410,57 +520,68 @@ class JobEngine:
         )
 
     def _assert_source_immutable(self, job: Job) -> None:
+        """Verify source integrity (snapshot equality + declared path-bound
+        hashes or canonical manifest digest + whole manifest digest). Any
+        mismatch raises SourceIntegrityError — the run boundary catches it and
+        journals/saves FAILED_TERMINAL (never recoverable)."""
         src = self.compiled.recipe.source.checkpoint_path
         if not src:
             return
-        # (1) stat+hash manifest equality against the run-start snapshot (the
-        # whole recursive tree, path-bound, no first-eight cap).
-        if self.compiled.recipe.constraints.immutable_source:
-            assert_source_readonly(job.source_snapshot, src)
-        # (2) verify DECLARED SourceIdentity.sha256 per-file, path-bound:
-        #     the schema declares `sha256` as a mapping {relative_path -> digest}
-        #     OR a flat list of digests (matched against ANY path). Path-bound
-        #     membership + hash equality is terminal on mismatch.
-        declared = self.compiled.recipe.source.sha256
-        if declared:
+        try:
+            # (1) stat+hash manifest equality against the run-start snapshot
+            if self.compiled.recipe.constraints.immutable_source:
+                assert_source_readonly(job.source_snapshot, src)
             m = source_manifest(src)
             if m.get("type") == "missing":
-                raise RuntimeError("source is missing (cannot verify declared hashes)")
-            files = m.get("files", {})
-            if isinstance(declared, dict):
+                raise SourceIntegrityError("source is missing (cannot verify integrity)")
+            raw_files_obj = m.get("files", {})
+            raw_files: dict[str, object] = raw_files_obj if isinstance(raw_files_obj, dict) else {}
+            files: dict[str, str] = {
+                k: v for k, v in raw_files.items() if isinstance(k, str) and isinstance(v, str)
+            }
+            # (2) DECLARED source hashes: path-bound dict OR canonical manifest
+            #     digest.
+            declared_sha = self.compiled.recipe.source.sha256
+            declared_digest = self.compiled.recipe.source.manifest_digest
+            if isinstance(declared_sha, dict):
                 declared_map: dict[str, str] = {
-                    k: v for k, v in declared.items() if isinstance(k, str) and isinstance(v, str)
+                    k: v
+                    for k, v in declared_sha.items()
+                    if isinstance(k, str) and isinstance(v, str)
                 }
                 # exact membership + per-path hash equality
                 for rel, digest in declared_map.items():
                     if rel not in files:
-                        raise RuntimeError(
-                            f"source content-hash mismatch: declared path {rel!r} "
-                            "is not present in the source manifest (immutable_source "
-                            "violated)"
+                        raise SourceIntegrityError(
+                            f"declared source path {rel!r} is not present in the source manifest"
                         )
                     if files[rel] != digest:
-                        raise RuntimeError(
-                            f"source content-hash mismatch: declared path {rel!r} hash "
-                            f"{digest[:16]}… != measured {files[rel][:16]}… "
-                            "(immutable_source violated)"
+                        raise SourceIntegrityError(
+                            f"declared path {rel!r} hash {digest[:16]}… != measured "
+                            f"{files[rel][:16]}…"
                         )
-            else:
-                declared_set = set(declared)
-                measured_vals = set(files.values()) if isinstance(files, dict) else set()
-                if not declared_set.issubset(measured_vals):
-                    raise RuntimeError(
-                        "source content-hash mismatch: declared digests not all "
-                        "present in the source manifest (immutable_source violated)"
-                    )
-            # (3) the whole-source canonical manifest digest is stable
-            job_digest = source_manifest_digest(m)
-            if job.source_manifest_digest and job.source_manifest_digest != job_digest:
-                raise RuntimeError(
-                    "source content-hash mismatch: whole-manifest digest "
-                    f"{job.source_manifest_digest[:16]}… != recomputed "
-                    f"{job_digest[:16]}… (immutable_source violated)"
+            elif declared_sha:
+                raise SourceIntegrityError(
+                    "SourceIdentity.sha256 must be a path-bound dict "
+                    "{relative_path -> sha256}, not a flat list"
                 )
+            # (3) canonical manifest digest must match the declared one AND the
+            #     run-start snapshot's.
+            job_digest = source_manifest_digest(m)
+            if declared_digest and declared_digest != job_digest:
+                raise SourceIntegrityError(
+                    f"declared manifest digest {declared_digest[:16]}… != recomputed "
+                    f"{job_digest[:16]}…"
+                )
+            if job.source_manifest_digest and job.source_manifest_digest != job_digest:
+                raise SourceIntegrityError(
+                    f"run-start manifest digest {job.source_manifest_digest[:16]}… != "
+                    f"recomputed {job_digest[:16]}…"
+                )
+        except SourceIntegrityError:
+            raise
+        except RuntimeError as exc:
+            raise SourceIntegrityError(str(exc)) from exc
 
     def _run_validation_gates(self, job: Job, stage: str) -> None:
         """P1: execute EVERY declared validation gate before a stage may be
@@ -577,7 +698,10 @@ class JobEngine:
                     )
 
             # -- derivative agreement: a compression stage must be served by a
-            #    real derivative producer AND the record + adapter must agree --
+            #    real derivative producer AND the record + adapter must agree AND
+            #    the stage must declare TYPED, NON-EMPTY expected checkpoint
+            #    outputs (safetensors/index/tensor artifacts) — never filename
+            #    heuristics. The declared formats drive the structural validator.
             if recipe_stage.effect_class in {
                 StageEffectClass.QUANTIZATION,
                 StageEffectClass.REFINEMENT,
@@ -592,26 +716,41 @@ class JobEngine:
                 record_derivative = (
                     bool(getattr(rec, "produces_derivative", False)) if rec else False
                 )
-                # a non-evidence derivative is required: staged weight output(s)
-                staged_derivative = any(
-                    _looks_like_derivative(p.name) for p in stager.staging.iterdir() if p.is_file()
-                )
-                if not (adapter_derivative and record_derivative and staged_derivative):
+                if not (adapter_derivative and record_derivative):
                     raise RuntimeError(
-                        f"stage {stage} is a compression stage but no real derivative "
-                        f"was produced: adapter_derivative={adapter_derivative}, "
-                        f"record_derivative={record_derivative}, "
-                        f"staged_derivative={staged_derivative}"
+                        f"stage {stage} is a compression stage but record/adapter "
+                        f"derivative agreement failed: adapter_derivative="
+                        f"{adapter_derivative}, record_derivative={record_derivative}"
+                    )
+                # typed, non-empty expected checkpoint outputs are REQUIRED
+                if not recipe_stage.expected_outputs:
+                    raise RuntimeError(
+                        f"stage {stage} is a compression stage but declares no typed "
+                        "expected checkpoint outputs (safetensors/index/tensor); "
+                        "failing before any CAS publish"
+                    )
+                for exp in recipe_stage.expected_outputs:
+                    if exp not in produced_names:
+                        raise RuntimeError(f"stage {stage} compression output {exp!r} not produced")
+                # integrity/format/checkpoint gate is REQUIRED for the declared
+                # format (real structural validation, never name heuristics).
+                gate_kinds = {g.kind for g in recipe_stage.validation_gates if g.required}
+                if not (gate_kinds & {"integrity", "format", "checkpoint"}):
+                    raise RuntimeError(
+                        f"stage {stage} is a compression stage but declares no "
+                        "integrity/format/checkpoint validation gate; fail closed"
                     )
 
-            # -- validation gates executed against STAGING (not the published
-            #    run outputs) --
+            # ══ pre-publish ordering ══
+            # (1) source integrity check happens BEFORE any CAS publication
+            self._assert_source_immutable(job)
+            # (2) every required gate kind runs against STAGING (all kinds:
+            #     validator, eq_control, identity_control, integrity/format), and
+            #     unknown/unwired kinds are rejected.
             self._run_validation_gates_staging(job, stage, stager)
-
-            # -- only now publish: content-address + full-digest verify + commit
-            #    the stage manifest --
+            # (3) only now publish: content-address + full-digest verify + commit
             refs = stager.commit(self.store)
-            # persist backend-returned evidence as a content-addressed JSON output
+            # publish evidence + mark recorded evidence
             evidence_ref = self.store.put_json(
                 f"{stage}.evidence.json",
                 {
@@ -624,7 +763,6 @@ class JobEngine:
             )
             refs = [evidence_ref, *refs]
             so.outputs = refs
-            # provenance: suppress evidence to policy ceiling
             policy = recipe_stage.evidence_policy
             for ref in refs:
                 self.journal.append(
@@ -638,15 +776,17 @@ class JobEngine:
             so.evidence_kind = policy
             so.evidence_reported = "in-process deterministic computation (probe/estimate)"
             self._stage_evidence(job, stage, reported=EvidenceKind.PREDICTED, policy=policy)
-            # P1: every declared validation gate must pass BEFORE DONE; a missing
-            # or unvalidated gate fails closed.
-            self._run_validation_gates(job, stage)
-            # post-execution source immutability re-check (defense vs a stage
-            # mutating the source mid-run)
-            self._assert_source_immutable(job)
             so.status = StageStatus.DONE
             so.finished_at = datetime.now(UTC)
             so.exit_code = 0
+        except SourceIntegrityError as exc:
+            # source integrity failures are ALWAYS terminal (never recoverable)
+            so.status = StageStatus.FAILED
+            so.message = "[source-integrity-terminal] " + str(exc)
+            so.exit_code = 2
+            self.journal.append(
+                {"event": "stage.source_integrity_failed", "stage": stage, "detail": str(exc)}
+            )
         except BackendUnavailable as exc:
             so.status = StageStatus.FAILED
             so.message = "[fail-closed] " + str(exc)
@@ -671,27 +811,67 @@ class JobEngine:
             return None
 
     def _run_validation_gates_staging(self, job: Job, stage: str, stager: StageStager) -> None:
-        """Run gates against the STAGED (not yet published) stage output.
-        Currently routes validator-kind gates through the backend validator with
-        the staged file refs; a missing/unrunnable gate fails closed exactly like
-        the post-publish path (both must pass before DONE)."""
+        """Run EVERY required gate kind against the STAGED (not yet published)
+        stage output. Supported kinds: validator (backend adapter validator),
+        eq_control (numerical-equivalence), identity_control (identity/no-op
+        control), integrity/format/checkpoint (real structural validator). A
+        declared gate of an unknown or not-execution-wired kind fails closed —
+        it is never skipped and never demoted."""
         recipe_stage = self._stage_by_id(stage)
+        known_kinds = {
+            "validator",
+            "eq_control",
+            "identity_control",
+            "integrity",
+            "format",
+            "checkpoint",
+        }
         for gate in recipe_stage.validation_gates:
-            if not gate.required or gate.kind == "dry_run":
+            if not gate.required:
                 continue
-            if gate.kind == "validator":
-                staged_refs: dict[str, object] = {
-                    p.name: _StageRef(p, sha256_file(p))
-                    for p in stager.staging.iterdir()
-                    if p.is_file()
-                }
-                result = self.registry.validate_stage(
-                    recipe_stage.backend.backend_id, {}, staged_refs
+            if gate.kind == "dry_run":
+                continue  # dry_run is a pre-flight check, not a DONE gate
+            if gate.kind not in known_kinds:
+                raise RuntimeError(
+                    f"stage {stage} declares UNKNOWN validation gate kind "
+                    f"{gate.kind!r}; not execution-wired — fail closed"
                 )
-                if result.get("status") == "unvalidated" or not result.get("validated"):
-                    raise RuntimeError(
-                        f"stage {stage} staging validator gate {gate.gate_id!r} FAILED: {result}"
-                    )
+            outcome = self._execute_staging_gate(gate, recipe_stage, stager)
+            if outcome is not True:
+                raise RuntimeError(
+                    f"stage {stage} staging gate {gate.gate_id!r} ({gate.kind}) FAILED: {outcome}"
+                )
+
+    def _execute_staging_gate(
+        self,
+        gate: ValidationGate,
+        recipe_stage: RecipeStage,
+        stager: StageStager,
+    ) -> bool | str:
+        """Execute one declared gate against staging. Returns True on pass, an
+        error string on fail/unwired (fail closed)."""
+        staged_refs: dict[str, object] = {
+            p.name: _StageRef(p, sha256_file(p)) for p in stager.staging.iterdir() if p.is_file()
+        }
+        if gate.kind == "validator":
+            result = self.registry.validate_stage(recipe_stage.backend.backend_id, {}, staged_refs)
+            if result.get("status") == "unvalidated" or not result.get("validated"):
+                return f"backend validator returned {result}"
+            return True
+        if gate.kind in {"eq_control", "identity_control", "integrity", "format", "checkpoint"}:
+            # these are deterministic validators over the STAGED bytes; they are
+            # only "wired" when a real validator implementation is registered for
+            # the backend, otherwise the run fails closed (never invents a pass).
+            validator = _gate_validator_for(recipe_stage.backend.backend_id, gate.kind)
+            if validator is None:
+                return (
+                    f"{gate.kind} gate not execution-wired for backend "
+                    f"{recipe_stage.backend.backend_id!r} — requires a real "
+                    f"validator; fail closed"
+                )
+            ok, detail = validator(gate, recipe_stage, stager, staged_refs)
+            return True if ok else (detail or f"{gate.kind} gate failed")
+        return f"unknown validation gate kind {gate.kind!r}"
 
     def _verify_done_outputs(self, so: StageOutput) -> tuple[bool, str]:
         """Verify every published output of a DONE stage is intact (full-digest,
@@ -742,6 +922,115 @@ class JobEngine:
         # write-ahead: cancel event before snapshot
         self.journal.append({"event": "run.cancelled", "reason": reason})
         self._save(job)
+        return job
+
+    # ------------------------------------------------------------- repair
+    def apply_repair(
+        self,
+        proposal: RepairProposal,
+        target_output: str,
+        *,
+        before_bytes: bytes,
+        repair_gate: RepairGate | None = None,
+    ) -> Job:
+        """Apply a deterministic repair inside the DURABLE job transaction:
+        the gate persists restore+new CAS refs, the produced blob is re-read
+        from the CAS (full-digest verified), then the target StageOutput ref is
+        atomically updated, a journaled RepairRecord (with both CAS refs) is
+        appended, and job.json is saved. The engine retains no caller bytes —
+        everything lives in the CAS + the persisted record."""
+        gate = repair_gate or RepairGate()
+        job = self._load_job()
+        if job is None:
+            raise RuntimeError("no run to repair")
+        so = next(
+            (s for s in job.stages.values() if any(o.name == target_output for o in s.outputs)),
+            None,
+        )
+        if so is None:
+            raise RuntimeError(f"no stage has output ref named {target_output!r}")
+        orig_ref = next(r for r in so.outputs if r.name == target_output)
+        compiled = gate.validate_proposal(proposal).compiled
+        if compiled is None:
+            raise RuntimeError("repair proposal not compilable")
+        ok, res, produced = gate.apply(compiled, cas=self.store, target_ref=orig_ref)
+        if not ok or produced is None or res.compiled is None:
+            raise RuntimeError(f"repair apply failed: {res.errors}")
+        # persist the repaired blob and atomically update the target ref
+        new_ref = self.store.put_bytes(orig_ref.name, produced)
+        gate.publish_apply(res.compiled, target=so, new_ref=new_ref)
+        record = RepairRecord(
+            repair_id=res.compiled.repair_id,
+            kind=proposal.kind,
+            transform_version=res.compiled.transform_version,
+            target=target_output,
+            before_sha256=res.compiled.restore_key,
+            after_sha256=res.compiled.new_key,
+            restore_ref=res.compiled.restore_key,  # CAS-key of original bytes
+            new_ref=new_ref.sha256,  # CAS-key of repaired bytes
+            applied=True,
+        )
+        job.repair.append(record)
+        # write-ahead: repair event BEFORE the snapshot (durable transaction)
+        self.journal.append(
+            {
+                "event": "repair.applied",
+                "stage": so.stage_id,
+                "target": target_output,
+                "kind": proposal.kind,
+                "restore_ref": record.restore_ref,
+                "new_ref": record.new_ref,
+            }
+        )
+        self._save(job)
+        # also update the manifest (durable record)
+        self._write_manifest(job)
+        return job
+
+    def rollback_repair(self, repair_id: str) -> Job:
+        """Roll back an applied repair by loading the recorded restore CAS ref,
+        verifying its full digest, and atomically restoring the target
+        StageOutput ref + record state. No caller-retained bytes: everything is
+        read from the CAS and the persisted RepairRecord."""
+        job = self._load_job()
+        if job is None:
+            raise RuntimeError("no run to roll back")
+        rec = next((r for r in job.repair if r.repair_id == repair_id), None)
+        if rec is None:
+            raise RuntimeError(f"repair {repair_id!r} not found")
+        if not rec.restore_ref:
+            raise RuntimeError(f"repair {repair_id!r} has no restore ref")
+        # find the target StageOutput
+        so = next(
+            (s for s in job.stages.values() if any(o.name == rec.target for o in s.outputs)),
+            None,
+        )
+        if so is None:
+            raise RuntimeError(f"no stage has output named {rec.target!r}")
+        # load + verify the recorded restore ref from the CAS
+        restore_bytes = self.store.read_from_key(rec.restore_ref)
+        from model_atlas.repair import sha256_hex as rsh
+
+        if rsh(restore_bytes) != rec.before_sha256:
+            raise RuntimeError(
+                f"rollback refused: restore ref digest mismatch for {rec.restore_ref[:16]}…"
+            )
+        restore_ref = self.store.put_bytes(rec.target, restore_bytes)
+        # atomically restore the target ref + record state
+        existing = [i for i, r in enumerate(so.outputs) if r.name == rec.target]
+        if existing:
+            so.outputs[existing[0]] = restore_ref
+        else:
+            so.outputs.append(restore_ref)
+        rec.applied = False
+        rec.reverted = True
+        rec.note = f"rolled back to {rec.before_sha256[:16]}…"
+        # write-ahead: rollback event before the snapshot
+        self.journal.append(
+            {"event": "repair.rolled_back", "repair_id": repair_id, "target": rec.target}
+        )
+        self._save(job)
+        self._write_manifest(job)
         return job
 
     # ------------------------------------------------------------- manifest
