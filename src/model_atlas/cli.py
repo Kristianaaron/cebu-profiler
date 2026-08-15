@@ -629,6 +629,43 @@ def runtime_contract(
     print(json.dumps(rc.to_dict(), indent=2, sort_keys=True))
 
 
+@app.command("recommend")
+def recommend_cli(
+    profile: str = typer.Option("", "--profile", help="profile model/id to recommend for"),
+    profiles_dir: str = typer.Option("profiles", "--profiles-dir"),
+    out: str = typer.Option("", "--out", help="write recommendation JSON here"),
+    memory_target_gib: float = typer.Option(115.0, "--memory-target-gib"),
+) -> None:
+    """Profile -> Recommend: deterministic versioned recommendation (no_pruning
+    default); writes machine-readable recommendation JSON."""
+    from model_atlas.recommend import RecommendationService, RecTarget
+
+    svc = RecommendationService(profile_root=profiles_dir)
+    rec = svc.recommend(profile or "default", RecTarget(memory_target_gib=memory_target_gib))
+    payload = rec.to_dict()
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    if out:
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).write_text(json.dumps(payload, indent=2, sort_keys=True))
+        print(f"wrote: {out}")
+
+
+@app.command("recommend-gui")
+def recommend_gui(
+    out: str = typer.Option("atlas_recommend.html", "--out", help="output HTML path"),
+    profiles_dir: str = typer.Option("profiles", "--profiles-dir"),
+    work_root: str = typer.Option("controlplane_runs", "--work-root"),
+) -> None:
+    """Profile -> Recommend -> Review -> Compress -> Monitor-> Output local GUI
+    (server-less single-file HTML). Run: `model-atlas recommend-gui --out
+    atlas_recommend.html` then open the file in a browser."""
+    from model_atlas.recommend import RecommendationService, write_gui
+
+    svc = RecommendationService(profile_root=profiles_dir, work_root=work_root)
+    path = write_gui(out, svc)
+    print(f"wrote (open in your browser): {path}")
+
+
 def main() -> None:
     app()
 
