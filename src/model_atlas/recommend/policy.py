@@ -155,7 +155,11 @@ class AtlasProfile:
                     continue  # keep the strongest observed claim
             evidence[canonical] = st
         return cls(
-            profile_id=str(data.get("profile_id", "imported")),
+            profile_id=str(
+                data.get("declared_profile_id")
+                or data.get("declared_id")
+                or data.get("profile_id", "imported")
+            ),
             model=str(data.get("model", data.get("source_model", "unknown"))),
             seed=int(data.get("seed", 0)),
             evidence=evidence,
@@ -299,6 +303,14 @@ _ANALYSIS_METHODS = {
     "kv-optimization",
 }
 
+# The compression methods that operate on router-indexed expert tensors. Their
+# saliency/suitability evidence is only trustworthy if the routing-consistency
+# identity gate PASSED; a failed OR UNKNOWN (never established) gate makes every
+# router/expert index suspect, so these methods are BLOCKED (typed blocker), not
+# merely confidence-downgraded. Analysis/planning methods run in-repo and are
+# not blocked on this gate.
+_ROUTING_DEPENDENT = frozenset(_METHOD_STAGES) - frozenset(_ANALYSIS_METHODS)
+
 # Evidence keys produced by the real V3 pipeline → canonical policy stage names.
 # V3 run evidence (run.evidence: stage -> kind) names the NVFP4 suitability key
 # "nvfp4"; the policy consumes it as "nvfp4_suitability". Unknown keys are never
@@ -335,6 +347,37 @@ _SRC_PRECEDENCE = {
     EvidenceKind.PREDICTED.value: 2,
     EvidenceKind.INFERRED.value: 3,
 }
+
+
+# Declared qualitative tiers used ONLY for RANKING recommended methods — never
+# as invented "fit" metrics. Evidence coverage and the memory target are
+# partitioned into coarse, explicitly declared bands; ordering then prefers
+# higher-confidence, better-covered methods, and (under TIGHT memory pressure)
+# methods that actively reduce memory. A stable method-id rank breaks all ties.
+_COVERAGE_HIGH_BAND = 0.7
+_COVERAGE_ADEQUATE_BAND = 0.4
+_MEM_TIGHT_GIB = 96.0
+_MEM_RELAXED_GIB = 144.0
+
+
+def _coverage_band(coverage: float) -> int:
+    """Declared qualitative partition of mean evidence coverage (0..1): high /
+    adequate / low. Used only for ranking order, not to fabricate metrics."""
+    if coverage >= _COVERAGE_HIGH_BAND:
+        return 0
+    if coverage >= _COVERAGE_ADEQUATE_BAND:
+        return 1
+    return 2
+
+
+def _memory_pressure(memory_target_gib: float) -> str:
+    """Declared qualitative pressure from the memory target: tight / standard /
+    relaxed. Used only to bias ranking under tight budgets."""
+    if memory_target_gib <= _MEM_TIGHT_GIB:
+        return "tight"
+    if memory_target_gib >= _MEM_RELAXED_GIB:
+        return "relaxed"
+    return "standard"
 
 
 def _as_bool(v: Any) -> bool | None:
@@ -393,7 +436,7 @@ class RecommendationPolicy:
         for method, stage_ids in _METHOD_STAGES.items():
             rec = self._score(profile, target, method, stage_ids, no_pruning)
             (blocked if rec.blockers else methods).append(rec)
-        methods.sort(key=lambda r: (r.rank, r.method))
+        methods.sort(key=lambda r: self._ordering_sort_key(r, profile, target))
         blocked.sort(key=lambda r: r.method)
         # overall confidence = min over non-blocked recommended methods (plus
         # profile coverage), INSUFFICIENT if any critical stage evidence missing
@@ -454,6 +497,19 @@ class RecommendationPolicy:
                         f"{backend['backend_id']} not version-pinned; cannot execute",
                     )
                 )
+        # router-dependent compression methods additionally require the
+        # routing-consistency identity gate to have PASSED. A failed OR unknown
+        # (never established) gate means router/expert indices may be stale, so
+        # the method is BLOCKED with a typed blocker — evidence danger, not just
+        # a confidence nuance. Analysis/planning methods are not gated here.
+        if profile.routing_consistency_passed is not True and method in _ROUTING_DEPENDENT:
+            blockers.append(
+                RecBlock(
+                    "routing_consistency_failed",
+                    "routing-consistency not PASSED; router-indexed expert "
+                    "evidence cannot be trusted",
+                )
+            )
         # evidence: missing evidence for any required stage -> LOW/INSUFFICIENT
         # confidence, and if the default policy requires it, BLOCKED.
         missing: list[str] = []
@@ -509,6 +565,34 @@ class RecommendationPolicy:
         )
 
     # --------------------------------------------------------- helpers
+    def _ordering_sort_key(
+        self, rec: MethodRecommendation, profile: AtlasProfile, target: RecTarget
+    ) -> tuple[Any, ...]:
+        """Deterministic, declared-qualitative ordering key for RECOMMENDED
+        (non-blocked) methods.
+
+        Uses ONLY declared qualitative pressure:
+          * evidence coverage band (high > adequate > low),
+          * the method's own confidence (HIGH > MEDIUM > LOW) — the policy's
+            declared measure of evidence strength,
+          * memory direction bias only under tight pressure (memory-reducing
+            methods rank ahead; only a coarse qualitative tie-break),
+          * the policy's stable method-id rank as the final definite tie-break.
+
+        No invented/estimated per-method fit metric enters the decision; these
+        are coarse declared tiers over already-computed policy evidence and an
+        explicit user memory target.
+        """
+        pressure = _memory_pressure(target.memory_target_gib)
+        band = _coverage_band(self._coverage(profile))
+        conf = _C_RANK[rec.confidence]
+        if pressure == "tight":
+            # under tight memory, memory-reducing methods rank FIRST; coverage
+            # and the stable method-id rank still break ties.
+            mem = 0 if self._mem_dir(rec.method) == "down" else 1
+            return (band, mem, conf, self._rank_for(rec.method))
+        return (band, conf, self._rank_for(rec.method))
+
     def _backend_for(self, method: str) -> dict[str, Any] | None:
         bid = _BACKEND_ALIASES.get(method)
         if bid is None:

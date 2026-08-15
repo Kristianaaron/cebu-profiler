@@ -98,7 +98,13 @@ class RecommendationService:
                 prof = self.import_profile(f)
             except Exception:  # noqa: BLE001 — skip unparseable profiles
                 continue
-            out.append({"profile_id": prof.profile_id_of(), "path": str(f)})
+            out.append(
+                {
+                    "profile_id": prof.profile_id_of(),  # canonical (content) id
+                    "declared_profile_id": prof.profile_id,  # preserved alias
+                    "path": str(f),
+                }
+            )
         return out
 
     def import_profile(self, path: str | Path) -> AtlasProfile:
@@ -415,6 +421,7 @@ class RecommendationService:
 def _profile_to_dict(profile: AtlasProfile) -> dict[str, Any]:
     return {
         "profile_id": profile.profile_id_of(),
+        "declared_profile_id": profile.profile_id,
         "model": profile.model,
         "seed": profile.seed,
         "hardware_model_arch": profile.hardware_model_arch,

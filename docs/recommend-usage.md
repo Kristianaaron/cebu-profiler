@@ -100,6 +100,25 @@ Compress button stays **disabled** — the system never fakes quantization.
 * Stable `recommendation_id` / `profile_id` derived from canonical content.
 * **Missing evidence reduces confidence and BLOCKS the decision** — never
   invents metrics.
+* **Router-dependent compression methods require the routing-consistency
+  identity gate to have PASSED.** When the gate FAILED or is UNKNOWN (never
+  established), expert/router indices may be stale, so EXL3, LLM-Compressor,
+  ModelOpt-NVFP4, and NVFP4-substitute carry a typed `routing_consistency_failed`
+  blocker — evidence danger, not a confidence nuance. Analysis/planning methods
+  (teacher identity, calibration, sensitivity, bit-allocation, KV) run in-repo
+  and are not blocked on this gate.
+* **Deterministic ordering responds to declared qualitative pressure, not
+  invented fit metrics.** Recommended methods are ordered by (1) an evidence
+  coverage band (high/adequate/low), (2) the method's own declared confidence
+  (HIGH > MEDIUM > LOW), and — only under a tight memory target — (3) a memory
+  direction tie-break (memory-reducing ahead), with (4) the policy's stable
+  method-id rank as the final definite tie-break. Coverage and the memory target
+  therefore really move the order, but the same inputs always give the same
+  order.
+* **Profiles keep a declared alias.** Each profile carries a human-chosen
+  `declared_profile_id` (e.g. `glm52`) separate from its canonical content hash
+  id. It is preserved through `save_profile`/`list_profiles`/`_resolve_profile`,
+  so `--profile glm52` resolves even though the canonical content id differs.
 * Compression methods whose backend is unavailable or probe-only (EXL3,
   LLM-Compressor, ModelOpt-NVFP4) are **blocked**; analysis/planning methods
   (teacher identity, calibration, sensitivity, bit-allocation, KV) remain
@@ -107,7 +126,9 @@ Compress button stays **disabled** — the system never fakes quantization.
 
 ## API facade (`RecommendationService`)
 
-list/import profiles · recommend · preview/compile editable recipe ·
+list/import/save profiles (canonical content id + preserved declared alias) ·
+recommend (resolves by canonical id, declared alias, or model) ·
+preview/compile editable recipe ·
 `recipe_preview(selected)` (draft builder) · start a **verified executable plan
 only** (compiles, verifies pins against the live registry, then runs) · job
 status/events/validate/lineage/output.

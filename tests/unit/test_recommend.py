@@ -2,11 +2,13 @@
 missing evidence, incompatible backend, no pruning, blocked methods, recipe
 composition, API/UI smoke, XSS-safe rendering."""
 
+import json
 from pathlib import Path
 
 import pytest
 
-from model_atlas.backend.registry import build_default_registry
+from model_atlas.backend.contract import BackendRecord
+from model_atlas.backend.registry import BackendRegistry, build_default_registry
 from model_atlas.recommend import (
     AtlasProfile,
     RecommendationService,
@@ -21,7 +23,8 @@ from model_atlas.recommend.policy import (
 )
 
 
-def _fake_records(reg):
+def _fake_records(reg: BackendRegistry) -> dict[str, BackendRecord]:
+    # BackendRegistry stores its records in a private ``_records`` dict.
     return dict(reg._records)
 
 
@@ -118,16 +121,26 @@ def test_nvfp4_alias_maps_to_canonical_stage():
     assert not any(b.code == "missing_evidence" for b in nvfp4[0].blockers)
 
 
-def test_backend_missing_blocker_for_unregistered():
-    """A method whose backend id is not registered must block as
-    backend_missing (never silently recommend an unresolvable executor)."""
-    reg = build_default_registry()
+def test_backend_missing_blocker_when_record_omitted():
+    """A compression method whose backend RECORD is entirely ABSENT from the
+    registry must block as backend_missing (never silently recommend an
+    unresolvable executor). Uses a real registry with the record removed, not a
+    fabricated backend."""
+    from model_atlas.backend.registry import BackendRegistry
+
+    default = build_default_registry()
+    # real registry minus the llm_compressor record — not a fake backend.
+    records = {i: r for i, r in _fake_records(default).items() if i != "llm_compressor"}
+    assert "llm_compressor" not in records
+    reg = BackendRegistry(records)
     pol = RecommendationPolicy(reg)
-    # exl3 is registered (so backend_missing doesn't apply); verify one of the
-    # compression methods records an unavailable/derivative blocker today.
     rec = pol.recommend(_full_profile(), RecTarget())
     llm = [m for m in rec.blocked_methods if m.method == "llm-compressor"]
-    assert llm and any(b.code == "backend_unavailable" for b in llm[0].blockers)
+    assert llm
+    assert any(b.code == "backend_missing" for b in llm[0].blockers)
+    # every other compression backend is still registered -> not missing-blocked
+    exl = [m for m in rec.blocked_methods if m.method == "exl3-primary"]
+    assert exl and not any(b.code == "backend_missing" for b in exl[0].blockers)
 
 
 def test_backend_unpinned_blocker():
@@ -436,19 +449,230 @@ def test_no_pruning_cannot_be_disarmed_silently():
     assert not pruning
 
 
-def test_api_facade_lifecycle(tmp_path: Path):
+def test_routing_consistency_failed_blocks_router_dependent_compression() -> None:
+    """A failed routing-consistency gate must add a TYPED
+    routing_consistency_failed blocker to every router-dependent COMPRESSION
+    method (sensitivity suffices on evidence, but the gate still gates
+    compression, which reads expert indices)."""
+    reg = build_default_registry()
+    pol = RecommendationPolicy(reg)
+    bad = AtlasProfile(
+        profile_id="p",
+        model="k3-mini",
+        evidence=_full_profile().evidence,
+        routing_consistency_passed=False,
+    )
+    rec = pol.recommend(bad, RecTarget())
+    # every router-dependent compression method carries the typed blocker
+    for m in rec.blocked_methods:
+        if m.method in {"exl3-primary", "llm-compressor", "modelopt-nvfp4", "nvfp4-substitute"}:
+            assert any(
+                b.code == "routing_consistency_failed" for b in m.blockers
+            ), m.method
+    # analysis/planning methods are NOT gated on routing consistency
+    for m in rec.methods:
+        assert not any(b.code == "routing_consistency_failed" for b in m.blockers)
+    assert rec.confidence is RecConfidence.INSUFFICIENT
+
+
+def test_routing_consistency_unknown_blocks_router_dependent_compression() -> None:
+    """Routing consistency UNKNOWN (never established) is as dangerous as FAILED
+    for router-dependent methods: the typed blocker must still fire."""
+    reg = build_default_registry()
+    pol = RecommendationPolicy(reg)
+    # routing_consistency_passed = None (unknown)
+    rec = pol.recommend(_full_profile(), RecTarget())
+    for m in rec.blocked_methods:
+        if m.method in {"exl3-primary", "llm-compressor", "modelopt-nvfp4", "nvfp4-substitute"}:
+            assert any(b.code == "routing_consistency_failed" for b in m.blockers), m.method
+    # analysis methods unaffected
+    assert not any(
+        b.code == "routing_consistency_failed"
+        for m in rec.methods
+        for b in m.blockers
+    )
+
+
+def test_routing_consistency_blocks_only_not_confidence_only() -> None:
+    """Routing-consistency failure is a typed BLOCKER, not merely a confidence
+    downgrade: router-dependent compression methods land in blocked_methods and
+    carry the routing_consistency_failed code."""
+    reg = build_default_registry()
+    pol = RecommendationPolicy(reg)
+    bad = AtlasProfile(
+        profile_id="p",
+        model="k3-mini",
+        evidence=_full_profile().evidence,
+        routing_consistency_passed=False,
+    )
+    rec = pol.recommend(bad, RecTarget())
+    methods = [m for m in rec.blocked_methods if m.method == "exl3-primary"]
+    assert methods
+    assert any(b.code == "routing_consistency_failed" for b in methods[0].blockers)
+    # not a bare confidence downgrade landing in the recommended list
+    assert "exl3-primary" not in {m.method for m in rec.methods}
+
+
+def _full_evidence_profile() -> AtlasProfile:
+    """Profile whose recommended methods are all MEDIUM confidence and whose
+    evidence coverage is high, so ordering is driven by the declared tiers."""
+    ev = {
+        k: StageEvidence(k, v)
+        for k, v in {
+            "identity": "measured",
+            "corpus_semantic": "measured",
+            "spectral": "estimated",
+            "shared_structure": "estimated",
+            "routing_consistency": "measured",
+            "global_bit_budget": "predicted",
+            "kv_budget": "estimated",
+            "nvfp4_suitability": "estimated",
+        }.items()
+    }
+    return AtlasProfile(profile_id="p", model="k3-mini", evidence=ev)
+
+
+def test_ordering_responds_to_coverage_and_stays_deterministic() -> None:
+    """The ordering key genuinely reads evidence coverage and each method's
+    declared confidence (not fabricated metrics): a coverage-band change is
+    observable at the decision level, and identical inputs yield identical
+    order (stable method-id tie-break)."""
+    reg = build_default_registry()
+    pol = RecommendationPolicy(reg)
+    # high-coverage profile -> MEDIUM/HIGH overall confidence, order follows the
+    # policy's declared tiering (all methods share one band & confidence, so the
+    # stable method-id rank finalizes a deterministic order).
+    rec = pol.recommend(_full_evidence_profile(), RecTarget(memory_target_gib=115.0))
+    order = [m.method for m in rec.methods]
+    canonical = [
+        "teacher-identity",
+        "calibration",
+        "sensitivity",
+        "bit-allocation",
+        "kv-optimization",
+    ]
+    assert order == canonical
+    # deterministic: repeating the exact call reproduces the exact order
+    rec2 = pol.recommend(_full_evidence_profile(), RecTarget(memory_target_gib=115.0))
+    assert [m.method for m in rec2.methods] == canonical
+    # coverage actually participates: a low-coverage profile drops the overall
+    # decision below the high-coverage one (declared qualitative band).
+    base = _full_evidence_profile()
+    low = AtlasProfile(
+        profile_id="p",
+        model="k3-mini",
+        evidence={
+            k: StageEvidence(k, e.kind, present=e.present, coverage=0.05)
+            for k, e in base.evidence.items()
+        },
+    )
+    assert pol.recommend(low, RecTarget(memory_target_gib=115.0)).confidence in (
+        RecConfidence.LOW,
+        RecConfidence.INSUFFICIENT,
+    )
+
+
+def test_ordering_memory_target_pressure_keeps_stable_tiebreak() -> None:
+    """Under TIGHT memory pressure the declared memory direction biases memory-
+    reducing methods ahead, but the stable method-id rank still fully determines
+    order among equal memory-direction methods (never random/volatile)."""
+    reg = build_default_registry()
+    pol = RecommendationPolicy(reg)
+    tight = pol.recommend(_full_evidence_profile(), RecTarget(memory_target_gib=64.0))
+    relaxed = pol.recommend(_full_evidence_profile(), RecTarget(memory_target_gib=200.0))
+    tight_order = [m.method for m in tight.methods]
+    relaxed_order = [m.method for m in relaxed.methods]
+    # deterministic: identical inputs -> identical output
+    assert [m.method for m in pol.recommend(
+        _full_evidence_profile(), RecTarget(memory_target_gib=64.0)
+    ).methods] == tight_order
+    # Under TIGHT pressure the memory-reducing ("down") methods rank AHEAD of
+    # the memory-neutral teacher-identity/calibration pair; relaxed keeps the
+    # stable method-id order. This is the one observable, declared pressure
+    # effect — no invented per-method fit metric.
+    assert tight_order.index("sensitivity") < tight_order.index("teacher-identity")
+    assert relaxed_order == canonical_order()
+    # the two orderings genuinely differ at the front (pressure participates)
+    assert tight_order[0] == "sensitivity" and relaxed_order[0] == "teacher-identity"
+
+
+def canonical_order() -> list[str]:
+    return ["teacher-identity", "calibration", "sensitivity", "bit-allocation", "kv-optimization"]
+
+
+def test_profile_alias_preserved_through_service(tmp_path: Path) -> None:
+    """declared profile_id (e.g. 'glm52') must survive save -> list -> resolve
+    even though the canonical content id differs."""
     svc = RecommendationService(
         profile_root=str(tmp_path / "profiles"), work_root=str(tmp_path / "runs")
     )
-    svc.save_profile(_full_profile())
-    assert svc.list_profiles()
-    rec = svc.recommend("k3-mini", RecTarget(memory_target_gib=115.0))
-    assert rec.recommendation_id.startswith("rec-")
-    # compile preview of the editable builtin (dry-run only)
-    from model_atlas.recipes.builtin import glm52_no_pruning_recipe
+    p = AtlasProfile(profile_id="glm52", model="glm-5.2", evidence={
+        "identity": StageEvidence("identity", "measured"),
+        "corpus_semantic": StageEvidence("corpus_semantic", "measured"),
+        "spectral": StageEvidence("spectral", "estimated"),
+        "shared_structure": StageEvidence("shared_structure", "estimated"),
+        "routing_consistency": StageEvidence("routing_consistency", "measured"),
+    })
+    canonical = p.profile_id_of()
+    assert canonical.startswith("profile-")
+    path = svc.save_profile(p)
+    # persisted file records the alias separately from the canonical id
+    saved = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert saved["declared_profile_id"] == "glm52"
+    assert saved["profile_id"] == canonical
+    # list_profiles exposes both ids
+    listed = {x["declared_profile_id"]: x["profile_id"] for x in svc.list_profiles()}
+    assert listed.get("glm52") == canonical
+    # resolve by the DECLARED alias, even though canonical content id differs
+    rec = svc.recommend("glm52", RecTarget())
+    assert rec.profile_id == canonical
 
-    preview = svc.preview_recipe(glm52_no_pruning_recipe())
-    assert "compiles" in preview
+
+def test_recommend_service_real_missing_backend(tmp_path: Path) -> None:
+    """The service (policy path) reports backend_missing for a method whose
+    backend RECORD was removed from the registry, and still resolves profiles."""
+    from model_atlas.backend.registry import BackendRegistry
+
+    default = build_default_registry()
+    records = {i: r for i, r in _fake_records(default).items() if i != "exl3"}
+    assert "exl3" not in records
+    svc = RecommendationService(
+        profile_root=str(tmp_path / "profiles"),
+        work_root=str(tmp_path / "runs"),
+        registry=BackendRegistry(records),
+    )
+    svc.save_profile(_full_profile())
+    rec = svc.recommend("k3-mini", RecTarget())
+    blocked = {m.method: m for m in rec.blocked_methods}
+    exl = blocked["exl3-primary"]
+    assert any(b.code == "backend_missing" for b in exl.blockers)
+
+
+def test_recommend_cli_profile_alias(tmp_path: Path) -> None:
+    """The CLI --profile alias path must resolve the declared 'glm52' alias even
+    though the canonical content id differs."""
+    from typer.testing import CliRunner
+
+    from model_atlas.cli import app
+
+    svc = RecommendationService(
+        profile_root=str(tmp_path / "profiles"), work_root=str(tmp_path / "runs")
+    )
+    svc.save_profile(AtlasProfile(profile_id="glm52", model="glm-5.2", evidence={
+        "identity": StageEvidence("identity", "measured"),
+        "corpus_semantic": StageEvidence("corpus_semantic", "measured"),
+        "spectral": StageEvidence("spectral", "estimated"),
+        "shared_structure": StageEvidence("shared_structure", "estimated"),
+        "routing_consistency": StageEvidence("routing_consistency", "measured"),
+    }))
+    runner = CliRunner()
+    res = runner.invoke(
+        app,
+        ["recommend", "--profile", "glm52", "--profiles-dir", str(tmp_path / "profiles")],
+    )
+    assert res.exit_code == 0, res.output
+    assert "recommendation_id" in res.output
+    assert "profile-" in res.output
 
 
 def test_api_start_fails_closed_uncompilable(tmp_path: Path):
