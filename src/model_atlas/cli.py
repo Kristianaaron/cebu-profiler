@@ -28,7 +28,136 @@ from model_atlas.preflight import write_preflight
 from model_atlas.registry.architectures import get_registry
 from model_atlas.schemas.evidence import EvidenceKind
 
+if False:
+    from model_atlas.controlplane.api import ControlPlane  # noqa: F401 (annotation only)
+
 app = typer.Typer(no_args_is_help=True, help="Model-agnostic Atlas platform CLI.")
+
+
+# ---------------------------------------------------------------------------
+# Atlas control plane (compression recipes / jobs) — see docs/control-plane.md
+# ---------------------------------------------------------------------------
+
+
+def _default_control_plane() -> ControlPlane:
+    from model_atlas.controlplane.api import ControlPlane
+
+    return ControlPlane()
+
+
+@app.command("backend-capabilities")
+def backend_capabilities(
+    out: str = typer.Option("", "--out", help="write capabilities JSON here"),
+) -> None:
+    """List registered compression backends, capabilities, availability."""
+    plane = _default_control_plane()
+    cap = plane.capabilities()
+    print(json.dumps(cap, indent=2, sort_keys=True))
+    if out:
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).write_text(json.dumps(cap, indent=2, sort_keys=True))
+        print(f"wrote: {out}")
+
+
+@app.command("compile-recipe")
+def compile_recipe(
+    recipe: str = typer.Option("glm52-no-pruning", "--recipe", help="builtin recipe family name"),
+    dry_run: bool = typer.Option(True, "--dry-run", help="dry-run compile (non-strict)"),
+    out: str = typer.Option("", "--out", help="write compiled plan JSON here"),
+) -> None:
+    """Compile a canonical recipe (dry-run by default; fails closed on errors
+    only with --no-dry-run which is the immutable compile path)."""
+    from model_atlas.recipes.builtin import (
+        glm52_no_pruning_recipe,
+        tenp_pruning_optin_recipe,
+    )
+
+    recipes = {
+        "glm52-no-pruning": glm52_no_pruning_recipe,
+        "tenp-pruning-optin": tenp_pruning_optin_recipe,
+    }
+    builder = recipes.get(recipe)
+    if builder is None:
+        raise typer.BadParameter(f"unknown recipe {recipe!r}; known: {', '.join(sorted(recipes))}")
+    r = builder()
+    plane = _default_control_plane()
+    if dry_run:
+        report = plane.dry_run(r)
+        print(f"recipe: {recipe}")
+        print(f"  recipe_id: {report['recipe_id']}")
+        print(f"  compiles: {report['compiles']}")
+        issues = report["issues"]
+        issue_list = issues if isinstance(issues, list) else []
+        for issue in issue_list:
+            if isinstance(issue, dict):
+                print(f"  [{issue.get('severity')}] {issue.get('code')}: {issue.get('message')}")
+    else:
+        compiled = plane.compile_recipe(r)
+        print(f"recipe: {recipe}")
+        print(f"  compiled plan_id: {compiled.plan_id} (immutable)")
+        print(f"  recipe_sha256: {compiled.recipe_sha256}")
+        if out:
+            Path(out).write_text(json.dumps(compiled.to_dict(), indent=2, sort_keys=True))
+            print(f"wrote: {out}")
+
+
+@app.command("job")
+def job(
+    action: str = typer.Argument(..., help="start|status|resume|validate|cancel|lineage"),
+    recipe: str = typer.Option("glm52-no-pruning", "--recipe", help="builtin recipe family name"),
+    plan: str = typer.Option("", "--plan", help="path to a saved compiled plan JSON"),
+    run_id: str = typer.Option("", "--run-id", help="run id for status/resume/validate/cancel"),
+    stage: str = typer.Option("", "--stage", help="stage id for validate"),
+    out: str = typer.Option("controlplane_runs", "--out", help="work root"),
+    reason: str = typer.Option("operator cancel", "--reason"),
+) -> None:
+    """Control-plane job lifecycle: start / status / resume / validate / cancel /
+    lineage. `start` compiles then executes the recipe (fails closed when a
+    backend dependency is unavailable)."""
+    from model_atlas.controlplane.api import ControlPlane
+    from model_atlas.recipes.builtin import (
+        glm52_no_pruning_recipe,
+        tenp_pruning_optin_recipe,
+    )
+
+    plane = ControlPlane(work_root=out)
+    if action == "start":
+        recipes = {
+            "glm52-no-pruning": glm52_no_pruning_recipe,
+            "tenp-pruning-optin": tenp_pruning_optin_recipe,
+        }
+        builder = recipes.get(recipe)
+        if builder is None:
+            raise typer.BadParameter(
+                f"unknown recipe {recipe!r}; known: {', '.join(sorted(recipes))}"
+            )
+        r = builder()
+        try:
+            engine = plane.start(r, inputs={})
+        except Exception as exc:  # noqa: BLE001 — fail-closed is the CLI contract
+            print(f"FAIL-CLOSED: could not start run: {exc}")
+            raise typer.Exit(1) from exc
+        st = engine.inspect()
+        print(f"run_id: {st['run_id']}")
+        print(f"status: {st['status']}")
+    elif action == "lineage":
+        r = glm52_no_pruning_recipe()
+        print(json.dumps(plane.lineage(r), indent=2, sort_keys=True))
+    else:
+        if not run_id:
+            raise typer.BadParameter("--run-id required for status/resume/validate/cancel")
+        if action == "status":
+            print(json.dumps(plane.status(run_id), indent=2, sort_keys=True))
+        elif action == "resume":
+            print(json.dumps(plane.resume(run_id), indent=2, sort_keys=True))
+        elif action == "validate":
+            if not stage:
+                raise typer.BadParameter("--stage required for validate")
+            print(json.dumps(plane.validate(run_id, stage), indent=2, sort_keys=True))
+        elif action == "cancel":
+            print(json.dumps(plane.cancel(run_id, reason), indent=2, sort_keys=True))
+        else:
+            raise typer.BadParameter(f"unknown job action {action!r}")
 
 
 @app.command()
@@ -273,7 +402,10 @@ def v3_pareto(
         FrontierPoint(
             candidate_id="A",
             values={
-                "quality": 0.99, "resident_gib": 214.0, "decode_tps": 21.0, "context": 256000,
+                "quality": 0.99,
+                "resident_gib": 214.0,
+                "decode_tps": 21.0,
+                "context": 256000,
             },
             evidence_kind=EvidenceKind.PREDICTED,
         ),
@@ -414,8 +546,9 @@ def backends() -> None:
     from model_atlas.quantbackends import all_backend_probes
 
     for b in all_backend_probes():
-        print(f"{b.backend_id}: installed={b.installed} version={b.version} "
-              f"support={b.support.value}")
+        print(
+            f"{b.backend_id}: installed={b.installed} version={b.version} support={b.support.value}"
+        )
         print(f"  {b.note}")
         if b.setup:
             for s in b.setup:

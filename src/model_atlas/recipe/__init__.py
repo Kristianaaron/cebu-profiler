@@ -1,0 +1,53 @@
+"""Recipe schema, compiler, and canonical id derivation."""
+
+from model_atlas.recipe.compiler import (
+    CompiledRecipe,
+    CompileIssue,
+    RecipeCompileError,
+    RecipeCompiler,
+    canonical_json,
+    compute_recipe_id,
+    recipe_id_of,
+    sha256_hex,
+)
+from model_atlas.recipe.schema import (
+    CalibrationIdentity,
+    CompressionRecipe,
+    FormatExpectation,
+    HardwareEnvelope,
+    PublishPolicy,
+    PublishRule,
+    RecipeConstraints,
+    RecipeStage,
+    RecipeStatus,
+    ResourceBounds,
+    SourceIdentity,
+    StageBackendPin,
+    StageEffectClass,
+    ValidationGate,
+)
+
+__all__ = [
+    "CalibrationIdentity",
+    "CompiledRecipe",
+    "CompileIssue",
+    "CompressionRecipe",
+    "FormatExpectation",
+    "HardwareEnvelope",
+    "PublishPolicy",
+    "PublishRule",
+    "RecipeCompileError",
+    "RecipeCompiler",
+    "RecipeConstraints",
+    "RecipeStage",
+    "RecipeStatus",
+    "ResourceBounds",
+    "SourceIdentity",
+    "StageBackendPin",
+    "StageEffectClass",
+    "ValidationGate",
+    "canonical_json",
+    "compute_recipe_id",
+    "recipe_id_of",
+    "sha256_hex",
+]
