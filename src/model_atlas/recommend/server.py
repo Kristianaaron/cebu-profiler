@@ -256,8 +256,18 @@ class RecommendationHandler(BaseHTTPRequestHandler):
             selected = self._selected_list(body)
             raw_inputs = body.get("inputs")
             inputs = raw_inputs if isinstance(raw_inputs, dict) else {}
+            plan_id = body.get("plan_id", "")
+            recipe_sha256 = body.get("recipe_sha256", "")
+            plan_id = plan_id if isinstance(plan_id, str) else ""
+            recipe_sha256 = recipe_sha256 if isinstance(recipe_sha256, str) else ""
             result = svc.start_authorized(
-                token, preview_id, hash_value, selected, inputs=inputs
+                token,
+                preview_id,
+                hash_value,
+                selected,
+                inputs=inputs,
+                plan_id=plan_id,
+                recipe_sha256=recipe_sha256,
             )
             _send_json(self, _OK, result)
         else:
