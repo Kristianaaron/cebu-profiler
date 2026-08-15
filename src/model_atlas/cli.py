@@ -652,18 +652,31 @@ def recommend_cli(
 
 @app.command("recommend-gui")
 def recommend_gui(
-    out: str = typer.Option("atlas_recommend.html", "--out", help="output HTML path"),
+    host: str = typer.Option(
+        "127.0.0.1", "--host", help="bind host (loopback only unless unsafe)"
+    ),
+    port: int = typer.Option(8080, "--port", help="bind port"),
     profiles_dir: str = typer.Option("profiles", "--profiles-dir"),
     work_root: str = typer.Option("controlplane_runs", "--work-root"),
+    unsafe_non_loopback: bool = typer.Option(
+        False,
+        "--unsafe-allow-non-loopback",
+        help="bind a non-loopback host (e.g. 0.0.0.0). BLOCKS nothing but "
+        "exposes the local API; use only on a trusted network.",
+    ),
 ) -> None:
-    """Profile -> Recommend -> Review -> Compress -> Monitor-> Output local GUI
-    (server-less single-file HTML). Run: `model-atlas recommend-gui --out
-    atlas_recommend.html` then open the file in a browser."""
-    from model_atlas.recommend import RecommendationService, write_gui
+    """Serve the local Profile -> Recommend -> Review -> Compress -> Monitor
+    browser GUI. Static HTML/CSS/JS (no embedded data); the browser fetches
+    /api/profiles and /api/recommend from this loopback server."""
+    from model_atlas.recommend import RecommendationService
+    from model_atlas.recommend.server import serve_forever
 
     svc = RecommendationService(profile_root=profiles_dir, work_root=work_root)
-    path = write_gui(out, svc)
-    print(f"wrote (open in your browser): {path}")
+    print(
+        f"serving Atlas Recommend->Compress GUI + API on "
+        f"http://{host}:{port}/  (profiles={profiles_dir}, work={work_root})"
+    )
+    serve_forever(svc, host=host, port=port, unsafe_allow_non_loopback=unsafe_non_loopback)
 
 
 def main() -> None:

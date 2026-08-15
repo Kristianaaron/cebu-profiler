@@ -308,7 +308,10 @@ def test_api_start_fails_closed_uncompilable(tmp_path: Path):
         svc.start(glm52_no_pruning_recipe(), inputs={})
 
 
-def test_gui_embeds_payloads_and_is_xss_safe(tmp_path: Path):
+def test_gui_is_static_no_embedded_payloads_xss_safe(tmp_path: Path):
+    """The GUI is static HTML/CSS/JS only — NO embedded user/recommedation JSON.
+    All data is fetched over HTTP by the browser. It must reference the fetch
+    routes and never use innerHTML on service data."""
     from model_atlas.recommend import RecommendationService
 
     svc = RecommendationService(
@@ -318,12 +321,100 @@ def test_gui_embeds_payloads_and_is_xss_safe(tmp_path: Path):
     out = str(tmp_path / "gui.html")
     write_gui(out, svc)
     text = Path(out).read_text(encoding="utf-8")
-    # recommendation payload embedded (deterministic, machine-readable)
-    assert "rec-" in text
-    # XSS-safe: user-controlled strings must be escaped — the JS uses
-    # textContent/DOM text, never raw innerHTML interpolation of values.
+    # NO embedded profile/recommendation payload — the page is data-free.
+    assert "rec-" not in text
+    assert "k3-mini" not in text
+    # XSS-safe: JS escapes via textContent and never sets innerHTML on data.
     assert "<script>" in text  # the harness JS present
     assert "innerHTML" not in text  # no value interpolation via innerHTML
+    # fetches live routes rather than embedding a snapshot.
+    assert "fetch('/api/profiles')" in text
+    assert "fetch('/api/recommend'" in text
+    assert "fetch('/api/preview-selection'" in text
+    assert "fetch('/api/start'" in text
+
+
+def test_gui_static_no_profile_payload(tmp_path: Path):
+    """Even when run with a directory of profiles, the GUI page must NOT embed
+    the profile data (no raw snapshot/JSON in the script)."""
+    from model_atlas.recommend import RecommendationService
+
+    svc = RecommendationService(
+        profile_root=str(tmp_path / "profiles"), work_root=str(tmp_path / "runs")
+    )
+    svc.save_profile(_full_profile())
+    from model_atlas.recommend.gui import render_gui
+
+    text = render_gui(svc)
+    assert "innerHTML" not in text
+    assert "SNAPSHOT" not in text
+    assert "const SNAPSHOT" not in text
+
+
+def test_recipe_preview_selection_builds_draft_and_diffs(tmp_path: Path):
+    """preview-from-selection builds a deterministic no-pruning draft, reports
+    diff / compile blockers / readiness, and (when it compiles) a verified plan
+    summary — never mutating and never shipping a full recipe payload."""
+    svc = RecommendationService(
+        profile_root=str(tmp_path / "profiles"), work_root=str(tmp_path / "runs")
+    )
+    sel = ["calibration", "sensitivity"]
+    preview = svc.recipe_preview(sel)
+    assert preview["recipe_id"].startswith("recipe-")
+    assert set(preview["selected_methods"]) == set(sel)
+    # draft includes the requested methods' stages + transitive deps
+    stage_ids = {s["id"] for s in preview["stages"]}
+    assert {"t1-identity", "t2-calibration", "t3-sensitivity"} <= stage_ids
+    # readiness/plan never claim verified when the draft is not executable
+    assert preview["readiness"]["verified_plan"] is False
+    assert preview["plan"] is None or preview["plan"].get("pins_pass") is False
+    # diff vs canonical builtin recipe
+    assert preview["diff"]["no_pruning"] is True
+    assert "t7-exl3" in preview["diff"]["omitted_stages"]
+
+
+def test_recipe_preview_all_selection_compiles_false_fail_closed(tmp_path: Path):
+    """Selecting every method still yields a non-executable draft today (the
+    GLM-5.2 canonical recipe mixes unavailable backends/hybrid precision), so
+    readiness stays false — the GUI's compress gate stays closed."""
+    svc = RecommendationService(
+        profile_root=str(tmp_path / "profiles"), work_root=str(tmp_path / "runs")
+    )
+    preview = svc.recipe_preview(None)  # all
+    assert len(preview["stages"]) >= 14
+    assert preview["compiles"] is False
+    assert preview["readiness"]["verified_plan"] is False
+    assert [i["code"] for i in preview["compile_blockers"]]  # non-empty blockers
+
+
+def test_compress_gate_functions() -> None:
+    """The GUI's blocked-button state function fails closed: until a
+    recommendation, a compiling preview, and a verified plan with passing live
+    pins all hold, Compress is disabled with exact reasons. (Static-string
+    inspection mirrors the browser's computeGates.)"""
+    from model_atlas.recommend.gui import _GUI_PAGE
+
+    # computeGates() emits distinct, exact reasons for each missing gate.
+    assert "no recommendation computed yet" in _GUI_PAGE
+    assert "no methods selected for the recipe" in _GUI_PAGE
+    assert "recipe draft does not compile" in _GUI_PAGE
+    assert "no verified executable plan produced" in _GUI_PAGE
+    assert "verified plan live pins do not pass" in _GUI_PAGE
+    # the compress button is only enabled when computeGates().ready is true.
+    assert "btn.disabled = !gate.ready" in _GUI_PAGE
+    # blocked (non-authorized) methods are non-toggleable; only authorized ones are.
+    assert "cb.disabled = isBlocked" in _GUI_PAGE
+
+
+def test_gui_start_fetches_selection_not_recipe(tmp_path: Path):
+    """The browser never holds a recipe payload: /api/start is POSTed a
+    `selected` method list only (server rebuilds the draft)."""
+    from model_atlas.recommend.gui import _GUI_PAGE as text
+
+    assert 'JSON.stringify({ selected: selArr, inputs: {} })' in text
+    # no embedded user/recommendation JSON in the page source
+    assert "recipe_payload" not in text
+    assert "model_dump" not in text
 
 
 def test_gui_compress_button_disabled_with_blockers(tmp_path: Path):
@@ -336,8 +427,11 @@ def test_gui_compress_button_disabled_with_blockers(tmp_path: Path):
     from model_atlas.recommend.gui import render_gui
 
     text = render_gui(svc)
-    # blocked methods always present -> compress button starts disabled (fail
-    # closed, never fakes quantization)
-    assert "Compress (disabled until a verified executable plan compiles)" in text
-    # the compress button is disabled: blocked_methods nonempty and no pruning
-    assert 'allow_pruning (locked: <span class="np">no_pruning=true</span>)' in text
+    # The compress button starts disabled (fail closed, never fakes quantization)
+    # until every gate passes: no fatal blockers, preview compiles, verified
+    # executable plan with passing live pins.
+    assert 'id="compressBtn" disabled' in text
+    assert "disabled until every gate passes" in text
+    # no_pruning is locked on — allow_pruning is a disabled checkbox.
+    assert 'id="allowPrune" disabled' in text
+    assert "no_pruning=true" in text

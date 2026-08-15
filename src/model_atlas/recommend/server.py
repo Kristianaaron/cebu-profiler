@@ -155,7 +155,9 @@ class RecommendationHandler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------- GET routes
     def _route_get(self, path: str, query: dict[str, str]) -> None:
         svc = self.service
-        if path == "/api/profiles":
+        if path in {"/", "/index.html", "/gui"}:
+            self._serve_gui_page()
+        elif path == "/api/profiles":
             _send_json(self, _OK, {"profiles": svc.list_profiles()})
         elif path.startswith("/api/jobs/") and path.endswith("/events"):
             run_id = path[len("/api/jobs/") : -len("/events")]
@@ -193,6 +195,16 @@ class RecommendationHandler(BaseHTTPRequestHandler):
         else:
             raise ServerError(_NOT_FOUND, f"no such route: {path}")
 
+    def _serve_gui_page(self) -> None:
+        from model_atlas.recommend.gui import render_gui
+
+        body = render_gui().encode("utf-8")
+        self.send_response(_OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     # ------------------------------------------------------------ POST routes
     def _route_post(self, path: str, body: dict[str, Any]) -> None:
         svc = self.service
@@ -203,7 +215,33 @@ class RecommendationHandler(BaseHTTPRequestHandler):
         elif path == "/api/preview":
             recipe = self._recipe_from_body(body, "recipe")
             _send_json(self, _OK, svc.preview_recipe(recipe))
+        elif path == "/api/preview-selection":
+            raw = body.get("selected")
+            selected: list[str] | None = None
+            if raw is not None:
+                if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+                    raise ServerError(_BAD_REQUEST, "'selected' must be a list of method strings")
+                selected = raw
+            _send_json(self, _OK, svc.recipe_preview(selected))
         elif path == "/api/start":
+            if "selected" in body and "recipe" not in body:
+                raw = body.get("selected")
+                if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+                    raise ServerError(_BAD_REQUEST, "'selected' must be a list of method strings")
+                inputs = body.get("inputs", {})
+                if not isinstance(inputs, dict):
+                    raise ServerError(_BAD_REQUEST, "'inputs' must be an object")
+                # Rebuild the deterministic editable draft server-side — the
+                # browser never holds an embedded recipe (XSS/no payload).
+                recipe = svc._selected_recipe(raw)
+                try:
+                    engine = svc.start(recipe, inputs=inputs)
+                except KeyError as exc:
+                    raise ServerError(_NOT_FOUND, f"start failed: {exc}") from exc
+                except Exception as exc:  # noqa: BLE001 — fail closed
+                    raise ServerError(_BAD_REQUEST, f"start refused: {exc}") from exc
+                _send_json(self, _OK, {"run_id": engine.run_dir.name, "status": "started"})
+                return
             recipe = self._recipe_from_body(body, "recipe")
             inputs = body.get("inputs", {})
             if not isinstance(inputs, dict):

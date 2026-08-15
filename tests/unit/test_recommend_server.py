@@ -162,6 +162,115 @@ def test_start_invalid_recipe_schema_400(server):
     assert status == 400
 
 
+# ---------------------------------------------------------------------------- static GUI page
+def test_gui_page_served_no_embedded_payload(server: RecommendationServer, service):
+    service.save_profile(_full_profile())
+    for path in ("/", "/index.html", "/gui"):
+        status, data = _request(server, "GET", path)
+        assert status == 200
+        text = data.decode("utf-8")
+        assert "<script>" in text
+        # static only: no embedded profile/recommendation JSON
+        assert "rec-" not in text
+        assert "k3-mini" not in text
+        assert "innerHTML" not in text
+        assert "fetch('/api/profiles')" in text
+
+
+# --- preview-from-selection ---
+def test_preview_selection_endpoint(server: RecommendationServer, service):
+    service.save_profile(_full_profile())
+    status, data = _post(
+        server, "/api/preview-selection", {"selected": ["calibration", "sensitivity"]}
+    )
+    assert status == 200
+    body = _json((status, data))
+    assert body["recipe_id"].startswith("recipe-")
+    stage_ids = {s["id"] for s in body["stages"]}
+    assert {"t1-identity", "t2-calibration", "t3-sensitivity"} <= stage_ids
+    # current placeholder adapters -> not executable -> readiness false
+    assert body["readiness"]["verified_plan"] is False
+    assert body["diff"]["no_pruning"] is True
+
+
+def test_preview_selection_requires_list_of_strings(server: RecommendationServer):
+    status, _ = _post(server, "/api/preview-selection", {"selected": "not-a-list"})
+    assert status == 400
+
+
+def test_preview_selection_omitted_all(server: RecommendationServer, service):
+    service.save_profile(_full_profile())
+    status, data = _post(server, "/api/preview-selection", {})
+    assert status == 200
+    body = _json((status, data))
+    assert len(body["stages"]) >= 14  # all canonical no-pruning stages
+    assert body["readiness"]["verified_plan"] is False
+
+
+# --- start from selection (server-side draft, fail closed) ---
+def test_start_from_selection_fails_closed_placeholder(server: RecommendationServer, service):
+    service.save_profile(_full_profile())
+    status, data = _post(
+        server, "/api/start", {"selected": ["calibration", "sensitivity"], "inputs": {}}
+    )
+    # placeholder adapters -> draft compiles in dry-run but the verified-plan
+    # live-pin gate fails closed -> never a 2xx start.
+    assert status in (400, 404)
+    assert "error" in _json((status, data))
+
+
+def test_start_from_selection_bad_selected(server: RecommendationServer):
+    status, _ = _post(server, "/api/start", {"selected": "calibration", "inputs": {}})
+    assert status == 400
+
+
+# --- browser-like HTTP sequence ---
+def test_browser_http_sequence(server: RecommendationServer, service):
+    """A browser session: serve GUI -> list profiles -> recommend -> preview
+    selection -> start (fail closed on placeholder adapters). This is the exact
+    HTTP sequence the static GUI drives."""
+    service.save_profile(_full_profile())
+
+    # 1. static GUI (no embedded data)
+    status, data = _request(server, "GET", "/")
+    assert status == 200
+    assert "innerHTML" not in data.decode("utf-8")
+
+    # 2. /api/profiles
+    status, data = _request(server, "GET", "/api/profiles")
+    assert status == 200
+    profiles = _json((status, data))["profiles"]
+    assert profiles and profiles[0]["profile_id"]
+
+    # 3. /api/recommend
+    status, data = _post(
+        server,
+        "/api/recommend",
+        {
+            "profile_id": profiles[0]["profile_id"],
+            "memory_target_gib": 115.0,
+            "constraints": {"allow_pruning": False},
+        },
+    )
+    assert status == 200
+    rec = _json((status, data))["recommendation"]
+    assert rec["no_pruning"] is True
+    blocked = rec["blocked_methods"]
+    assert blocked  # placeholder adapters are fatally blocked
+
+    # 4. preview the authorized subset
+    authorized = [m["method"] for m in rec["methods"]]
+    assert authorized
+    status, data = _post(server, "/api/preview-selection", {"selected": authorized})
+    assert status == 200
+    preview = _json((status, data))
+    assert preview["readiness"]["verified_plan"] is False
+
+    # 5. start from the selection fails closed (no verified executable plan)
+    status, data = _post(server, "/api/start", {"selected": authorized, "inputs": {}})
+    assert status in (400, 404)
+
+
 # job read endpoints (fixture/monkeypatch)
 def test_job_status_and_events(server: RecommendationServer, service, monkeypatch):
     monkeypatch.setattr(

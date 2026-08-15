@@ -27,14 +27,52 @@ from model_atlas.backend.registry import BackendRegistry, build_default_registry
 from model_atlas.controlplane.api import ControlPlane
 from model_atlas.jobs.engine import JobEngine
 from model_atlas.recipe.compiler import CompiledRecipe
-from model_atlas.recipe.schema import CompressionRecipe
+from model_atlas.recipe.schema import (
+    CompressionRecipe,
+    RecipeConstraints,
+    RecipeStage,
+    StageEffectClass,
+)
 from model_atlas.recipes import CompiledPlanArtifact
+from model_atlas.recipes.builtin import glm52_no_pruning_recipe
 from model_atlas.recommend.policy import (
     AtlasProfile,
     Recommendation,
     RecommendationPolicy,
     RecTarget,
 )
+
+# Policy-versioned method -> canonical no-pruning recipe stage ids. A selected
+# recommendation method contributes exactly these stages to the draft recipe;
+# dependent stages are pulled in transitively by format closure.
+_SELECTION_STAGES = {
+    "teacher-identity": ["t1-identity"],
+    "calibration": ["t2-calibration"],
+    "sensitivity": ["t3-sensitivity"],
+    "bit-allocation": ["t6-bit-allocation"],
+    "kv-optimization": ["t12-kv"],
+    "exl3-primary": ["t7-exl3"],
+    "nvfp4-substitute": ["t10-nvfp4"],
+    "modelopt-nvfp4": ["t10-nvfp4"],
+    "llm-compressor": ["t11-tail"],
+}
+
+_STAGE_ORDER = [
+    "t1-identity",
+    "t2-calibration",
+    "t3-sensitivity",
+    "t4-representation",
+    "t5-conditioning",
+    "t6-bit-allocation",
+    "t7-exl3",
+    "t8-refinement",
+    "t9-residual",
+    "t10-nvfp4",
+    "t11-tail",
+    "t12-kv",
+    "t13-runtime",
+    "t14-eval",
+]
 
 
 class RecommendationService:
@@ -108,6 +146,160 @@ class RecommendationService:
     def compile_recipe(self, recipe: CompressionRecipe) -> CompiledRecipe:
         """Compile (immutable) an editable recipe; fails closed on errors."""
         return self.plane.compile_recipe(recipe)
+
+    # ------------------------------------------------------- draft builder
+    def _selected_recipe(
+        self,
+        selected: list[str] | None = None,
+        *,
+        none_is_all: bool = False,
+    ) -> CompressionRecipe:
+        """Build a deterministic no-pruning recipe draft from a subset of the
+        policy's recommended methods.
+
+        ``selected`` names recommendation methods (policy method ids). Stages
+        are taken from the canonical builtin GLM-5.2 recipe and closed over
+        transitive ``requires_formats`` dependencies, then reordered by the
+        canonical stage order. ``None`` selects all stages unless
+        ``none_is_all`` is False (then the builtin's full no-pruning recipe is
+        used). Compression stages are stripped of backend pins that would make
+        the draft non-compilable (unavailable/derivative-only/pinned-version
+        gates): keeping them would make the *editable draft* fail closed before
+        any diff/preview could be shown. Execution is still gated: a real
+        ``/api/start`` serves a selection only after this draft compiles
+        cleanly AND the resulting verified plan's live pins pass.
+        """
+        base = glm52_no_pruning_recipe()
+        stages_by_id = {s.id: s for s in base.stages}
+        if selected is None or none_is_all:
+            stages = list(base.stages)
+        else:
+            wanted: set[str] = set()
+            for method in selected:
+                wanted.update(_SELECTION_STAGES.get(method, ()))
+            wanted = self._format_closure(stages_by_id, wanted)
+            stages = [stages_by_id[sid] for sid in _STAGE_ORDER if sid in wanted]
+        recipe = base.model_copy(deep=True)
+        recipe.stages = stages
+        recipe.constraints = RecipeConstraints(
+            no_pruning=True,
+            allow_pruning_capability=False,
+            preserve_non_expert_backbone=True,
+            immutable_source=True,
+            allow_hybrid_precision=False,
+            max_resident_gib=115.0,
+            derived_format="safetensors",
+        )
+        # strip unavailable/derivative-only exact-pin gates so the EDITABLE
+        # draft previews; execution remains fail-closed behind a verified plan.
+        stripped = []
+        for s in recipe.stages:
+            if s.effect_class in {
+                StageEffectClass.CONDITIONING,
+                StageEffectClass.QUANTIZATION,
+                StageEffectClass.RESIDUAL,
+                StageEffectClass.REFINEMENT,
+            } or s.backend.backend_id in {"exl3", "modelopt_nvfp4", "llm_compressor"}:
+                s2 = s.model_copy(deep=True)
+                s2.backend = s.backend.model_copy(update={"require_available": False})
+                stripped.append(s2)
+            else:
+                stripped.append(s)
+        recipe.stages = stripped
+        return recipe
+
+    @staticmethod
+    def _format_closure(
+        stages_by_id: dict[str, RecipeStage],
+        wanted: set[str],
+    ) -> set[str]:
+        """Transitively add the producers of every format a wanted stage
+        requires, over the requested stage set only."""
+        by_format: dict[str, set[str]] = {}
+        for sid, s in stages_by_id.items():
+            for f in s.produces_format:
+                by_format.setdefault(f, set()).add(sid)
+        frontier = list(wanted)
+        while frontier:
+            sid = frontier.pop()
+            for f in stages_by_id[sid].requires_formats:
+                for prod in by_format.get(f, ()):
+                    if prod not in wanted:
+                        wanted.add(prod)
+                        frontier.append(prod)
+        return wanted
+
+    def recipe_preview(
+        self, selected: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Deterministic preview-from-selection: build the draft, run the
+        non-fatal compile/dry-run, and report diff / compile blockers /
+        readiness / verified plan (if it compiles). Never mutates."""
+        recipe = self._selected_recipe(selected)
+        issues, rid, sha = self.plane.compiler.validate(recipe)
+        errors = [i for i in issues if i.severity == "error"]
+        compiles = not errors
+        plan: dict[str, Any] | None = None
+        if compiles:
+            plan = self._verified_plan_dict(recipe)
+        return {
+            "selected_methods": list(selected or _SELECTION_STAGES.keys()),
+            "recipe_id": rid,
+            "recipe_sha256": sha,
+            "compiles": compiles,
+            "stages": [s.model_dump(mode="json") for s in recipe.stages],
+            "issues": [i.to_dict() for i in issues],
+            "compile_blockers": [i.to_dict() for i in errors],
+            "readiness": {
+                "verified_plan": plan is not None,
+                "pins_pass": bool(plan and plan.get("pins_pass")),
+                "executable": bool(plan and plan.get("pins_pass")),
+            },
+            "plan": plan,
+            "diff": self._recipe_diff(recipe),
+        }
+
+    def _verified_plan_dict(self, recipe: CompressionRecipe) -> dict[str, Any]:
+        """Compile the given recipe and produce a verified-plan summary:
+        plan_id + whether the compiled artifact's live pins pass. The full
+        pinned artifact is NOT returned to the client (no embedded recipe); the
+        GUI only needs plan_id + readiness + reproduce_command."""
+        try:
+            compiled = self.plane.compile_recipe(recipe)
+        except Exception as exc:  # noqa: BLE001
+            return {"pins_pass": False, "error": str(exc)}
+        try:
+            artifact = CompiledPlanArtifact.from_compiled(
+                compiled, inputs={}, registry=self.registry
+            )
+            artifact.verify()
+            artifact.verify_pins_against(self.registry)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "plan_id": compiled.plan_id,
+                "pins_pass": False,
+                "error": str(exc),
+            }
+        return {
+            "plan_id": compiled.plan_id,
+            "pins_pass": True,
+            "reproduce_command": artifact.reproduce_command,
+        }
+
+    @staticmethod
+    def _recipe_diff(recipe: CompressionRecipe) -> dict[str, Any]:
+        """Policy-informative diff vs the canonical builtin no-pruning recipe:
+        which canonical stages are present vs omitted, and the constrained
+        memory ceiling. Nothing here is a mutation."""
+        base = glm52_no_pruning_recipe()
+        keep = {s.id for s in recipe.stages}
+        return {
+            "against": base.name,
+            "enabled_stages": [s.id for s in recipe.stages],
+            "omitted_stages": [s.id for s in base.stages if s.id not in keep],
+            "no_pruning": recipe.constraints.no_pruning,
+            "max_resident_gib": recipe.constraints.max_resident_gib,
+        }
 
     # ------------------------------------------------------------ execution
     def start(
