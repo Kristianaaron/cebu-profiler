@@ -46,7 +46,10 @@ class CompiledPlanArtifact(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: int = PLAN_ARTIFACT_SCHEMA
-    recipe: CompressionRecipe
+    # PRIVATE canonical immutable recipe payload (JSON string) — NEVER a mutable
+    # CompressionRecipe. `recipe` property reconstructs a fresh copy on every
+    # access, so no caller can reach a mutable embedded recipe.
+    recipe_payload_json: str = Field(default="", repr=False, exclude=True)
     recipe_sha256: str
     recipe_id: str
     plan_id: str
@@ -57,15 +60,30 @@ class CompiledPlanArtifact(BaseModel):
     reproduce_command: str = ""
     canonical_identity: str = Field(default="", repr=False, exclude=True)
 
+    __slice_hooks__ = object()
+
     def __init__(self, **data: object) -> None:
-        """Freeze the mutable mappings + compute the canonical immutable payload
-        once at construction; mutation attempts on nested dicts cannot change
-        the artifact's identity because the canonical payload is captured here."""
+        """Freeze the mutable mappings + canonical identity; store the recipe
+        ONLY as its serialized mutable payload. Public `recipe` access returns a
+        defensively reconstructed copy — mutation of any returned copy can never
+        mutate the artifact or change identity/verify()."""
+        raw_recipe = data.get("recipe")
+        if isinstance(raw_recipe, CompressionRecipe):
+            data["recipe_payload_json"] = raw_recipe.model_dump_json()
+        elif isinstance(raw_recipe, str):
+            data["recipe_payload_json"] = raw_recipe
+        elif isinstance(raw_recipe, dict):
+            # rehydration from the persisted plan artifact (recipe as a model
+            # dict) — serialize it back to the canonical JSON payload.
+            data["recipe_payload_json"] = canonical_json(raw_recipe)
+        data.pop("recipe", None)
         serializable: dict[str, object] = {}
         for k, v in data.items():
             if k in {"reproduce_command", "canonical_identity"}:
                 continue
-            if isinstance(v, BaseModel):
+            if k == "recipe":
+                serializable[k] = data["recipe_payload_json"]  # canonical JSON string
+            elif isinstance(v, BaseModel):
                 serializable[k] = v.model_dump(mode="json")
             elif isinstance(v, dict):
                 serializable[k] = {
@@ -85,6 +103,53 @@ class CompiledPlanArtifact(BaseModel):
             self, "backend_status_snapshot", MappingProxyType(dict(self.backend_status_snapshot))
         )
         object.__setattr__(self, "inputs", _deep_freeze(self.inputs))
+
+    @property
+    def recipe(self) -> CompressionRecipe:
+        """DEFENSIVE reconstruction on EVERY access: a fresh CompressionRecipe
+        is parsed from the private canonical payload. Mutating the returned copy
+        never affects the artifact, its identity, or verify() (which re-parses
+        the same payload)."""
+        return CompressionRecipe.model_validate_json(self.recipe_payload_json)
+
+    @property
+    def recipe_payload(self) -> str:
+        """Private canonical immutable recipe JSON (never exposed as mutable)."""
+        return self.recipe_payload_json
+
+    def verify(self) -> None:
+        """Self-consistency: ids/hash must match the embedded recipe (parsed
+        fresh from the private payload) and the deterministic run_id from
+        recipe+inputs. Raises on any mismatch. Any previous mutation attempt on
+        a returned `recipe` copy cannot affect this."""
+        sha = self.recipe_sha256
+        if not sha:
+            raise ValueError("compiled-plan artifact has no recipe_sha256")
+        from model_atlas.recipe.compiler import _compute_recipe_sha
+
+        current = self.recipe  # freshly reconstructed
+        if _compute_recipe_sha(current) != sha:
+            raise ValueError(
+                "compiled-plan artifact is corrupt: embedded recipe does not match "
+                "its declared recipe_sha256"
+            )
+        rid = "recipe-" + sha[:24]
+        if rid != self.recipe_id or rid != self.plan_id:
+            raise ValueError(
+                f"compiled-plan artifact ids inconsistent: recipe_id {self.recipe_id} "
+                f"plan_id {self.plan_id} vs recomputed {rid}"
+            )
+        unfrozen = _deep_unfreeze(self.inputs)
+        expected_run = _run_id_from_payload(
+            sha,
+            self.plan_id,
+            unfrozen if isinstance(unfrozen, dict) else {"inputs": unfrozen},
+        )
+        if self.run_id != expected_run:
+            raise ValueError(
+                f"compiled-plan artifact run_id {self.run_id} != recomputed "
+                f"{expected_run} from inputs {unfrozen}"
+            )
 
     def to_plain_dict(self) -> dict[str, object]:
         """Plain JSON-serializable dict (recursively converts frozen
@@ -140,32 +205,6 @@ class CompiledPlanArtifact(BaseModel):
                 f"model-atlas job start --plan <this-file> --out <work-root> # run_id {run_id}"
             ),
         )
-
-    def verify(self) -> None:
-        """Self-consistency: ids/hash must match the embedded recipe and the
-        deterministic run_id from recipe+inputs. Raises on any mismatch."""
-        sha = self.recipe_sha256
-        if not sha:
-            raise ValueError("compiled-plan artifact has no recipe_sha256")
-        from model_atlas.recipe.compiler import _compute_recipe_sha
-
-        if _compute_recipe_sha(self.recipe) != sha:
-            raise ValueError(
-                "compiled-plan artifact is corrupt: embedded recipe does not match "
-                "its declared recipe_sha256"
-            )
-        rid = "recipe-" + sha[:24]
-        if rid != self.recipe_id or rid != self.plan_id:
-            raise ValueError(
-                f"compiled-plan artifact ids inconsistent: recipe_id {self.recipe_id} "
-                f"plan_id {self.plan_id} vs recomputed {rid}"
-            )
-        expected_run = _run_id_from_payload(sha, self.plan_id, dict(self.inputs))
-        if self.run_id != expected_run:
-            raise ValueError(
-                f"compiled-plan artifact run_id {self.run_id} != recomputed "
-                f"{expected_run} from inputs {dict(self.inputs)}"
-            )
 
     def verify_pins_against(self, registry: object) -> None:
         """Compare every pinned stage's backend id, exact version, adapter

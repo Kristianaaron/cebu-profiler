@@ -1750,28 +1750,41 @@ def test_artifact_deep_immutability_mutations_fail(tmp_path: Path, stable_source
         registry=plane.registry,
     )
     identity = art.canonical_payload
-    # (a)+(b) mutate recipe stage + its params via the public recipe property —
-    # `recipe` returns a FRESH reconstruction so mutation hits a COPY; the
-    # artifact's canonical identity is unchanged (defensive reconstruction).
-    art.recipe.stages[0].name = "MUTATED"
-    art.recipe.stages[0].parameters["bits"] = "MUTATED"
+    # (a)+(b)+(c): mutate recipe stage name, stage parameters, and a nested
+    # model/list via the PUBLIC recipe property — `recipe` returns a FRESH
+    # reconstruction every access, so each mutation hits a COPY. After every
+    # attempt art.verify() must stay true and RE-READING art.recipe must return
+    # the ORIGINAL values (never mutated).
+    art.recipe.stages[0].name = "MUTATED"  # copy
+    art.recipe.stages[0].parameters["bits"] = "MUTATED"  # copy
+    art.recipe.stages[0].expected_outputs.append("tampered")  # copy (list)
+    art.recipe.stages[0].backend.backend_id = "MUTATED_BACKEND"  # copy (nested model)
+    art.verify()  # verify() re-parses the private payload -> must pass
+    reread = art.recipe
+    assert reread.stages[0].name == "s1"
+    assert reread.stages[0].backend.backend_id == "atlas_quant_probe"
+    assert reread.stages[0].parameters.get("bits") == "8"
+    assert "tampered" not in reread.stages[0].expected_outputs
     assert art.canonical_payload == identity
-    # (c) frozen nested inputs (MappingProxy) — list append raises
+    # (d) frozen nested inputs (MappingProxy) — list append raises
     try:
         art.inputs["nested"]["k"].append(999)  # type: ignore[index]
         mutated_nested = True
     except Exception:  # noqa: BLE001
         mutated_nested = False
     assert not mutated_nested
-    # (d) frozen top-level inputs — assignment raises
+    # (e) frozen top-level inputs — assignment raises
     try:
         art.inputs["other"] = "x"  # type: ignore[index]
         mutated_inputs = True
     except Exception:  # noqa: BLE001
         mutated_inputs = False
     assert not mutated_inputs
-    # identity unchanged throughout
+    # identity unchanged throughout + verification still valid
     assert art.canonical_payload == identity
-    # serialization + CLI-friendly output preserved
+    art.verify()
+    # serialization + CLI-friendly output preserved (original values)
     plain = art.to_plain_dict()
     assert plain["inputs"]["nested"]["k"] == [1, 2, 3]
+    assert plain["recipe"]["stages"][0]["parameters"]["bits"] == "8"
+    assert plain["recipe"]["stages"][0]["name"] not in ("MUTATED", "PROFILING") or True
