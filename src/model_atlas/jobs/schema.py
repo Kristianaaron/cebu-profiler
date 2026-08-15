@@ -129,6 +129,7 @@ class Job(BaseModel):
     error: str = ""
     inputs: dict[str, object] = Field(default_factory=dict)
     source_snapshot: dict[str, object] = Field(default_factory=dict)
+    source_manifest_digest: str = ""
     repair: list[RepairRecord] = Field(default_factory=list)
 
     def stage(self, stage_id: str) -> StageOutput:

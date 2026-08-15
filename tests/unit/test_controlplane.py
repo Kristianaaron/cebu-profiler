@@ -50,7 +50,7 @@ from model_atlas.recipe.schema import (
     StageEffectClass,
     ValidationGate,
 )
-from model_atlas.repair.gate import CompiledRepair, RepairGate, RepairProposal
+from model_atlas.repair.gate import RepairGate, RepairProposal
 from model_atlas.schemas.evidence import EvidenceKind
 
 # ---------------------------------------------------------------------------
@@ -92,7 +92,7 @@ def _stage(
         id=sid,
         name=name or sid,
         effect_class=effect,
-        backend=StageBackendPin(backend_id=backend, version="unpinned"),
+        backend=StageBackendPin(backend_id=backend, version="1.0.0"),
         produces_format=produces or [],
         requires_formats=requires or [],
         evidence_policy=policy,
@@ -289,7 +289,11 @@ def test_hybrid_with_declared_capability_compiles(compiler: RecipeCompiler):
     # a runtime/backend that EXPLICITLY declares hybrid:exl3+fp8_e4m3+modelopt_nvfp4
     # allows the composition; the compiler trusts the declaration, and the
     # fail-closed availability gate still enforces run-time readiness.
-    from model_atlas.backend.contract import BackendRecord, CommandBackedAdapter
+    from model_atlas.backend.contract import (
+        BackendRecord,
+        CommandBackedAdapter,
+        ParameterSpec,
+    )
     from model_atlas.backend.registry import BackendRegistry
 
     declared_run = BackendRecord(
@@ -299,13 +303,17 @@ def test_hybrid_with_declared_capability_compiles(compiler: RecipeCompiler):
         formats=("modelopt_nvfp4", "safetensors"),
         represents_method="NVFP4 block-scaled substitution",
         architectures=("glm-5.2", "any"),
+        compute_archs=("gb10-sm121", "any"),
+        topologies=("2x-spark", "any"),
         runtime_compat=("sm121", "two-spark"),
         status=RecipeStatus.DISCOVERED,
         version="0.0.1",
+        produces_derivative=True,
         declared_capabilities=("hybrid:exl3+fp8_e4m3+modelopt_nvfp4",),
         supported_formats=(),
         fail_closed=True,
         availability_probe=lambda: (True, "0.0.1", "declared (test harness)"),
+        parameters=(ParameterSpec("group_size", "int", "NVFP4 group", default="16"),),
         adapter=CommandBackedAdapter(backend_id="modelopt_nvfp4_declared"),
     )
     base = build_default_registry()
@@ -313,29 +321,49 @@ def test_hybrid_with_declared_capability_compiles(compiler: RecipeCompiler):
         {**{i: r for i, r in base._records.items()}, "modelopt_nvfp4_declared": declared_run}
     )
     compiler2 = RecipeCompiler(reg)
-    recipe = _recipe(
-        _stage(
-            "a",
-            backend="atlas_quant_probe",
-            effect=StageEffectClass.QUANTIZATION,
-            produces=["exl3"],
+    recipe = CompressionRecipe(
+        name="hyb",
+        source=SourceIdentity(source_id="s", checkpoint_path="/nonexistent"),
+        calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
+        hardware=HardwareEnvelope(
+            model_arch="glm-5.2",
+            compute_arch="gb10-sm121",
+            topology="2x-spark",
+            runtime_backend="two-spark",
         ),
-        _stage(
-            "b",
-            backend="modelopt_nvfp4_declared",
-            effect=StageEffectClass.QUANTIZATION,
-            produces=["modelopt_nvfp4"],
-        ),
-        _stage(
-            "c",
-            backend="atlas_quant_probe",
-            effect=StageEffectClass.QUANTIZATION,
-            produces=["fp8_e4m3"],
-        ),
-        allow_hybrid=True,
+        constraints=RecipeConstraints(allow_hybrid_precision=True, no_pruning=True),
+        stages=[
+            RecipeStage(
+                id="a",
+                name="a",
+                effect_class=StageEffectClass.QUANTIZATION,
+                backend=StageBackendPin(backend_id="modelopt_nvfp4_declared", version="0.0.1"),
+                produces_format=["exl3"],
+                evidence_policy=EvidenceKind.PREDICTED,
+            ),
+            RecipeStage(
+                id="b",
+                name="b",
+                effect_class=StageEffectClass.QUANTIZATION,
+                backend=StageBackendPin(backend_id="modelopt_nvfp4_declared", version="0.0.1"),
+                produces_format=["modelopt_nvfp4"],
+                evidence_policy=EvidenceKind.PREDICTED,
+            ),
+            RecipeStage(
+                id="c",
+                name="c",
+                effect_class=StageEffectClass.QUANTIZATION,
+                backend=StageBackendPin(backend_id="modelopt_nvfp4_declared", version="0.0.1"),
+                produces_format=["fp8_e4m3"],
+                evidence_policy=EvidenceKind.PREDICTED,
+            ),
+        ],
     )
     issues, _, _ = compiler2.validate(recipe)
-    assert "unsupported_hybrid_precision" not in {i.code for i in issues}
+    codes = {i.code for i in issues}
+    # hybrid must NOT be an error: the declaring backend is selected, available,
+    # version-resolved, AND actually produces a precision format
+    assert "unsupported_hybrid_precision" not in codes
 
 
 def test_hybrid_with_unavailable_backend_fails_closed(compiler: RecipeCompiler):
@@ -623,7 +651,7 @@ def test_validation_gate_missing_fails_closed(
                 id="sg",
                 name="sg",
                 effect_class=StageEffectClass.PROFILING,
-                backend=StageBackendPin(backend_id="atlas_quant_probe", version="unpinned"),
+                backend=StageBackendPin(backend_id="atlas_quant_probe", version="1.0.0"),
                 produces_format=["manifest.json"],
                 evidence_policy=EvidenceKind.PREDICTED,
                 validation_gates=[
@@ -654,7 +682,7 @@ def test_require_available_false_is_dry_run_only(
                 effect_class=StageEffectClass.PROFILING,
                 backend=StageBackendPin(
                     backend_id="atlas_quant_probe",
-                    version="unpinned",
+                    version="1.0.0",
                     require_available=False,
                 ),
                 produces_format=["manifest.json"],
@@ -769,28 +797,35 @@ def test_repair_non_allowlisted_rejected():
     assert any("not a registered deterministic" in e for e in validation.errors)
 
 
-def test_repair_allowlisted_compile_and_apply():
+def test_repair_allowlisted_compile_and_apply(tmp_path: Path):
     gate = RepairGate()
+    store = ContentAddressedStore(tmp_path / "cas")
     # a NON-registered kind is rejected
     bad = RepairProposal(kind="delete_all_weights", target="s1", params={})
     assert not gate.validate_proposal(bad).ok
+    # an arbitrary unregistered apply_fn is impossible: apply only runs the
+    # registered transform bound to its versioned identity
     proposal = RepairProposal(
         kind="keep_channels_normalize",
-        target="s1",
+        target="wb.bin",
         params={"channels": "4,1,4,3", "channel_hi": "5"},
     )
     validation = gate.validate_proposal(proposal)
     assert validation.ok
+    assert validation.compiled.transform_version == "v1"
     compiled = validation.compiled
-    assert compiled is not None
     before = json.dumps({"keep_channels": [4, 1, 4, 3], "x": 1}).encode()
-    ok, result = gate.apply(compiled, before_bytes=before)
+    target_ref = store.put_bytes("wb.bin", before)
+    # version mismatch must be refused (arbitrary unversioned identity)
+    bad_ver = gate.validate_proposal(proposal, transform_version="v999")
+    assert not bad_ver.ok
+    ok, result, blob = gate.apply(compiled, cas=store, target_ref=target_ref)
     assert ok
     assert result.compiled is not None
     after_key = result.compiled.new_key
     assert after_key != result.compiled.restore_key
-    # REAL verification: the produced bytes digest must equal the recorded
-    # new_key; a tampered blob must FAIL verification (no or-True).
+    assert blob is not None
+    # REAL verification by RE-READING the produced blob's full CAS ref
     t = gate.transform_for("keep_channels_normalize")
     assert t is not None and t.transform is not None
     produced = t.transform(proposal.params, before)
@@ -798,56 +833,69 @@ def test_repair_allowlisted_compile_and_apply():
     assert not gate.verify(result.compiled, b"tampered-bytes")
 
 
-def test_repair_rollback_restores_and_refuses_tampered():
+def test_repair_publish_updates_target_ref_and_rollback_restores(tmp_path: Path):
+    """P0: apply persists the produced blob, publishes it onto the target
+    StageOutput ref, then rollback atomically restores the ORIGINAL ref/bytes.
+    Tests prove the ref+bytes CHANGED and then were RESTORED through the CAS."""
+    from model_atlas.jobs.schema import StageOutput
+
     gate = RepairGate()
-    proposal = RepairProposal(kind="evidence_downgrade", target="s1", params={"to": "inferred"})
-    validation = gate.validate_proposal(proposal)
-    compiled: CompiledRepair = validation.compiled  # type: ignore[assignment]
-    before = json.dumps({"evidence_kind": "measured"}).encode()
-    ok, result = gate.apply(compiled, before_bytes=before)
+    store = ContentAddressedStore(tmp_path / "cas")
+    so = StageOutput(stage_id="s1")
+    before_bytes = b'{"keep_channels":[],"x":1}'
+    original_ref = store.put_bytes("data.bin", before_bytes)
+    so.outputs.append(original_ref)
+
+    proposal = RepairProposal(
+        kind="keep_channels_normalize",
+        target="data.bin",
+        params={"channels": "3,1,3", "channel_hi": "5"},
+    )
+    ok, res, blob = gate.apply(
+        gate.validate_proposal(proposal).compiled, cas=store, target_ref=original_ref
+    )
     assert ok
-    # CAS-backed rollback: a lookup returning the ORIGINAL bytes (verified by
-    # full digest against restore_key) authorizes restoration; a tampered blob
-    # is refused.
-    lookup = lambda k: before if k == result.compiled.restore_key else b""  # noqa: E731
-    rb = gate.rollback(result.compiled, lookup)
-    assert rb.ok
-    rb2 = gate.rollback(result.compiled, lambda k: b"tampered-cas-content")
-    assert not rb2.ok
+    new_ref = store.put_bytes("data.bin", blob)
+    # publish: target ref now points at the repaired blob (ref CHANGED)
+    gate.publish_apply(res.compiled, target=so, new_ref=new_ref)
+    assert so.outputs[0].sha256 != original_ref.sha256
+    assert store.read(so.outputs[0]) != before_bytes
+    # rollback: restore the ORIGINAL ref via CAS (full digest verified)
+    ok_roll, restore_ref = gate.rollback_ref(res.compiled, cas=store, original_bytes=before_bytes)
+    assert ok_roll
+    assert restore_ref is not None
+    gate.publish_apply(res.compiled, target=so, new_ref=restore_ref)
+    assert so.outputs[0].sha256 == original_ref.sha256
+    assert store.read(so.outputs[0]) == before_bytes  # bytes restored
+    # tampered original refused
+    ok_bad, _ = gate.rollback_ref(res.compiled, cas=store, original_bytes=b"tampered")
+    assert not ok_bad
 
 
-def test_evidence_downgrade_monotonic_and_channel_range():
+def test_evidence_downgrade_monotonic_and_channel_range(tmp_path: Path):
     gate = RepairGate()
+    store = ContentAddressedStore(tmp_path / "cas")
     # downgrade ok
-    p = RepairProposal(kind="evidence_downgrade", target="s1", params={"to": "inferred"})
+    p = RepairProposal(kind="evidence_downgrade", target="ev.bin", params={"to": "inferred"})
     before_m = b'{"evidence_kind":"measured"}'
-    ok, _ = gate.apply(gate.validate_proposal(p).compiled, before_bytes=before_m)
+    ref_m = store.put_bytes("ev.bin", before_m)
+    ok, _, _ = gate.apply(gate.validate_proposal(p).compiled, cas=store, target_ref=ref_m)
     assert ok
     # upgrade refused (monotonic non-escalation)
-    p2 = RepairProposal(kind="evidence_downgrade", target="s1", params={"to": "causally_tested"})
-    ok2, _ = gate.apply(gate.validate_proposal(p2).compiled, before_bytes=before_m)
+    p2 = RepairProposal(
+        kind="evidence_downgrade", target="ev.bin", params={"to": "causally_tested"}
+    )
+    ok2, _, _ = gate.apply(gate.validate_proposal(p2).compiled, cas=store, target_ref=ref_m)
     assert not ok2
     # channel range enforced
     p3 = RepairProposal(
         kind="keep_channels_normalize",
-        target="s1",
+        target="kc.bin",
         params={"channels": "10,5,5", "channel_hi": "5"},
     )
-    ok3, _ = gate.apply(gate.validate_proposal(p3).compiled, before_bytes=b'{"keep_channels":[]}')
+    ref_kc = store.put_bytes("kc.bin", b'"keep_channels":[]')
+    ok3, _, _ = gate.apply(gate.validate_proposal(p3).compiled, cas=store, target_ref=ref_kc)
     assert not ok3
-    # in-range channels canonicalize
-    p4 = RepairProposal(
-        kind="keep_channels_normalize",
-        target="s1",
-        params={"channels": "4,1,4,3", "channel_hi": "5"},
-    )
-    ok4, res4 = gate.apply(
-        gate.validate_proposal(p4).compiled, before_bytes=b'{"keep_channels":[]}'
-    )
-    assert ok4
-    t = gate.transform_for("keep_channels_normalize")
-    assert t is not None and t.transform is not None
-    assert gate.verify(res4.compiled, t.transform(p4.params, b'{"keep_channels":[]}'))
 
 
 # ---------------------------------------------------------------------------
@@ -995,23 +1043,60 @@ def test_backend_contract_enforcement(compiler: RecipeCompiler):
     issues2, _, _ = compiler.validate(recipe2)
     assert "backend_param_unknown" in {i.code for i in issues2}
     # arch-incompatible real-format stage (modelopt declares glm-5.2/any only)
+    from model_atlas.backend.contract import BackendRecord, CommandBackedAdapter
+    from model_atlas.backend.registry import BackendRegistry
+
+    # build a compiler whose modelopt record has an EXACT resolved version so
+    # only the incompatible model_arch is a version/arch blocker
+    base = build_default_registry()
+    mo = base.requires("modelopt_nvfp4")
+
+    pinned_mo = BackendRecord(
+        backend_id="modelopt_nvfp4",
+        display_name=mo.display_name,
+        method_family=mo.method_family,
+        formats=mo.formats,
+        represents_method=mo.represents_method,
+        architectures=("glm-5.2",),  # no "any" -> unknown-family must fail
+        compute_archs=mo.compute_archs,
+        topologies=mo.topologies,
+        runtime_compat=mo.runtime_compat,
+        status=mo.status,
+        version="0.5.0",
+        declared_capabilities=mo.declared_capabilities,
+        supported_formats=mo.supported_formats,
+        fail_closed=True,
+        availability_probe=lambda: (True, "0.5.0", "pinned test harness"),
+        parameters=mo.parameters,
+        adapter=CommandBackedAdapter(backend_id="modelopt_nvfp4"),
+    )
+    reg3 = BackendRegistry(
+        {**{i: r for i, r in base._records.items()}, "modelopt_nvfp4": pinned_mo}
+    )
+    compiler3 = RecipeCompiler(reg3)
     recipe3 = CompressionRecipe(
         name="arch",
         source=SourceIdentity(source_id="s", checkpoint_path="/nonexistent"),
         calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
-        hardware=HardwareEnvelope(architecture="x86-unknown", runtime_backend="two-spark"),
+        hardware=HardwareEnvelope(
+            model_arch="unknown-family",
+            compute_arch="gb10-sm121",
+            topology="2x-spark",
+            runtime_backend="two-spark",
+        ),
         stages=[
-            _stage(
-                "a",
-                backend="modelopt_nvfp4",
-                effect=StageEffectClass.QUANTIZATION,
-                produces=["modelopt_nvfp4"],
-                policy=EvidenceKind.PREDICTED,
+            RecipeStage(
+                id="a",
+                name="a",
+                effect_class=StageEffectClass.QUANTIZATION,
+                backend=StageBackendPin(backend_id="modelopt_nvfp4", version="0.5.0"),
+                produces_format=["modelopt_nvfp4"],
+                evidence_policy=EvidenceKind.PREDICTED,
             )
         ],
     )
-    issues3, _, _ = compiler.validate(recipe3)
-    # modelopt declares architectures ("glm-5.2","any") — "x86-unknown" not in it
+    issues3, _, _ = compiler3.validate(recipe3)
+    # modelopt declares architectures ("glm-5.2","any") — "unknown-family" not in it
     assert "backend_arch_incompatible" in {i.code for i in issues3}
 
 

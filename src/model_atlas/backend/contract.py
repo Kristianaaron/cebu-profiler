@@ -126,6 +126,8 @@ class BackendRecord:
     formats: tuple[str, ...]
     represents_method: str = ""  # e.g. "EXL3 quantization"
     architectures: tuple[str, ...] = ("glm-5.2", "k3", "k3-mini", "any")
+    compute_archs: tuple[str, ...] = ("gb10-sm121", "any")
+    topologies: tuple[str, ...] = ("2x-spark", "single", "any")
     runtime_compat: tuple[str, ...] = ("cpu", "sm121", "two-spark")
 
     # lifecycle status: UNAVAILABLE / DISCOVERED / EXPERIMENTAL / VALIDATED / RECOMMENDED
@@ -208,6 +210,7 @@ class BackendRecord:
             "declared_capabilities": list(self.declared_capabilities),
             "supported_formats": list(self.supported_formats),
             "fail_closed": self.fail_closed,
+            "produces_derivative": self.produces_derivative,
             "parameters": [p.__dict__ for p in self.parameters],
         }
 

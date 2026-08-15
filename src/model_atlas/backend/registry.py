@@ -143,12 +143,25 @@ class BackendRegistry:
         return rec is not None and key in rec.declared_capabilities
 
     def capabilities(self) -> dict[str, object]:
+        """Capability view per backend: declared capabilities + whether the
+        backend produces a real derivative + its resource limits (the full
+        contract an orchestrator needs, not just capability names)."""
         out: dict[str, object] = {}
         for r in self._records.values():
-            for c in r.declared_capabilities:
-                bucket = out.setdefault(c, [])
-                if isinstance(bucket, list):
-                    bucket.append(r.backend_id)
+            entry: dict[str, object] = {
+                "declared_capabilities": list(r.declared_capabilities),
+                "produces_derivative": r.produces_derivative,
+                "resource_limits": (
+                    None
+                    if r.resource_limits is None
+                    else {
+                        "max_host_gb": r.resource_limits.host_gb,
+                        "max_scratch_gb": r.resource_limits.scratch_gb,
+                        "max_workers": r.resource_limits.workers,
+                    }
+                ),
+            }
+            out[r.backend_id] = entry
         return out
 
     # ----- execution (fail closed) -----

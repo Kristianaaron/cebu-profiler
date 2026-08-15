@@ -96,12 +96,18 @@ class ControlPlane:
         job_path = expected_dir / "job.json"
         if not job_path.exists():
             raise KeyError(f"no run dir for {run_id!r} at {expected_dir}")
+        from model_atlas.recipes import CompiledPlanArtifact
+
         job = Job.model_validate_json(job_path.read_text(encoding="utf-8"))
         if job.run_id != run_id:
             raise RuntimeError(
                 f"run identity mismatch: persisted job.run_id={job.run_id} != requested {run_id}"
             )
-        plan = CompressionRecipe.model_validate_json((expected_dir / "plan.json").read_text())
+        artifact = CompiledPlanArtifact.model_validate_json(
+            (expected_dir / "plan.json").read_text(encoding="utf-8")
+        )
+        artifact.verify()
+        plan = artifact.recipe
         compiled = self.compile_recipe(plan)
         if compiled.plan_id != job.plan_id:
             raise RuntimeError(

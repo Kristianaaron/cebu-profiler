@@ -125,23 +125,58 @@ claims, and records exactly what happened.
 
 | Audit item | Resolution |
 |---|---|
-| Repair verification `or True` | real full-digest verification (`RepairGate.verify`) + validator execution before DONE |
-| Toy/probe quant backend | `BackendAdapter.produces_derivative=False`; compression stages require a real derivative producer at compile |
-| Declared validation gates not executed | every required gate runs pre-DONE; missing/unrunnable gate fails closed |
-| Source content hashes / `SourceIdentity.sha256` | verified by full digest; mismatch terminal |
-| O_EXCL lock | replaced with advisory flocks (fd-held, crash-safe, no stale state) |
-| Resume binding + run_id/inputs | resume recomputes run_id from persisted inputs; mismatch refuses |
-| `engine_for` glob | exact-path run dir + full identity validation |
-| Non-functional reproduce | CLI loads + verifies `--plan`; unsupported `--recipe-id` lineage command removed |
-| Backend contract fields | min status, exact version pin, formats, params, resources, arch/runtime all enforced |
-| Hybrid declaration source | only from the selected, available, version-pinned backend |
-| Repair atomic rollback | restores a persisted CAS ref (verified), never flags; registered typed transforms |
-| Evidence downgrade / channels | monotonic (never upgrade) + channel-range enforced |
-| DONE-hash resume verification | re-hash every DONE stage output before trusting a resume |
-| Staging isolation | staging is private; commit publishes only verified CAS refs + a stage manifest |
-| Journal write-ahead | event (fsync) precedes each atomic job.json snapshot |
-| CAS collision guard | full-digest keys; a mismatched slot is never overwritten |
-| no-pruning taint | full DAG reachability from every pruning stage |
-| Deep immutability | compiled plan stored as canonical payload, reconstructed fresh per access |
-| `created_at` docs | clarified time-addressed vs content-addressed id semantics |
-| Builtin quant probe | typed non-compression; no compression stage can succeed without a real derivative |
+| Repair verification `or True` | real full-digest re-read of the produced CAS blob; target ref atomically updated; rollback restores bytes+state |
+| Arbitrary unregistered apply_fn | transforms are registered with a VERSIONED identity; `apply` refuses a version mismatch (no arbitrary apply_fn) |
+| Source path->sha256 gaps | complete recursive relative-path manifest (no first-eight cap); exact membership + hash verified path-bound; mismatch terminal |
+
+## Compiled-plan artifact & reproduction
+
+`compile-recipe --out` writes a **versioned immutable compiled-plan artifact**
+(`CompiledPlanArtifact`): the canonical recipe, `recipe_sha256`/`recipe_id`/
+`plan_id`, stage->backend exact resolved pins, the backend status snapshot,
+canonical job `inputs`, and the deterministic `run_id`. `artifact.verify()`
+recomputes ids + run_id and fails closed on any inconsistency. `model-atlas job
+start --plan <artifact>` loads + verifies it and starts with the artifact's
+canonical inputs; `reproduce.sh` (written into every run dir) embeds the exact
+inputs so a fresh run reproduces the NONEMPTY run id.
+
+## Execution ordering (per stage)
+
+1. Isolated staging dir (never visible to the run until published).
+2. The adapter `context` receives `staging_dir`/`output_sink`.
+3. `expected_outputs` gate: every declared output must exist in staging.
+4. Compression stages require a **real non-evidence derivative**: the adapter's
+   `produces_derivative` AND the record's `produces_derivative` AND a staged
+   weight/serialization file must all agree — else the stage fails closed.
+5. Validation gates run against STAGING first (then again against published
+   outputs pre-DONE).
+6. Only then are the verified content-addressed outputs + stage manifest
+   published and the stage marked DONE.
+
+## Hardware axes (four separate fields)
+
+`HardwareEnvelope` now separates **model_arch** (glm-5.2/k3) from
+**compute_arch** (gb10-sm121) from **topology** (2x-spark) from
+**runtime_backend** (vllm-modelopt). The compiler checks each axis against its
+own backend field (`architectures`, `compute_archs`, `topologies`,
+`runtime_compat`) — glm-5.2 is never compared to gb10-sm121 or vllm-modelopt to
+sm121.
+
+## Executability & hybrid
+
+* Executable stages require an **exact resolved version**; `unpinned` compiles
+  only for planning and is dry-run-only/non-executable (also enforced at run
+  time by the engine).
+* A hybrid (EXL3+NVFP4+FP8 …) compiles only when the declaration comes from a
+  **selected, available, version-resolved backend that actually PRODUCES one of
+  the precision formats** — a profiling/eval analysis backend can never
+  authorize it.
+
+## Structures
+
+* `CompiledRecipe.resolved_backends`/`backend_status_snapshot` are frozen
+  read-only Mappings.
+* no-pruning propagation retains ALL producer edges (a format produced by
+  multiple stages keeps every producer in the reachability DAG).
+* the capability view includes `produces_derivative` + per-backend resource
+  limits.

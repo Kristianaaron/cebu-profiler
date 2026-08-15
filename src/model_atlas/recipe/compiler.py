@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
 from model_atlas.recipe.schema import CompressionRecipe, RecipeStatus, StageEffectClass
@@ -45,6 +47,8 @@ class BackendRecordLike(Protocol):
     formats: tuple[str, ...]
     supported_formats: tuple[str, ...]
     architectures: tuple[str, ...]
+    compute_archs: tuple[str, ...]
+    topologies: tuple[str, ...]
     runtime_compat: tuple[str, ...]
     produces_derivative: bool
     fail_closed: bool
@@ -119,20 +123,22 @@ class CompileIssue:
 class CompiledRecipe:
     """Immutable compiled plan. Nothing here may change after compilation.
 
-    Deep immutability: the authored recipe is stored ONLY as its canonical JSON
-    payload (``_recipe_payload``) + the plan-level ids. ``recipe`` is a property
-    that reconstructs a fresh ``CompressionRecipe`` from that payload each
-    access, so no caller can mutate a nested stage/constraint/dict inside the
-    compiled plan — mutating a returned copy never affects the plan.
+    ``resolved_backends`` and ``backend_status_snapshot`` are exposed as
+    read-only Mappings — callers cannot mutate the compiled plan's resolved
+    pins/status snapshot (mutating a copied dict never affects the plan).
     """
 
     _recipe_payload: str = field(repr=False, compare=False)
     recipe_id: str
     recipe_sha256: str
     plan_id: str
-    resolved_backends: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
+    resolved_backends: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({}), repr=False, compare=False
+    )
     issues: tuple[CompileIssue, ...] = ()
-    backend_status_snapshot: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
+    backend_status_snapshot: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({}), repr=False, compare=False
+    )
     compiled_by: str = "model-atlas"
 
     @property
@@ -150,18 +156,6 @@ class CompiledRecipe:
             }
         )
         return "run-" + sha256_hex(payload)[:24]
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "recipe_id": self.recipe_id,
-            "recipe_sha256": self.recipe_sha256,
-            "plan_id": self.plan_id,
-            "resolved_backends": dict(self.resolved_backends),
-            "issues": [i.to_dict() for i in self.issues],
-            "backend_status_snapshot": dict(self.backend_status_snapshot),
-            "compiled_by": self.compiled_by,
-            "name": self.recipe.name,
-        }
 
 
 class RecipeCompileError(ValueError):
@@ -242,21 +236,21 @@ class RecipeCompiler:
     def _check_no_pruning(self, recipe: CompressionRecipe) -> list[CompileIssue]:
         issues: list[CompileIssue] = []
         pruning = [s for s in recipe.stages if s.effect_class is StageEffectClass.PRUNING]
-        # Build the full format-consumption DAG: edge A -> B when a format
-        # produced by A is required by B. Pruning taint flows downstream through
-        # the whole DAG, so a stage that only transitively consumes a
-        # pruning-produced format (through an intermediate) is also illegal.
-        produced_by: dict[str, str] = {}
+        # Build the full format-consumption DAG RETAINING every producer edge:
+        # produced_by maps a format to the list of ALL stages producing it (a
+        # format produced by more than one stage keeps every producer), so
+        # pruning taint flows downstream along every producer relationship.
+        produced_by: dict[str, list[str]] = {}
         for s in recipe.stages:
             for f in s.produces_format:
-                produced_by[f] = s.id
-        requires_of: dict[str, list[str]] = {s.id: [] for s in recipe.stages}
+                produced_by.setdefault(f, []).append(s.id)
+        requires_of: dict[str, set[str]] = {s.id: set() for s in recipe.stages}
         for s in recipe.stages:
             for f in s.requires_formats:
-                producer = produced_by.get(f)
-                if producer is not None and producer != s.id:
-                    requires_of[s.id].append(producer)
-        # downstream reachability from each pruning stage
+                for producer in produced_by.get(f, []):
+                    if producer != s.id:
+                        requires_of[s.id].add(producer)
+        # downstream reachability from each pruning stage over ALL edges
         tainted: set[str] = set()
         stack: list[str] = [s.id for s in pruning]
         while stack:
@@ -384,34 +378,42 @@ class RecipeCompiler:
 
         combos = ",".join(sorted(quant_fmts))
         # The ONLY way an unsupported composition compiles is an explicit
-        # capability declared by the SELECTED backend for that exact format set,
-        # with that backend AVAILABLE and version-PINNED at compile time. A
-        # declaration on some other registry record never authorizes it; the
-        # author flag alone never weakens this.
+        # capability declared by a SELECTED, available, version-RESOLVED backend
+        # that ALSO actually PRODUCES one of the precision formats in the set.
+        # A profiling/eval/analysis backend that never emits a weight format can
+        # never authorize a hybrid.
         declared = False
-        declaring: list[str] = []
+        declaring_producers: list[str] = []
+        producer_ids = {
+            stage_id.id
+            for stage_id in recipe.stages
+            if any(f in _PRECISION_FORMATS for f in stage_id.produces_format)
+        }
         for stage_id in recipe.stages:
-            sid = stage_id.id
+            if stage_id.id not in producer_ids:
+                continue  # only an actual format-producing stage counts
             pin = stage_id.backend
             rec = self._registry.get(pin.backend_id)
             if rec is None:
                 continue
             if not self._registry.is_backend_available(pin.backend_id):
                 continue
-            if pin.version and pin.version != "unpinned" and rec.version != pin.version:
-                continue
+            if not pin.version or pin.version == "unpinned" or rec.version != pin.version:
+                continue  # must be exact resolved version
             if self._registry.backend_declares_hybrid(pin.backend_id, quant_fmts):
                 declared = True
-                declaring.append(sid)
+                declaring_producers.append(stage_id.id)
 
-        if not declared or len(declaring) == 0:
+        if not declared or not declaring_producers:
             message = (
                 f"recipe mixes precision formats {{{combos}}} but no SELECTED, "
-                "available, version-pinned backend explicitly declares support for "
-                "that exact combination. (EXL3+NVFP4+FP8 is rejected unless a "
-                "runtime/backend declares it.) allow_hybrid_precision alone never "
-                "authorizes an unsupported composition, nor does a declaration on "
-                "an unrelated/unavailable registry record."
+                "available, version-resolved FORMAT-PRODUCING backend explicitly "
+                "declares support for that exact combination. (EXL3+NVFP4+FP8 is "
+                "rejected unless a runtime/backend declares it; a profiling/eval "
+                "stage that never emits a weight format cannot authorize it.) "
+                "allow_hybrid_precision alone never authorizes an unsupported "
+                "composition, nor does a declaration on an unrelated, unavailable, "
+                "or non-producing record."
             )
             issues.append(CompileIssue("error", "unsupported_hybrid_precision", message))
         return issues
@@ -457,8 +459,22 @@ class RecipeCompiler:
                     )
                 )
 
-            # -- version pin: only an exact pinned version is acceptable --
-            if pin.version and pin.version != "unpinned" and record.version != pin.version:
+            # -- version pin: only an EXACT resolved version is executable.
+            #    "unpinned" = authoring draft that can compile for planning but
+            #    is dry-run-only (non-executable); an exact pinned version must
+            #    match the record's resolved version to execute.
+            if not pin.version or pin.version == "unpinned":
+                issues.append(
+                    CompileIssue(
+                        "error",
+                        "backend_version_unpinned",
+                        f"stage pins backend version {pin.version or '<none>'!r}; "
+                        "executable stages require an exact resolved version (unpinned "
+                        "is dry-run-only/non-executable)",
+                        s.id,
+                    )
+                )
+            elif record.version != pin.version:
                 issues.append(
                     CompileIssue(
                         "error",
@@ -545,25 +561,51 @@ class RecipeCompiler:
 
             # -- architecture/runtime compatibility: only stages producing REAL
             #    serialization/weight formats must be compatible with the target
-            #    serving runtime + architecture. Analysis/profiling/eval/plan
-            #    stages run on the local CPU regardless of the serving runtime.
+            #    MODEL arch, GPU compute arch, topology, and runtime — four
+            #    SEPARATE axes (glm-5.2 ≠ gb10-sm121 ≠ 2x-spark ≠ vllm-modelopt).
             real_formats = [f for f in s.produces_format if f not in _PLAN_ARTIFACTS]
             if real_formats:
-                arch = recipe.hardware.architecture
-                # exact match required: "any" is a *documentation* term, not a
-                # wildcard that silently papers over an uninventoried target.
-                if arch not in record.architectures:
+                hw = recipe.hardware
+                # backend declares per-family architectures ("glm-5.2","k3",…);
+                # "any" is a documentation marker only used when the backend is
+                # genuinely family-agnostic.
+                if hw.model_arch not in record.architectures and "any" not in record.architectures:
                     issues.append(
                         CompileIssue(
                             "error",
                             "backend_arch_incompatible",
-                            f"backend {pin.backend_id!r} not compatible with target "
-                            f"architecture {arch!r} (declared {record.architectures})",
+                            f"backend {pin.backend_id!r} not compatible with model "
+                            f"arch {hw.model_arch!r} (declared {record.architectures})",
+                            s.id,
+                        )
+                    )
+                # topology axis (node layout) declared separately on the record
+                if hw.topology not in record.topologies and "any" not in record.topologies:
+                    issues.append(
+                        CompileIssue(
+                            "error",
+                            "backend_topology_incompatible",
+                            f"backend {pin.backend_id!r} not compatible with topology "
+                            f"{hw.topology!r} (declared {record.topologies})",
+                            s.id,
+                        )
+                    )
+                # GPU compute-arch axis (compute capability), e.g. gb10-sm121
+                if (
+                    hw.compute_arch not in record.compute_archs
+                    and "any" not in record.compute_archs
+                ):
+                    issues.append(
+                        CompileIssue(
+                            "error",
+                            "backend_compute_arch_incompatible",
+                            f"backend {pin.backend_id!r} not compatible with compute "
+                            f"arch {hw.compute_arch!r} (declared {record.compute_archs})",
                             s.id,
                         )
                     )
                 if (
-                    recipe.hardware.runtime_backend not in record.runtime_compat
+                    hw.runtime_backend not in record.runtime_compat
                     and "any" not in record.runtime_compat
                 ):
                     issues.append(
@@ -571,7 +613,7 @@ class RecipeCompiler:
                             "error",
                             "backend_runtime_incompatible",
                             f"backend {pin.backend_id!r} not compatible with runtime "
-                            f"{recipe.hardware.runtime_backend!r}",
+                            f"{hw.runtime_backend!r} (declared {record.runtime_compat})",
                             s.id,
                         )
                     )

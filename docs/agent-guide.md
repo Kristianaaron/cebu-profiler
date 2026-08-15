@@ -64,14 +64,27 @@ compile today is a *valid plan expressed honestly*, not a bug.
 ## Repair
 
 Validators may emit typed `RepairProposal`s. Only **registered deterministic
-transforms** (`router_bias_reorder`, `keep_channels_normalize`,
-`bit_count_rebaseline`, `index_total_size_rebuild`, `evidence_downgrade`) can be
-compiled/applied; each transform carries a contract, a mandatory evidence-kind
-ceiling, and (for channels) range bounds. Agent suggestions are proposals until
-compiled. Every applied repair records before/after **full-digest** hashes and
-rollback restores the recorded CAS ref (hash-verified) — never flags. Evidence
-downgrades are monotonic (an upgrade is refused); out-of-range channels are
-refused. Never apply a non-registered repair.
+transforms with a VERSIONED identity** (`keep_channels_normalize@v1`, …) can be
+compiled/applied — there is no arbitrary `apply_fn`; a version mismatch is
+refused. Every applied repair persists + re-reads the produced blob in the CAS
+(full-digest verified), atomically updates the target output ref, and rollback
+atomically restores the original ref/bytes (never flags). Evidence downgrades
+are monotonic (an upgrade is refused); out-of-range channels are refused. Never
+apply a non-registered repair.
+
+## Running / reproducing
+
+`model-atlas compile-recipe --out plan.json` writes a **versioned immutable
+compiled-plan artifact** (recipe + exact resolved pins + canonical inputs +
+run_id). `model-atlas job start --plan plan.json` verifies the artifact and
+starts with its canonical inputs. Every run dir's `reproduce.sh` embeds the
+exact inputs so a fresh run reproduces the same NONEMPTY run id.
+
+## Hardware axes
+
+`HardwareEnvelope` separates model_arch / compute_arch / topology /
+runtime_backend; the compiler checks each against the matching backend field.
+Executable stages require an exact resolved version (unpinned = dry-run-only).
 
 ## Reporting
 

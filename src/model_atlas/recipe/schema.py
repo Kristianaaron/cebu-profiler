@@ -174,12 +174,21 @@ class CalibrationIdentity(BaseModel):
 
 
 class HardwareEnvelope(BaseModel):
-    """Software/hardware envelope for the run (what the plan targets)."""
+    """Software/hardware envelope for the run (what the plan targets).
+
+    ``model_arch`` is the MODEL family (e.g. glm-5.2, k3); ``compute_arch`` is
+    the GPU/CPU compute capability (e.g. gb10-sm121); ``topology`` is the node
+    layout (e.g. 2x-spark); ``runtime_backend`` is the serving runtime (e.g.
+    vllm-modelopt). These are SEPARATE axes — never compare glm-5.2 to
+    gb10-sm121, or vllm-modelopt to sm121.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     node_count: int = Field(default=2, ge=1)
-    architecture: str = "gb10-sm121"  # 2x DGX Spark
+    model_arch: str = "glm-5.2"
+    compute_arch: str = "gb10-sm121"  # GPU/CPU compute capability
+    topology: str = "2x-spark"
     per_node_host_gib: float = Field(default=120.0, gt=0.0)
     per_node_gpu_gib: float | None = None
     interconnect: str = "connectx-7"

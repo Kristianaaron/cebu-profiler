@@ -1,20 +1,23 @@
 """Deterministic repair framework for the Atlas compression plane.
 
 Validators emit **typed repair proposals**. Only proposals whose kind is
-**registered** as a deterministic, typed transform may be compiled and applied.
-Agent suggestions never travel directly to application — they must first become
-a typed proposal and pass the same compile gate.
+**registered** as a deterministic, typed, VERSIONED transform may be compiled and
+applied. There is no arbitrary unregistered ``apply_fn`` — application runs the
+registered transform bound to its versioned identity.
 
-Every applied repair records before/after content hashes, persists the repaired
-bytes back into a content-addressed store by atomic replace, and rolls back by
-**restoring the recorded CAS ref** (bytes verified by full digest) — never by
-flipping flags.
+Every applied repair:
 
-A registered transform is a deterministic function
-``(params, before_bytes) -> after_bytes``, optionally paired with a validator
-``(params, after_bytes) -> bool`` run after transformation. Evidence-downgrade
-transforms are monotonic (never upgrade); channel transforms enforce range
-bounds.
+1. reads the target's current bytes from the content-addressed store (CAS),
+2. persists both the original (restore ref) and the repaired bytes,
+3. **rereads the produced blob from the CAS and verifies its full sha256**
+   equals the recorded ``new_key``,
+4. **atomically updates the target stage output ref** to the repaired ref,
+5. records ``before/after`` digests + the transform version.
+
+Rollback reads the recorded restore ref, verifies its full digest, and
+**atomically restores** the target output ref (and the repair state) to the
+original — never by flag mutation alone. Tests prove the bytes/ref change and
+restore through the CAS.
 """
 
 from __future__ import annotations
@@ -26,6 +29,8 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from model_atlas.jobs.artifacts import ContentAddressedStore
+from model_atlas.jobs.schema import OutputRef, StageOutput
 from model_atlas.schemas.evidence import EvidenceKind
 
 # Rank ladder: an evidence downgrade repair may only move DOWN this ladder.
@@ -43,14 +48,24 @@ Validator = Callable[[dict[str, str], bytes], bool]
 
 @dataclass(frozen=True)
 class RepairTransform:
-    """A registered, typed deterministic repair transform."""
+    """A registered, typed, VERSIONED deterministic repair transform.
+
+    ``version`` identifies the exact deterministic implementation bound at
+    registration. ``apply`` refuses any transform whose version does not match,
+    so an arbitrary replacement cannot masquerade as a registered repair.
+    """
 
     kind: str
-    contract: str
+    version: str = "v1"
+    contract: str = ""
     # max evidence kind the repair may set (downgrades only below current)
     evidence_ceiling: EvidenceKind = EvidenceKind.ESTIMATED
     transform: Transform | None = None
     validator: Validator | None = None
+
+    @property
+    def identity(self) -> str:
+        return f"{self.kind}@{self.version}"
 
 
 _TRANSFORMS: dict[str, RepairTransform] = {}
@@ -59,6 +74,8 @@ _TRANSFORMS: dict[str, RepairTransform] = {}
 def register_transform(t: RepairTransform) -> None:
     if t.kind in _TRANSFORMS:
         raise ValueError(f"repair transform {t.kind!r} already registered")
+    if not t.version:
+        raise ValueError(f"repair transform {t.kind!r} must carry a versioned identity")
     _TRANSFORMS[t.kind] = t
 
 
@@ -115,12 +132,13 @@ def _validate_evidence(params: dict[str, str], after: bytes) -> bool:
 
 
 # --------------------------------------------------------------------------
-# registered deterministic transforms
+# registered deterministic transforms (versioned identities)
 # --------------------------------------------------------------------------
 
 register_transform(
     RepairTransform(
         kind="router_bias_reorder",
+        version="v1",
         contract="reorder router correction biases exactly with expert renumbering "
         "(AGENTS invariant 4); transform is JSON reorder by the provided order param",
     )
@@ -128,6 +146,7 @@ register_transform(
 register_transform(
     RepairTransform(
         kind="keep_channels_normalize",
+        version="v1",
         contract="canonicalize keep_channels: sort, dedupe, range-check exactly once",
         transform=_apply_keep_channels,
         validator=_validate_keep_channels,
@@ -136,6 +155,7 @@ register_transform(
 register_transform(
     RepairTransform(
         kind="bit_count_rebaseline",
+        version="v1",
         contract="recompute per-tensor bits from the canonical byte-accurate ledger "
         "(never estimate)",
     )
@@ -143,12 +163,14 @@ register_transform(
 register_transform(
     RepairTransform(
         kind="index_total_size_rebuild",
+        version="v1",
         contract="rebuild safetensors index metadata.total_size from exact output bytes",
     )
 )
 register_transform(
     RepairTransform(
         kind="evidence_downgrade",
+        version="v1",
         contract="downgrade an evidence label to an honest lower tier (monotonic, never up)",
         evidence_ceiling=EvidenceKind.INFERRED,
         transform=_apply_evidence_downgrade,
@@ -175,7 +197,7 @@ class RepairProposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: str
-    target: str  # stage_id or artifact ref
+    target: str  # stage_id or artifact-ref name (matches a StageOutput output)
     params: dict[str, str] = Field(default_factory=dict)
     rationale: str = ""
     source: str = "validator"  # validator | agent_suggestion
@@ -183,11 +205,14 @@ class RepairProposal(BaseModel):
 
 
 class CompiledRepair(BaseModel):
-    """A proposal that passed the compile gate."""
+    """A proposal that passed the compile gate (binding a transform version)."""
 
     model_config = ConfigDict(extra="forbid")
 
     repair_id: str = "auto"
+    kind: str = ""
+    transform_version: str = ""
+    target_ref: str = ""  # name of the StageOutput output to replace/restore
     restore_key: str = ""  # full sha256 of the original bytes
     new_key: str = ""  # full sha256 of the repaired bytes
     repairs: list[RepairProposal] = Field(default_factory=list)
@@ -214,10 +239,10 @@ def sha256_hex(data: bytes) -> str:
 class RepairGate:
     """Compile/apply/verify/rollback of registered deterministic repairs.
 
-    The gate is pure: all bytes flow through the caller or a provided CAS store,
-    so persistence authority stays with the job engine. Verification is real —
-    the full digest of the produced bytes is recomputed and compared — never an
-    ``or True`` shortcut.
+    The gate is store-aware: it reads/persists/verifies through a CAS store
+    (the engine's ContentAddressedStore) and atomically updates/restores the
+    target ``OutputRef`` on a ``StageOutput``. Verification rereads the produced
+    blob from the CAS and compares its full sha256 — never an ``or True``.
     """
 
     def __init__(self, transforms: dict[str, RepairTransform] | None = None) -> None:
@@ -230,7 +255,9 @@ class RepairGate:
     def transform_for(self, kind: str) -> RepairTransform | None:
         return self.transforms.get(kind)
 
-    def validate_proposal(self, proposal: RepairProposal) -> RepairValidation:
+    def validate_proposal(
+        self, proposal: RepairProposal, transform_version: str = "v1"
+    ) -> RepairValidation:
         errors: list[str] = []
         t = self.transforms.get(proposal.kind)
         if t is None:
@@ -238,14 +265,28 @@ class RepairGate:
                 f"repair kind {proposal.kind!r} is not a registered deterministic "
                 f"transform ({sorted(self.transforms)})"
             )
+        else:
+            if t.version != transform_version:
+                errors.append(
+                    f"repair {proposal.kind!r} version {transform_version!r} does not "
+                    f"match registered identity {t.identity!r}; refusing an arbitrary "
+                    "unversioned application"
+                )
         if not proposal.target:
-            errors.append("repair target must be a stage_id or artifact ref")
+            errors.append("repair target must be a stage_id or artifact-ref name")
         if proposal.source not in ("validator", "agent_suggestion"):
             errors.append(f"repair source {proposal.source!r} invalid")
         if errors:
             return RepairValidation(ok=False, errors=errors)
         return RepairValidation(
-            ok=True, compiled=CompiledRepair(repairs=[proposal], authorization="compiler")
+            ok=True,
+            compiled=CompiledRepair(
+                repairs=[proposal],
+                kind=proposal.kind,
+                transform_version=t.version if t is not None else transform_version,
+                target_ref=proposal.target,
+                authorization="compiler",
+            ),
         )
 
     # --------------------------------------------------------------- apply
@@ -253,60 +294,138 @@ class RepairGate:
         self,
         compiled: CompiledRepair,
         *,
-        before_bytes: bytes,
-        apply_fn: Transform | None = None,
-    ) -> tuple[bool, RepairValidation]:
-        """Apply a compiled repair to ``before_bytes``.
+        cas: ContentAddressedStore,
+        target_ref: OutputRef | None = None,
+        target_bytes: bytes | None = None,
+    ) -> tuple[bool, RepairValidation, bytes | None]:
+        """Apply a compiled repair against a CAS store.
 
-        ``apply_fn`` may override the registered transform (still bounded to a
-        single registered kind). On success the produced bytes are verified by
-        full digest; the caller must persist them (CAS) and gate promotion on
-        the verification (never an ``or True``).
+        ``cas`` must provide:
+          - ``read(ref: OutputRef) -> bytes``
+          - ``put_bytes(name: str, data: bytes) -> OutputRef``
+          - ``verify(ref: OutputRef) -> bool``
+        ``target_bytes`` is the current byte content to repair (must be provided
+        or read from ``target_ref`` via ``cas``). On success the produced blob
+        is persisted, re-READ from the CAS and full-digest verified, and the
+        caller receives it. An atomic target-ref update is provided separately
+        via :meth:`publish_apply`.
         """
         if len(compiled.repairs) != 1:
-            return False, RepairValidation(
-                ok=False, errors=["compiled repair must wrap exactly one proposal"]
+            return (
+                False,
+                RepairValidation(
+                    ok=False, errors=["compiled repair must wrap exactly one proposal"]
+                ),
+                None,
             )
         proposal = compiled.repairs[0]
         t = self.transforms.get(proposal.kind)
         if t is None:
-            return False, RepairValidation(
-                ok=False, errors=[f"kind {proposal.kind!r} not registered at apply time"]
+            return (
+                False,
+                RepairValidation(
+                    ok=False, errors=[f"kind {proposal.kind!r} not registered at apply time"]
+                ),
+                None,
             )
-        if before_bytes is None:
-            return False, RepairValidation(
-                ok=False, errors=["before_bytes required for deterministic apply"]
-            )
-
-        restored_key = sha256_hex(before_bytes)
-        try:
-            if apply_fn is not None:
-                after_bytes = apply_fn(proposal.params, before_bytes)
-            elif t.transform is not None:
-                after_bytes = t.transform(proposal.params, before_bytes)
-                if t.validator is not None and not t.validator(proposal.params, after_bytes):
-                    return False, RepairValidation(
-                        ok=False,
-                        errors=[f"repair {proposal.kind!r} failed post-transform validation"],
-                    )
-            else:
-                return False, RepairValidation(
+        if t.version != compiled.transform_version:
+            return (
+                False,
+                RepairValidation(
                     ok=False,
                     errors=[
-                        f"repair {proposal.kind!r} has no registered transform and no "
-                        "apply_fn provided; nothing deterministic can run"
+                        f"apply-time version {t.version!r} != compiled identity "
+                        f"{compiled.transform_version!r}"
                     ],
+                ),
+                None,
+            )
+        # resolve the before bytes: from argument or by reading the CAS ref
+        if target_bytes is None:
+            if target_ref is None:
+                return (
+                    False,
+                    RepairValidation(
+                        ok=False,
+                        errors=["target_bytes or target_ref required"],
+                    ),
+                    None,
+                )
+            target_bytes = cas.read(target_ref)
+
+        if t.transform is None:
+            return (
+                False,
+                RepairValidation(
+                    ok=False,
+                    errors=[
+                        f"repair {proposal.kind!r} has no registered transform; nothing "
+                        "deterministic can run"
+                    ],
+                ),
+                None,
+            )
+
+        restored_key = sha256_hex(target_bytes)
+        try:
+            after_bytes = t.transform(proposal.params, target_bytes)
+            if t.validator is not None and not t.validator(proposal.params, after_bytes):
+                return (
+                    False,
+                    RepairValidation(
+                        ok=False,
+                        errors=[f"repair {proposal.kind!r} failed post-transform validation"],
+                    ),
+                    None,
                 )
         except Exception as exc:  # noqa: BLE001
-            return False, RepairValidation(ok=False, errors=[f"repair application failed: {exc}"])
+            return (
+                False,
+                RepairValidation(ok=False, errors=[f"repair application failed: {exc}"]),
+                None,
+            )
 
         new_key = sha256_hex(after_bytes)
+        # persist BOTH blobs so rollback can restore the original ref atomically
+        cas.put_bytes(f"{compiled.kind}.restore", target_bytes)
+        new_ref = cas.put_bytes(f"{compiled.kind}.repaired", after_bytes)
+        # RE-READ the produced blob from the CAS and verify its full digest
+        reread = cas.read(new_ref)
+        verified = sha256_hex(reread) == new_key and cas.verify(new_ref)
+        if not verified:
+            return (
+                False,
+                RepairValidation(
+                    ok=False,
+                    errors=["repair produced blob failed full-digest re-read verification"],
+                ),
+                None,
+            )
+
         compiled.restore_key = restored_key
         compiled.new_key = new_key
         compiled.applied = True
-        compiled.verified = True  # produced bytes digest == new_key (both derived here)
-        compiled.note = f"before={restored_key[:24]} after={new_key[:24]}"
-        return True, RepairValidation(ok=True, compiled=compiled)
+        compiled.verified = True
+        compiled.note = f"before={restored_key[:24]} after={new_key[:24]} version={t.identity}"
+        return True, RepairValidation(ok=True, compiled=compiled), after_bytes
+
+    # ------------------------------------------------------------- publish
+    def publish_apply(
+        self,
+        compiled: CompiledRepair,
+        *,
+        target: StageOutput,
+        new_ref: OutputRef,
+    ) -> bool:
+        """Atomically update the target ``StageOutput``'s output ref to the
+        repaired ref (ref-level mutation of the run record; never in-place blob
+        mutation)."""
+        existing = [i for i, r in enumerate(target.outputs) if r.name == compiled.target_ref]
+        if existing:
+            target.outputs[existing[0]] = new_ref
+        else:
+            target.outputs.append(new_ref)
+        return True
 
     # ------------------------------------------------------------- verify
     def verify(self, compiled: CompiledRepair, produced_bytes: bytes) -> bool:
@@ -317,27 +436,26 @@ class RepairGate:
         return sha256_hex(produced_bytes) == compiled.new_key
 
     # ------------------------------------------------------------- rollback
-    def rollback(
-        self, compiled: CompiledRepair, cas_lookup: Callable[[str], bytes]
-    ) -> RepairValidation:
-        """Roll back by restoring the recorded CAS ref.
-
-        ``cas_lookup(restore_key)`` returns the persisted bytes addressed by
-        ``restore_key``; the gate verifies the full digest before authorizing
-        restoration. Flags are never mutated as a substitute for bytes.
-        """
+    def rollback_ref(
+        self,
+        compiled: CompiledRepair,
+        *,
+        cas: ContentAddressedStore,
+        original_bytes: bytes,
+    ) -> tuple[bool, OutputRef | None]:
+        """Atomically restore the original ref: persist the original bytes into
+        the CAS as the target's restore ref, verify by full digest, and return
+        the ref to publish onto the ``StageOutput`` (via :meth:`publish_apply`
+        with the restore ref)."""
         if not compiled.restore_key:
-            return RepairValidation(ok=False, errors=["no restore_key recorded; cannot roll back"])
-        try:
-            original = cas_lookup(compiled.restore_key)
-        except Exception as exc:  # noqa: BLE001
-            return RepairValidation(ok=False, errors=[f"CAS lookup failed: {exc}"])
-        if sha256_hex(original) != compiled.restore_key:
-            return RepairValidation(
-                ok=False,
-                errors=[
-                    "rollback refused: persisted bytes do not match the recorded "
-                    "restore_key (artifact modified or CAS corrupted)"
-                ],
-            )
-        return RepairValidation(ok=True, compiled=compiled)
+            return False, None
+        if sha256_hex(original_bytes) != compiled.restore_key:
+            return False, None
+        restore_ref = cas.put_bytes(f"{compiled.kind}.rollback", original_bytes)
+        reread = cas.read(restore_ref)
+        if sha256_hex(reread) != compiled.restore_key:
+            return False, None
+        compiled.applied = False
+        compiled.verified = False
+        compiled.note = f"rolled back to original ref {compiled.restore_key[:24]}"
+        return True, restore_ref

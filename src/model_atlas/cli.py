@@ -97,8 +97,17 @@ def compile_recipe(
         print(f"  compiled plan_id: {compiled.plan_id} (immutable)")
         print(f"  recipe_sha256: {compiled.recipe_sha256}")
         if out:
-            Path(out).write_text(json.dumps(compiled.to_dict(), indent=2, sort_keys=True))
-            print(f"wrote: {out}")
+            from model_atlas.recipes import CompiledPlanArtifact
+
+            artifact = CompiledPlanArtifact.from_compiled(compiled, inputs={})
+            artifact.verify()
+            Path(out).parent.mkdir(parents=True, exist_ok=True)
+            Path(out).write_text(
+                json.dumps(artifact.model_dump(mode="json"), indent=2, sort_keys=True)
+            )
+            print(f"wrote (verified compiled-plan artifact): {out}")
+        else:
+            print("  note: pass --out to write a versioned compiled-plan artifact")
 
 
 @app.command("job")
@@ -123,23 +132,27 @@ def job(
     plane = ControlPlane(work_root=out)
     if action == "start":
         if plan:
-            # Functional --plan path: safely load + VERIFY the immutable plan,
-            # then start the run; fail closed on any plan fault.
-            from model_atlas.recipe.schema import CompressionRecipe
+            # Functional --plan path: load + VERIFY the versioned compiled-plan
+            # artifact (recipe, ids, pins, run_id from CANONICAL inputs), then
+            # start the run with those inputs; fail closed on any fault.
+            from model_atlas.recipes import CompiledPlanArtifact
 
             try:
-                r = CompressionRecipe.model_validate_json(Path(plan).read_text(encoding="utf-8"))
+                artifact = CompiledPlanArtifact.model_validate_json(
+                    Path(plan).read_text(encoding="utf-8")
+                )
+                artifact.verify()
             except Exception as exc:  # noqa: BLE001
-                print(f"FAIL-CLOSED: cannot load plan {plan!r}: {exc}")
+                print(f"FAIL-CLOSED: cannot load/verify plan {plan!r}: {exc}")
                 raise typer.Exit(1) from exc
             try:
-                engine = plane.start(r, inputs={})
+                engine = plane.start(artifact.recipe, inputs=dict(artifact.inputs))
             except Exception as exc:  # noqa: BLE001 — fail-closed is the CLI contract
                 print(f"FAIL-CLOSED: could not start run from plan: {exc}")
                 raise typer.Exit(1) from exc
             st = engine.inspect()
             print(f"run_id: {st['run_id']}")
-            print(f"status: {st['status']} (started from plan {plan!r})")
+            print(f"status: {st['status']} (started from verified plan {plan!r})")
             return
         recipes = {
             "glm52-no-pruning": glm52_no_pruning_recipe,

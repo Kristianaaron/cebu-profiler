@@ -212,28 +212,51 @@ def _fsync_dir(path: Path) -> None:
 
 
 def source_snapshot(source_path: str) -> dict[str, object]:
-    """Best-effort immutable-source stat snapshot (size+mtime, bounded).
-    Used to detect accidental in-place mutation of the source checkpoint."""
+    """Complete recursive immutable-source hash+stat snapshot.
+
+    Walks EVERY file under ``source_path`` (no first-eight cap) and records
+    relative-path -> {sha256, size, mtime_ns}. This is the authoritative content
+    manifest used to detect in-place mutation and to verify declared
+    ``SourceIdentity.sha256`` per-file hashes with PATH BINDING."""
+    return source_manifest(source_path)
+
+
+def source_manifest(source_path: str) -> dict[str, object]:
+    """Recursive relative-path -> sha256 manifest (path-bound)."""
     p = Path(source_path)
-    if p.is_dir():
-        entries = {}
-        for child in sorted(p.iterdir())[:8]:
-            try:
-                st = child.stat()
-            except OSError:
-                continue
-            entries[child.name] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
-        return {"type": "dir", "entries": entries}
-    try:
-        st = p.stat()
-        return {"type": "file", "size": st.st_size, "mtime_ns": st.st_mtime_ns}
-    except OSError:
+    if not p.exists():
         return {"type": "missing"}
+    if p.is_file():
+        size = p.stat().st_size
+        mtime = p.stat().st_mtime_ns
+        return {
+            "type": "file",
+            "files": {"__source__": sha256_file(p)},
+            "file_stats": {"__source__": {"size": size, "mtime_ns": mtime}},
+        }
+    files: dict[str, str] = {}
+    stats: dict[str, object] = {}
+    for child in sorted(p.rglob("*")):
+        if child.is_file():
+            rel = str(child.relative_to(p))
+            files[rel] = sha256_file(child)
+            st = child.stat()
+            stats[rel] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+    return {"type": "dir", "files": files, "file_stats": stats}
+
+
+def source_manifest_digest(manifest: dict[str, object]) -> str:
+    """Canonical digest of the whole source manifest (path->hash map)."""
+    payload = {
+        "type": manifest.get("type"),
+        "files": manifest.get("files", {}),
+    }
+    return sha256_hex(canonical_json(payload))
 
 
 def assert_source_readonly(source_snapshot_before: dict[str, object], source_path: str) -> None:
     """Fail closed if a source changed underneath a run (immutable_source=true)."""
-    after = source_snapshot(source_path)
+    after = source_manifest(source_path)
     if after != source_snapshot_before:
         raise RuntimeError(f"source {source_path} changed during run (immutable_source violated)")
     if after.get("type") == "missing":

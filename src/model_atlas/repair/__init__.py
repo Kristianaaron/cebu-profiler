@@ -1,5 +1,5 @@
-"""Deterministic repair framework: typed proposals, registered transforms,
-real verification, atomic CAS rollback."""
+"""Deterministic repair framework: typed versioned transforms, real
+CAS-verified apply, atomic target-ref publish, byte-restoring rollback."""
 
 from model_atlas.repair.gate import (
     ALLOWLIST,
