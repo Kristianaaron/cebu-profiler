@@ -537,28 +537,28 @@ class JobEngine:
             files: dict[str, str] = {
                 k: v for k, v in raw_files.items() if isinstance(k, str) and isinstance(v, str)
             }
-            # (2) DECLARED source hashes: path-bound dict OR canonical manifest
-            #     digest.
+            # (2) DECLARED source identity — ONE rule, identical to compile:
+            #     * sha256 non-empty => must EXACTLY equal the complete measured
+            #       path set + per-path hash equality; manifest_digest is IGNORED
+            #       (digest+partial-map is rejected)
+            #     * sha256 empty => manifest_digest alone is authoritative.
             declared_sha = self.compiled.recipe.source.sha256
             declared_digest = self.compiled.recipe.source.manifest_digest
-            if isinstance(declared_sha, dict):
+            if isinstance(declared_sha, dict) and len(declared_sha) > 0:
                 declared_map: dict[str, str] = {
                     k: v
                     for k, v in declared_sha.items()
                     if isinstance(k, str) and isinstance(v, str)
                 }
-                # EXACT path-set equality: the declared mapping must contain
-                # exactly the complete recursive measured path set (no missing,
-                # no extra paths), plus per-path hash equality.
+                # EXACT path-set equality (digest is not authoritative here)
                 declared_paths = set(declared_map)
                 measured_paths = set(files)
                 if declared_paths != measured_paths:
                     raise SourceIntegrityError(
-                        "executable source sha256 path set must equal the complete "
-                        f"recursive measured path set: declared {len(declared_paths)} "
-                        f"paths ({sorted(declared_paths - measured_paths)} extra, "
-                        f"{sorted(measured_paths - declared_paths)} missing) — or "
-                        "provide the canonical full manifest_digest instead"
+                        "source sha256 path set does not exactly equal the complete "
+                        f"recursive measured path set (declared {len(declared_paths)} "
+                        f"paths, measured {len(measured_paths)}) — partial maps with "
+                        "a digest are invalid"
                     )
                 for rel, digest in declared_map.items():
                     if files[rel] != digest:
@@ -566,19 +566,27 @@ class JobEngine:
                             f"declared path {rel!r} hash {digest[:16]}… != measured "
                             f"{files[rel][:16]}…"
                         )
+            elif isinstance(declared_sha, dict) and len(declared_sha) == 0:
+                # digest alone is authoritative when the map is empty
+                job_digest_a = source_manifest_digest(m)
+                if declared_digest and declared_digest != job_digest_a:
+                    raise SourceIntegrityError(
+                        f"declared manifest digest {declared_digest[:16]}… != recomputed "
+                        f"{job_digest_a[:16]}…"
+                    )
+                if job.source_manifest_digest and job.source_manifest_digest != job_digest_a:
+                    raise SourceIntegrityError(
+                        f"run-start manifest digest {job.source_manifest_digest[:16]}… != "
+                        f"recomputed {job_digest_a[:16]}…"
+                    )
             elif declared_sha:
                 raise SourceIntegrityError(
                     "SourceIdentity.sha256 must be a path-bound dict "
                     "{relative_path -> sha256}, not a flat list"
                 )
-            # (3) canonical manifest digest must match the declared one AND the
-            #     run-start snapshot's.
+            # (3) always check the whole-source digest stability against the
+            #     run-start snapshot (defensive, applies under both forms).
             job_digest = source_manifest_digest(m)
-            if declared_digest and declared_digest != job_digest:
-                raise SourceIntegrityError(
-                    f"declared manifest digest {declared_digest[:16]}… != recomputed "
-                    f"{job_digest[:16]}…"
-                )
             if job.source_manifest_digest and job.source_manifest_digest != job_digest:
                 raise SourceIntegrityError(
                     f"run-start manifest digest {job.source_manifest_digest[:16]}… != "
@@ -913,6 +921,15 @@ class JobEngine:
         so = job.stages.get(stage_id)
         if so is None or not any(o.name == target_output for o in so.outputs):
             raise RuntimeError(f"no stage {stage_id!r} has output ref named {target_output!r}")
+        # ── PREFLIGHT: refuse a duplicate BEFORE the gate writes any CAS blob,
+        #    so a rejected duplicate never orphans restore/new blobs ──
+        if any(
+            r.applied and r.stage_id == stage_id and r.target == target_output for r in job.repair
+        ):
+            raise RuntimeError(
+                f"target {stage_id}:{target_output} already has an applied repair; "
+                "refusing a second BEFORE persisting any CAS blobs (no orphans)"
+            )
         orig_ref = next(r for r in so.outputs if r.name == target_output)
         compiled = gate.validate_proposal(proposal).compiled
         if compiled is None:

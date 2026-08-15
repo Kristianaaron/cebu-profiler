@@ -253,25 +253,32 @@ class RecipeCompiler:
         return issues, rid, sha
 
     def _check_source_identity(self, recipe: CompressionRecipe) -> list[CompileIssue]:
-        """Executable compile/run requires a CANONICAL source identity: a hash
-        map that EXACTLY equals the complete recursive measured path set (or a
-        canonical full-manifest digest). A non-exact map for an EXISTING source
-        is rejected even if non-empty — it is only usable with the canonical
-        digest. A dry-run plan may stay incomplete only as explicitly
-        non-executable + fail-closed."""
+        """Executable compile/run requires a CANONICAL source identity with ONE
+        explicit rule, identical at compile and run:
+
+          * if ``sha256`` is EMPTY: ``manifest_digest`` is the authoritative
+            canonical identity.
+          * if ``sha256`` is supplied (non-empty): it must EXACTLY equal the
+            complete recursive measured path set (plus per-path hash equality);
+            ``manifest_digest`` is then ignored/not authoritative. A
+            digest+partial-map combination is REJECTED — sodium of the two forms
+            is never mixed.
+
+        A dry-run plan may stay incomplete only as explicitly non-executable
+        + fail-closed."""
         from model_atlas.jobs.artifacts import source_manifest
 
         issues: list[CompileIssue] = []
         src = recipe.source
         sha = src.sha256
         digest = src.manifest_digest
-        canonical: bool = False
+        canonical = False
         if (
             isinstance(sha, dict)
             and len(sha) > 0
             and all(isinstance(k, str) and isinstance(v, str) for k, v in sha.items())
         ):
-            # an existing, measurable source must have an EXACT path set
+            # sha256 supplied -> must be EXACT path set (digest is ignored)
             if Path(src.checkpoint_path).exists():
                 m = source_manifest(src.checkpoint_path)
                 raw_obj = m.get("files", {})
@@ -279,12 +286,11 @@ class RecipeCompiler:
                 measured_paths = {k for k in raw if isinstance(k, str)}
                 if set(sha) == measured_paths:
                     canonical = True
-                elif digest:
-                    canonical = True  # digest is the authoritative identity
-                # non-exact map WITHOUT a digest is invalid for executable plans
+                # else: digest+partial-map and partial-map-only are BOTH invalid
             else:
                 canonical = True  # placeholder map acceptable (source unmeasurable)
-        if bool(digest):
+        elif bool(digest):
+            # sha256 empty -> digest alone is authoritative
             canonical = True
         if not canonical:
             executable_stages = [s.id for s in recipe.stages if s.backend.require_available]
@@ -293,10 +299,11 @@ class RecipeCompiler:
                     CompileIssue(
                         "error",
                         "source_identity_missing",
-                        "executable recipe source identity not canonical: provide a "
-                        "path-bound hash map that EXACTLY equals the complete "
-                        "recursive measured path set, or a canonical full "
-                        "manifest_digest",
+                        "executable recipe source identity not canonical: if "
+                        "SourceIdentity.sha256 is supplied it must EXACTLY equal "
+                        "the complete recursive measured path set; otherwise "
+                        "(sha256 empty) the canonical full manifest_digest is the "
+                        "authoritative identity. Digest+partial-map is invalid.",
                         stage_id=executable_stages[0],
                     )
                 )

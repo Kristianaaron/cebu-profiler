@@ -84,11 +84,12 @@ class CompiledPlanArtifact(BaseModel):
         object.__setattr__(
             self, "backend_status_snapshot", MappingProxyType(dict(self.backend_status_snapshot))
         )
-        object.__setattr__(self, "inputs", MappingProxyType(dict(self.inputs)))
+        object.__setattr__(self, "inputs", _deep_freeze(self.inputs))
 
     def to_plain_dict(self) -> dict[str, object]:
-        """Plain JSON-serializable dict (converts frozen MappingProxy fields to
-        plain dicts) for persistence without exposing mutable views."""
+        """Plain JSON-serializable dict (recursively converts frozen
+        MappingProxy/list wrappers back to plain dict/list) for persistence
+        without exposing mutable views."""
         return {
             "schema_version": self.schema_version,
             "recipe": self.recipe.model_dump(mode="json"),
@@ -97,7 +98,7 @@ class CompiledPlanArtifact(BaseModel):
             "plan_id": self.plan_id,
             "resolved_pins": {k: dict(v) for k, v in self.resolved_pins.items()},
             "backend_status_snapshot": dict(self.backend_status_snapshot),
-            "inputs": dict(self.inputs),
+            "inputs": _deep_unfreeze(self.inputs),
             "run_id": self.run_id,
             "reproduce_command": self.reproduce_command,
             "canonical_identity": self.canonical_identity,
@@ -278,6 +279,31 @@ def _snapshot_pins(
                 pin["capability_hash"] = _capability_hash(rec)
         pins[s.id] = pin
     return pins
+
+
+def _deep_freeze(value: object) -> object:
+    """Recursively freeze nested dicts/lists so NO public mutation can reach
+    artifact identity (MappingProxy for dicts, tuple for lists, recursion for
+    nested values)."""
+    from types import MappingProxyType
+
+    if isinstance(value, dict):
+        return MappingProxyType({k: _deep_freeze(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return tuple(_deep_freeze(v) for v in value)
+    return value
+
+
+def _deep_unfreeze(value: object) -> object:
+    """Recursively convert frozen wrappers back to plain dict/list for
+    serialization."""
+    from types import MappingProxyType
+
+    if isinstance(value, (MappingProxyType, dict)):
+        return {k: _deep_unfreeze(v) for k, v in dict(value).items()}
+    if isinstance(value, (tuple, list)):
+        return [_deep_unfreeze(v) for v in value]
+    return value
 
 
 def _run_id_from_payload(recipe_sha256: str, plan_id: str, inputs: dict[str, object]) -> str:
