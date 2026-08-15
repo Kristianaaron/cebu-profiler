@@ -138,6 +138,63 @@ class RecommendationService:
     def job_lineage(self, recipe: CompressionRecipe) -> dict[str, Any]:
         return dict(self.plane.lineage(recipe))
 
+    def job_output(
+        self,
+        run_id: str,
+        *,
+        stage_id: str | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any] | bytes:
+        """Content-addressed outputs of a run.
+
+        With no ``name`` returns metadata for every published output (optionally
+        filtered to a single ``stage_id``). With a ``name`` returns the blob's
+        raw bytes — the stage filter narrows a name collision across stages.
+        Fails closed (raises) when the run or output does not exist.
+        """
+        engine = self.plane.engine_for(run_id)
+        inspect = engine.inspect()
+        stages_raw = inspect.get("stages", {})
+        stages: dict[str, Any] = stages_raw if isinstance(stages_raw, dict) else {}
+        refs: list[tuple[str, dict[str, Any]]] = []
+        for sid, so in stages.items():
+            so_dict = so.model_dump(mode="json") if hasattr(so, "model_dump") else so
+            stage_refs = (
+                [r.model_dump(mode="json") for r in so.outputs]
+                if hasattr(so, "outputs")
+                else so_dict.get("outputs", [])
+                if isinstance(so_dict, dict)
+                else []
+            )
+            if stage_id is not None and sid != stage_id:
+                continue
+            for r in stage_refs:
+                if isinstance(r, dict):
+                    refs.append((sid, r))
+        if name is not None:
+            hits = [(sid, r) for sid, r in refs if r.get("name") == name]
+            if not hits:
+                raise KeyError(
+                    f"run {run_id!r} has no output named {name!r}"
+                    + (f" on stage {stage_id!r}" if stage_id else "")
+                )
+            sha = str(hits[0][1].get("sha256", ""))
+            return engine.store.read_from_key(sha)
+        return {
+            "run_id": run_id,
+            "outputs": [
+                {
+                    "stage": sid,
+                    "name": r.get("name"),
+                    "sha256": r.get("sha256"),
+                    "size_bytes": r.get("size_bytes", 0),
+                    "format": r.get("format", ""),
+                    "relpath": r.get("relpath", ""),
+                }
+                for sid, r in refs
+            ],
+        }
+
     # ------------------------------------------------------------- helpers
     def _resolve_profile(self, profile: AtlasProfile | str) -> AtlasProfile:
         if isinstance(profile, AtlasProfile):
