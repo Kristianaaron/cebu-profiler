@@ -1,6 +1,6 @@
 # WORKER_STATUS — atlas-glm52-experiment-runtime
 
-_Updated 2026-08-14 (round 3, coherent rewrite — no stale overclaims)._
+_Updated 2026-08-15 (round 8: W64 derivative canary materialized on the fixed exporter)._
 
 ## Mission / current state
 
@@ -74,6 +74,45 @@ W1024/W2048 do not. W=256 => per_rank ~76.9 GiB. After an authorized
 maintenance window (production occupancy removed) the two-node run is
 possible; current live availability (production still running) is measured
 separately by `model-atlas two-node` and is NOT the planning capacity.
+
+## W64 derivative canary — materialized (round 8)
+
+Fixed the W64 exporter performance defect (`loader.py`): the old
+`_stream_body_window` opened each source shard once PER window — a real down
+tensor with 6,144 rows kept 64 channels => 24,576 windows/tensor, ~236M source
+opens across the export. The exporter now uses a lazy idempotently-closable
+per-output-shard body provider (one source handle per shard, always closed via
+`finally`), coalesces ordered sparse windows into bounded (<=4MiB) source spans
+(one seek/read per span, absolute offsets handled correctly above 4MiB), splits
+>4MiB contiguous intervals into <=4MiB chunks, and rejects
+overlapping/reversed/zero-length windows. Exact bytes/order and
+journal/promotion/resume semantics unchanged. (commit `cabf8f1`).
+
+The preserved canary resumed and completed:
+- **Output**: `derivatives/glm-uniform-w64-canary/` — 47 shards, 232,385
+  tensors, **69,849,116,672 data bytes** (independent header parse), exactly the
+  expected totals.
+- **Resume-skip proof**: finalized shards 1–2 skipped unchanged
+  (journal `skip-shard` steps); pre- vs post-resume sha256 identical:
+  `f01ccdc7…e26b448` (shard 1), `474db88e…1fb5` (shard 2), and size+mtime
+  unchanged. Discardable partial shard 3 rebuilt from source.
+- **Validation**: exporter's own exact validation `ok 232385 tensors`;
+  journal ends `slice → validate → promote`; `promoted=True`.
+- **Independent checks**: 47 shards, 69,849,116,672 data bytes, 232,385
+  tensors, index weight_map keys == source census, expert tensors sliced to
+  width=64 (e.g. `down_proj.weight [6144, 32]`), non-target tensors
+  byte-identical to source (20 spot-checked), `moe_intermediate_size=64`.
+- **Runtime probe** (installed vLLM 0.21, config-only, no weights/GPU):
+  `schema_supported=True`, `quant_config_recognized=True`,
+  `decoder_path_present=True`, `kernel_paths_present=True`, linears
+  `ModelOptNvFp4LinearMethod`/`FusedMoE`; **`derivative_load_validated=False`,
+  `runtime_ready=False`** (Ray/external modelopt not installed; no real
+  derivative load/forward run). Config-only report at
+  `/tmp/runtime_cap_w64.json`.
+
+> The arbitrary first-64 channels are a **structural canary only** — NOT a
+> scientific result. Measured corpus keep-maps and a maintenance-window
+> load/forward remain before any scientific/runtime-readiness claim.
 
 ## Commits (round 1–3)
 

@@ -1,5 +1,13 @@
 # GLM-5.2 two-DGX-Spark maintenance-window runbook (review-corrected)
 
+> **Round-8 note.** The W64 structural canary is now materialized
+> (`derivatives/glm-uniform-w64-canary/`, 47 shards / 232,385 tensors /
+> 69,849,116,672 bytes) using the fixed exporter (one source handle per output
+> shard; bounded coalesced spans; commit `cabf8f1`). Its arbitrary first-64
+> channels are a **structural canary only** — measured corpus keep-maps and a
+> maintenance-window load/forward remain, so the execution gate below stays
+> CLOSED.
+
 **Status: code/tests/manifests implemented. The real runbook BEGIN only when a
 fully materialized, structurally-complete (and runtime-loadable for a ModelOpt-capable backend) derivative at or under the per-node envelope
 exists. Until such a derivative passes materialized + held-out + runtime gates,
