@@ -68,7 +68,12 @@ def _recipe(
 ) -> CompressionRecipe:
     return CompressionRecipe(
         name=name,
-        source=SourceIdentity(source_id="s", checkpoint_path=source_path),
+        source=SourceIdentity(
+            source_id="s",
+            checkpoint_path=source_path,
+            sha256={},
+            manifest_digest="0000000000000000000000000000000000000000000000000000000000000000",
+        ),
         calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
         constraints=RecipeConstraints(
             no_pruning=no_pruning,
@@ -323,7 +328,12 @@ def test_hybrid_with_declared_capability_compiles(compiler: RecipeCompiler):
     compiler2 = RecipeCompiler(reg)
     recipe = CompressionRecipe(
         name="hyb",
-        source=SourceIdentity(source_id="s", checkpoint_path="/nonexistent"),
+        source=SourceIdentity(
+            source_id="s",
+            checkpoint_path="/nonexistent",
+            sha256={},
+            manifest_digest="0000000000000000000000000000000000000000000000000000000000000000",
+        ),
         calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
         hardware=HardwareEnvelope(
             model_arch="glm-5.2",
@@ -457,10 +467,32 @@ def _simple_recipe(source_path: str = "/nonexistent-source") -> CompressionRecip
     ]
     return CompressionRecipe(
         name="e2e",
-        source=SourceIdentity(source_id="s", checkpoint_path=source_path),
+        source=_source_identity_for(source_path),
         calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
         stages=stages,
     )
+
+
+def _source_identity_for(source_path: str) -> SourceIdentity:
+    """Canonical path-bound source identity: a complete recursive hash map of
+    the real (existing) source dir, or an explicit non-executable placeholder
+    for a nonexistent path (require_available is False in that case)."""
+    from model_atlas.jobs.artifacts import source_manifest
+
+    p = Path(source_path)
+    if p.exists():
+        m = source_manifest(source_path)
+        files: dict[str, str] = {
+            k: v for k, v in m.get("files", {}).items() if isinstance(k, str) and isinstance(v, str)
+        }
+        return SourceIdentity(source_id="s", checkpoint_path=source_path, sha256=files)
+    return SourceIdentity(source_id="s", checkpoint_path=source_path, sha256={})
+
+
+def _canonical_source(path: str) -> SourceIdentity:
+    """Canonical path-bound source identity for an EXISTING source dir (used by
+    executable engine-run tests so compile accepts the recipe)."""
+    return _source_identity_for(path)
 
 
 @pytest.fixture
@@ -648,7 +680,7 @@ def test_validation_gate_missing_fails_closed(
     (never DONE, never promoting)."""
     recipe = CompressionRecipe(
         name="gate",
-        source=SourceIdentity(source_id="s", checkpoint_path=stable_source),
+        source=_canonical_source(stable_source),
         calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
         stages=[
             RecipeStage(
@@ -677,7 +709,7 @@ def test_require_available_false_is_dry_run_only(
 ):
     recipe = CompressionRecipe(
         name="dryonly",
-        source=SourceIdentity(source_id="s", checkpoint_path=stable_source),
+        source=_canonical_source(stable_source),
         calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
         stages=[
             RecipeStage(
@@ -750,7 +782,7 @@ def test_provenance_never_upgrades(compiler: RecipeCompiler, tmp_path: Path, sta
     # stage policy = PREDICTED (ceiling). Backend can never raise it to MEASURED.
     recipe = CompressionRecipe(
         name="prov",
-        source=SourceIdentity(source_id="s", checkpoint_path=stable_source),
+        source=_canonical_source(stable_source),
         calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
         stages=[_stage("s1", produces=["manifest.json"], policy=EvidenceKind.PREDICTED)],
     )
@@ -762,7 +794,7 @@ def test_provenance_never_upgrades(compiler: RecipeCompiler, tmp_path: Path, sta
     # even an ESTIMATED-policy stage must be recorded as ESTIMATED at most
     recipe2 = CompressionRecipe(
         name="prov2",
-        source=SourceIdentity(source_id="s", checkpoint_path=stable_source),
+        source=_canonical_source(stable_source),
         calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
         stages=[_stage("s1", produces=["manifest.json"], policy=EvidenceKind.ESTIMATED)],
     )
@@ -926,7 +958,7 @@ def test_engine_enforces_immutable_source(compiler: RecipeCompiler, tmp_path: Pa
     (src / "w.bin").write_bytes(b"v1")
     recipe = CompressionRecipe(
         name="imm",
-        source=SourceIdentity(source_id="s", checkpoint_path=str(src)),
+        source=_canonical_source(str(src)),
         calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
         stages=[_stage("s1", produces=["manifest.json"])],
     )
@@ -1014,7 +1046,12 @@ def test_quant_probe_cannot_serve_compression(compiler: RecipeCompiler):
     pinned to it must fail closed at compile (never succeeds)."""
     recipe = CompressionRecipe(
         name="probe-compress",
-        source=SourceIdentity(source_id="s", checkpoint_path="/nonexistent"),
+        source=SourceIdentity(
+            source_id="s",
+            checkpoint_path="/nonexistent",
+            sha256={},
+            manifest_digest="0000000000000000000000000000000000000000000000000000000000000000",
+        ),
         calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
         stages=[
             _stage(
@@ -1081,7 +1118,12 @@ def test_backend_contract_enforcement(compiler: RecipeCompiler):
     compiler3 = RecipeCompiler(reg3)
     recipe3 = CompressionRecipe(
         name="arch",
-        source=SourceIdentity(source_id="s", checkpoint_path="/nonexistent"),
+        source=SourceIdentity(
+            source_id="s",
+            checkpoint_path="/nonexistent",
+            sha256={},
+            manifest_digest="0000000000000000000000000000000000000000000000000000000000000000",
+        ),
         calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
         hardware=HardwareEnvelope(
             model_arch="unknown-family",
@@ -1119,10 +1161,12 @@ def test_backend_format_contract_enforced(compiler: RecipeCompiler):
     assert "backend_format_mismatch" in {i.code for i in issues}
 
 
-def test_compiled_plan_deeply_immutable(compiler: RecipeCompiler):
+def test_compiled_plan_deeply_immutable(
+    compiler: RecipeCompiler, tmp_path: Path, stable_source: str
+):
     """P2: mutating a reconstructed plan copy must never affect the compiled
     plan's canonical payload or its reconstructable content."""
-    recipe = _simple_recipe()
+    recipe = _simple_recipe(stable_source)
     compiled = compiler.compile(recipe)
     recipe_id = compiled.recipe_id
     # mutate a stage name on the reconstructed copy
@@ -1179,7 +1223,7 @@ def test_all_required_gate_kinds_run_vs_staging_unknown_rejected(
     # unknown kind -> fail closed at execution (pre-publish)
     recipe = CompressionRecipe(
         name="unk",
-        source=SourceIdentity(source_id="s", checkpoint_path=stable_source),
+        source=_canonical_source(stable_source),
         calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
         stages=[
             RecipeStage(
@@ -1208,10 +1252,8 @@ def test_real_safetensors_structural_gate_passes_and_bad_header_fails(
     header fails closed — never a filename heuristic."""
     import struct
 
+    from model_atlas.checkpoint.validators import get_checkpoint_validator
     from model_atlas.jobs.artifacts import StageStager
-    from model_atlas.jobs.engine import (  # type: ignore[attr-defined]
-        _validate_safetensors_checkpoint,
-    )
 
     stager = StageStager(tmp_path, "s1")
     # build a minimal safetensors: 8-byte header len + JSON + tensor bytes
@@ -1226,19 +1268,22 @@ def test_real_safetensors_structural_gate_passes_and_bad_header_fails(
         f.write(hdr)
         f.write(tensor)
     idx = {"weight_map": {"t0": "model.safetensors"}}
-    from model_atlas.recipe.schema import ValidationGate
-
     with open(stager.path("model.safetensors.index.json"), "w") as f:
         f.write(__import__("json").dumps(idx))
-    gate = ValidationGate(gate_id="ckpt", kind="checkpoint", params={})
-    ok, detail = _validate_safetensors_checkpoint(gate, None, stager, {})
-    assert ok, detail
-    # corrupted header -> fail closed
+    validator = get_checkpoint_validator("atlas_quant_probe", "checkpoint")
+    assert validator is not None
+    result = validator("atlas_quant_probe", stager.staging, "")
+    assert result.ok, result.detail
+    # corrupted header -> fail closed (bound guarded)
     shard = stager.path("model.safetensors")
     shard.write_bytes(b"TAMPERED-NOT-8BYTES")
-    ok2, detail2 = _validate_safetensors_checkpoint(gate, None, stager, {})
-    assert not ok2
-    assert "exceeds bound" in detail2 or "truncated" in detail2 or "invalid" in detail2
+    result2 = validator("atlas_quant_probe", stager.staging, "")
+    assert not result2.ok
+    assert (
+        "exceeds bound" in result2.detail
+        or "truncated" in result2.detail
+        or "invalid" in result2.detail
+    )
 
 
 def test_compression_stage_requires_typed_checkpoint_outputs(
@@ -1249,7 +1294,7 @@ def test_compression_stage_requires_typed_checkpoint_outputs(
     without them fails before publish."""
     recipe = CompressionRecipe(
         name="bad-comp",
-        source=SourceIdentity(source_id="s", checkpoint_path=stable_source),
+        source=_canonical_source(stable_source),
         calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
         hardware=HardwareEnvelope(
             model_arch="glm-5.2",
@@ -1308,14 +1353,41 @@ def test_engine_repair_round_trip_across_reload(
         params={"channels": "3,1", "channel_hi": "5"},
     )
     eng2 = JobEngine(compiled, build_default_registry(), root)
-    eng2.apply_repair(repair_proposal, "kc.bin", before_bytes=original)
-    # after apply: bytes changed
+    eng2.apply_repair(repair_proposal, "s1", "kc.bin")
+    # after apply: bytes changed + the record has stage_id and both CAS refs, and
+    # the manifest is regenerated inside the transaction
     applied_job = JobEngine(compiled, build_default_registry(), root)._load_job()
     so2 = next(s for s in applied_job.stages.values() if any(o.name == "kc.bin" for o in s.outputs))
     applied_ref = next(o for o in so2.outputs if o.name == "kc.bin")
     assert store.verify(applied_ref)
     assert store.read(applied_ref) != original
     assert applied_job.repair and applied_job.repair[0].applied is True
+    assert applied_job.repair[0].stage_id == "s1"
+    assert applied_job.repair[0].restore_ref and applied_job.repair[0].new_ref
+    manifest = __import__("json").loads(
+        (Path(root) / "runs" / run_id / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["repairs"] and manifest["repairs"][0]["applied"] is True
+    # duplicate repair refused (collision-free repair_id)
+    from model_atlas.recipe.compiler import canonical_json as cj
+    from model_atlas.repair import sha256_hex as rsh
+
+    same_rid = rsh(
+        cj(
+            {
+                "kind": "keep_channels_normalize",
+                "stage": "s1",
+                "target": "kc.bin",
+                "restore": applied_job.repair[0].restore_ref,
+            }
+        ).encode("utf-8")
+    )
+    assert applied_job.repair[0].repair_id == same_rid
+    try:
+        eng2.apply_repair(repair_proposal, "s1", "kc.bin")
+        pytest.fail("duplicate repair must be refused")
+    except RuntimeError:
+        pass
     # rollback across a FRESH engine reload restores the original bytes+ref
     rid = applied_job.repair[0].repair_id
     eng3 = JobEngine(compiled, build_default_registry(), root)
@@ -1338,7 +1410,6 @@ def test_artifact_pins_snapshot_and_verify_against_live_registry(
         CalibrationIdentity,
         CompressionRecipe,
         RecipeStage,
-        SourceIdentity,
         StageBackendPin,
         StageEffectClass,
     )
@@ -1346,7 +1417,7 @@ def test_artifact_pins_snapshot_and_verify_against_live_registry(
 
     recipe = CompressionRecipe(
         name="pi",
-        source=SourceIdentity(source_id="s", checkpoint_path=stable_source),
+        source=_canonical_source(stable_source),
         calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
         stages=[
             RecipeStage(

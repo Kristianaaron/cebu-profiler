@@ -141,6 +141,15 @@ class CompiledRecipe:
     )
     compiled_by: str = "model-atlas"
 
+    def __post_init__(self) -> None:
+        """ACTUALLY freeze the passed-in mappings: any mutable dict supplied by
+        the caller is wrapped in MappingProxyType so mutating the original dict
+        can NEVER mutate the compiled plan."""
+        object.__setattr__(self, "resolved_backends", _frozen_copy(self.resolved_backends))
+        object.__setattr__(
+            self, "backend_status_snapshot", _frozen_copy(self.backend_status_snapshot)
+        )
+
     @property
     def recipe(self) -> CompressionRecipe:
         """Fresh, value-semantics copy reconstructed from the frozen payload."""
@@ -156,6 +165,14 @@ class CompiledRecipe:
             }
         )
         return "run-" + sha256_hex(payload)[:24]
+
+
+def _frozen_copy(m: Mapping[str, str]) -> Mapping[str, str]:
+    """Return an immutable MappingProxyType copy of a mapping (always a fresh
+    wrapper, so the original caller-owned dict is never aliased)."""
+    if isinstance(m, MappingProxyType):
+        return m
+    return MappingProxyType(dict(m))
 
 
 class RecipeCompileError(ValueError):
@@ -230,8 +247,52 @@ class RecipeCompiler:
         issues += self._check_no_pruning(recipe)
         issues += self._check_ordering(recipe)
         issues += self._check_hybrid(recipe)
+        issues += self._check_source_identity(recipe)
         issues += self._check_backends(recipe)
         return issues, rid, sha
+
+    def _check_source_identity(self, recipe: CompressionRecipe) -> list[CompileIssue]:
+        """Executable compile/run requires a CANONICAL source identity: either a
+        complete recursive path-bound hash map with exact membership OR a
+        canonical full-manifest digest. A recipe intending to EXECUTE with no
+        path-bound hashes and no manifest digest is invalid — it can only be a
+        non-executable dry-run plan (require_available=false), which the engine
+        enforces at run time."""
+        issues: list[CompileIssue] = []
+        src = recipe.source
+        sha = src.sha256
+        digest = src.manifest_digest
+        has_canonical = (
+            isinstance(sha, dict)
+            and len(sha) > 0
+            and all(isinstance(k, str) and isinstance(v, str) for k, v in sha.items())
+        ) or bool(digest)
+        if not has_canonical:
+            # only acceptable for an explicitly non-executable plan
+            executable_stages = [s.id for s in recipe.stages if s.backend.require_available]
+            if executable_stages:
+                issues.append(
+                    CompileIssue(
+                        "error",
+                        "source_identity_missing",
+                        "executable recipe declares no canonical source identity: "
+                        "provide a complete recursive path-bound hash map "
+                        "(SourceIdentity.sha256) or a canonical full-manifest "
+                        "digest (SourceIdentity.manifest_digest)",
+                        stage_id=executable_stages[0],
+                    )
+                )
+            else:
+                issues.append(
+                    CompileIssue(
+                        "warning",
+                        "source_identity_placeholder",
+                        "recipe is dry-run/non-executable (no require_available "
+                        "stages) and may leave the source identity incomplete; "
+                        "execution is fail-closed",
+                    )
+                )
+        return issues
 
     def _check_no_pruning(self, recipe: CompressionRecipe) -> list[CompileIssue]:
         issues: list[CompileIssue] = []

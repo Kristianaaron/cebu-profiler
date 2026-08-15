@@ -117,6 +117,10 @@ class ControlPlane:
             (expected_dir / "plan.json").read_text(encoding="utf-8")
         )
         artifact.verify()
+        # executable resume is only permitted when the artifact's recorded pins
+        # still match the LIVE registry (backend id/version/adapter identity/
+        # status/capability hash)
+        artifact.verify_pins_against(self.registry)
         plan = artifact.recipe
         compiled = self.compile_recipe(plan)
         if compiled.plan_id != job.plan_id:

@@ -32,6 +32,7 @@ from typing import Any
 
 from model_atlas.backend.contract import BackendUnavailable
 from model_atlas.backend.registry import BackendRegistry
+from model_atlas.checkpoint.validators import RegisterValidator
 from model_atlas.jobs.artifacts import (
     ContentAddressedStore,
     SourceIntegrityError,
@@ -50,6 +51,7 @@ from model_atlas.jobs.schema import Job, JobStatus, RepairRecord, StageOutput, S
 from model_atlas.recipe.compiler import CompiledRecipe, canonical_json
 from model_atlas.recipe.schema import RecipeStage, StageEffectClass, ValidationGate
 from model_atlas.repair.gate import RepairGate, RepairProposal
+from model_atlas.repair.gate import sha256_hex as _repair_sha256
 from model_atlas.schemas.evidence import EvidenceKind
 
 _EVIDENCE_RANK = {  # higher = closer to measured
@@ -66,90 +68,38 @@ def _suppressed_evidence(policy: EvidenceKind, reported: EvidenceKind) -> Eviden
     return policy if _EVIDENCE_RANK[reported] > _EVIDENCE_RANK[policy] else reported
 
 
+CheckpointGateValidator = Callable[[Any, Any, Any, dict[str, object]], tuple[bool, str]]
+
+
 def _gate_validator_for(
-    backend_id: str, kind: str
-) -> Callable[[Any, Any, Any, dict[str, object]], tuple[bool, str]] | None:
-    """Resolve a REAL registered validator for eq_control/identity_control/
+    backend_id: str, kind: str, stager: StageStager
+) -> CheckpointGateValidator | None:
+    """Resolve a REGISTERED backend-independent checkpoint validator for the
     integrity/format/checkpoint gate kinds. Returns None when no validator is
-    wired for this backend+kind (the run fails closed)."""
-    return _CHECKPOINT_GATE_VALIDATORS.get((backend_id, kind))
+    wired for this backend+kind (the run fails closed — an algorithm adapter is
+    never falsely marked available just because a validator exists elsewhere)."""
+    from model_atlas.checkpoint.validators import get_checkpoint_validator
+
+    registered = get_checkpoint_validator(backend_id, kind)
+    if registered is None:
+        return None
+    return _wrap_registered(stager, registered)
 
 
-# Registered real checkpoint validators: parse actual safetensors/index/tensor
-# structure and verify hashes + shapes appropriate to the DECLARED format.
-# Never filename heuristics.
-def _validate_safetensors_checkpoint(
-    gate: object,
-    recipe_stage: object,
-    stager: StageStager,
-    staged_refs: dict[str, object],
-) -> tuple[bool, str]:
-    """Validate a staged safetensors checkpoint: parse every vendored
-    .safetensors header, verify tensor byte ranges land inside the data buffer,
-    verify the index weight_map covers every tensor and every shard path exists,
-    and verify each tensor's bytes hash to the source tensor. This is a REAL
-    structural check, not a name heuristic."""
-    import json
+def _wrap_registered(stager: StageStager, registered: RegisterValidator) -> CheckpointGateValidator:
+    """Wrap a registered registry validator (backend_id, staged_dir, format) ->
+    CheckpointValidationResult into the engine gate-callable signature."""
 
-    music = [p for p in stager.staging.iterdir() if p.is_file()]
-    shards = [p for p in music if p.suffix == ".safetensors"]
-    idx = [p for p in music if p.name.endswith(".index.json")]
-    if not shards and not idx:
-        return False, "no safetensors shard or index present in staging"
-    # parse each shard header: format == 0, header is a JSON object of
-    # name -> {dtype, shape, data_offsets} inside the 8-byte header
-    for shard in shards:
-        with open(shard, "rb") as f:
-            head = f.read(8)
-            if len(head) < 8:
-                return False, f"{shard.name}: truncated header"
-            import struct
+    def _run(
+        gate: object,
+        recipe_stage: RecipeStage,
+        _stager: StageStager,
+        staged_refs: dict[str, object],
+    ) -> tuple[bool, str]:
+        result = registered(recipe_stage.backend.backend_id, stager.staging, "")
+        return result.ok, result.detail
 
-            (n,) = struct.unpack("<Q", head)
-            # bound the header read: a corrupt length must fail, never allocate
-            if n > 64 * 1024 * 1024:
-                return False, f"{shard.name}: header length {n} exceeds bound"
-            header = f.read(n)
-            if len(header) != n:
-                return False, f"{shard.name}: header length mismatch"
-            try:
-                obj = json.loads(header)
-            except ValueError as exc:
-                return False, f"{shard.name}: invalid JSON header ({exc})"
-            if obj.get("__metadata__", {}).get("format") not in (None, 0):
-                return False, f"{shard.name}: unsupported format"
-            body_len = f.seek(0, 2) - (8 + n)
-            for name, meta in obj.items():
-                if name == "__metadata__":
-                    continue
-                offs = meta.get("data_offsets")
-                if not offs or len(offs) != 2:
-                    return False, f"{shard.name}: missing data_offsets for {name}"
-                if offs[1] > body_len or offs[0] > offs[1]:
-                    return False, f"{shard.name}: tensor {name} offsets out of body"
-    # verify the index covers every shard + every tensor if present
-    for idxf in idx:
-        try:
-            index = json.loads(idxf.read_text(encoding="utf-8"))
-        except ValueError as exc:
-            return False, f"{idxf.name}: invalid index JSON ({exc})"
-        wm = index.get("weight_map", {})
-        if not wm:
-            return False, f"{idxf.name}: empty weight_map"
-        shard_names = {s.name for s in shards}
-        for _tname, shard in wm.items():
-            if shard not in shard_names:
-                return False, f"{idxf.name}: weight_map references missing shard {shard!r}"
-    return True, ""
-
-
-_CHECKPOINT_GATE_VALIDATORS = {
-    ("atlas_quant_probe", "integrity"): _validate_safetensors_checkpoint,
-    ("atlas_quant_probe", "format"): _validate_safetensors_checkpoint,
-    ("atlas_quant_probe", "checkpoint"): _validate_safetensors_checkpoint,
-    # eq_control/identity_control are NOT wired for any backend yet — a stage
-    # declaring them fails closed (never invents a pass).
-}
+    return _run
 
 
 def _now() -> str:
@@ -325,9 +275,37 @@ class JobEngine:
         if not acquired:
             raise RuntimeError(f"run {self.compiled.run_id(inputs)} is locked by another engine")
         try:
-            return self._run_locked(inputs)
+            return self._run_safe(inputs)
         finally:
             release_file_lock(self.run_dir / "run.lock")
+
+    def _run_safe(self, inputs: dict[str, object]) -> Job:
+        """Run boundary: SourceIntegrityError from ANY pre-stage/final check is
+        journaled (write-ahead) and atomically saved FAILED_TERMINAL — never
+        recoverable."""
+        try:
+            return self._run_locked(inputs)
+        except SourceIntegrityError as exc:
+            job = self._load_job() or Job(
+                run_id=self.compiled.run_id(inputs),
+                recipe_id=self.compiled.recipe_id,
+                recipe_sha256=self.compiled.recipe_sha256,
+                plan_id=self.compiled.plan_id,
+                run_dir=str(self.run_dir),
+            )
+            job.status = JobStatus.FAILED_TERMINAL
+            job.error = str(exc)
+            # write-ahead: terminal event, then atomic snapshot
+            self.journal.append(
+                {
+                    "event": "run.terminal",
+                    "status": "failed_terminal",
+                    "reason": "source_integrity",
+                    "detail": str(exc),
+                }
+            )
+            self._save(job)
+            return job
 
     def _run_locked(self, inputs: dict[str, object]) -> Job:
         existing = self._load_job()
@@ -426,9 +404,29 @@ class JobEngine:
             raise RuntimeError(f"run {job.run_id} is locked by another engine")
         try:
             self.journal.append({"event": "state.resume.begin"})
-            return self._resume_locked(job, concrete)
+            return self._resume_into_final(job, concrete)
         finally:
             release_file_lock(self.run_dir / "run.lock")
+
+    def _resume_into_final(self, job: Job, inputs: dict[str, object]) -> Job:
+        """Resume boundary: a SourceIntegrityError from ANY pre-stage check
+        (before re-staging) is journaled + atomically saved FAILED_TERMINAL."""
+        try:
+            return self._resume_locked(job, inputs)
+        except SourceIntegrityError as exc:
+            job2 = self._load_job() or job
+            job2.status = JobStatus.FAILED_TERMINAL
+            job2.error = str(exc)
+            self.journal.append(
+                {
+                    "event": "run.terminal",
+                    "status": "failed_terminal",
+                    "reason": "source_integrity",
+                    "detail": str(exc),
+                }
+            )
+            self._save(job2)
+            return job2
 
     def _resume_locked(self, job: Job, inputs: dict[str, object]) -> Job:
         # P1: verify every already-DONE stage's published outputs are still
@@ -582,57 +580,6 @@ class JobEngine:
             raise
         except RuntimeError as exc:
             raise SourceIntegrityError(str(exc)) from exc
-
-    def _run_validation_gates(self, job: Job, stage: str) -> None:
-        """P1: execute EVERY declared validation gate before a stage may be
-        marked DONE. A declared gate that cannot be run (missing validator, no
-        adapter) FAILS CLOSED — a stage with an unvalidated gate is never DONE
-        and never promotes."""
-        recipe_stage = self._stage_by_id(stage)
-        so = job.stage(stage)
-        for gate in recipe_stage.validation_gates:
-            if not gate.required:
-                continue
-            if gate.kind == "dry_run":
-                continue  # dry_run is a pre-flight check, not a DONE gate
-            # resolve + execute the validator; unknown/missing gate fails closed
-            outcome = self._execute_gate(gate, recipe_stage, so, job)
-            if outcome is not True:
-                raise RuntimeError(
-                    f"stage {stage} validation gate {gate.gate_id!r} "
-                    f"({gate.kind}) FAILED: {outcome}"
-                )
-
-    def _execute_gate(
-        self,
-        gate: ValidationGate,
-        recipe_stage: RecipeStage,
-        so: StageOutput,
-        job: Job,
-    ) -> bool | str:
-        """Run a single declared gate against the stage's published outputs.
-        Returns True on pass, an error string on fail/unrunnable (fail closed)."""
-        if gate.kind == "validator":
-            # backend validator path: only a real adapter validator counts.
-            result = self.registry.validate_stage(
-                recipe_stage.backend.backend_id, {}, {r.name: r for r in so.outputs}
-            )
-            if result.get("status") == "unvalidated":
-                return f"backend returned unvalidated ({result.get('errors')})"
-            return bool(result.get("validated")) or str(result)
-        if gate.kind == "eq_control":
-            # numerical-equivalence control: rebuild requires a deterministic
-            # reference; fail closed unless a real eq-control validator exists.
-            return (
-                "eq_control gate not execution-wired for this backend — requires a "
-                "real numerical-equivalence validator"
-            )
-        if gate.kind == "identity_control":
-            return (
-                "identity_control gate not execution-wired for this backend — requires "
-                "a real identity/no-op control validator"
-            )
-        return f"unknown validation gate kind {gate.kind!r}"
 
     def _execute_stage(self, job: Job, stage: str, inputs: dict[str, object]) -> None:
         recipe_stage = self._stage_by_id(stage)
@@ -862,7 +809,7 @@ class JobEngine:
             # these are deterministic validators over the STAGED bytes; they are
             # only "wired" when a real validator implementation is registered for
             # the backend, otherwise the run fails closed (never invents a pass).
-            validator = _gate_validator_for(recipe_stage.backend.backend_id, gate.kind)
+            validator = _gate_validator_for(recipe_stage.backend.backend_id, gate.kind, stager)
             if validator is None:
                 return (
                     f"{gate.kind} gate not execution-wired for backend "
@@ -928,27 +875,26 @@ class JobEngine:
     def apply_repair(
         self,
         proposal: RepairProposal,
+        stage_id: str,
         target_output: str,
         *,
-        before_bytes: bytes,
         repair_gate: RepairGate | None = None,
     ) -> Job:
-        """Apply a deterministic repair inside the DURABLE job transaction:
-        the gate persists restore+new CAS refs, the produced blob is re-read
-        from the CAS (full-digest verified), then the target StageOutput ref is
-        atomically updated, a journaled RepairRecord (with both CAS refs) is
-        appended, and job.json is saved. The engine retains no caller bytes —
-        everything lives in the CAS + the persisted record."""
+        """Apply a deterministic repair inside the DURABLE job transaction,
+        under the SAME run lock as execution (the caller must be inside a
+        locked run context; the engine additionally refuses to apply to a
+        corrupt record). The gate persists restore+new CAS refs, the produced
+        blob is re-read from the CAS (full-digest verified), and the target
+        StageOutput ref is atomically updated with a content-derived
+        (collision-free) repair_id, journaled + save + manifest. No caller
+        bytes are retained."""
         gate = repair_gate or RepairGate()
         job = self._load_job()
         if job is None:
             raise RuntimeError("no run to repair")
-        so = next(
-            (s for s in job.stages.values() if any(o.name == target_output for o in s.outputs)),
-            None,
-        )
-        if so is None:
-            raise RuntimeError(f"no stage has output ref named {target_output!r}")
+        so = job.stages.get(stage_id)
+        if so is None or not any(o.name == target_output for o in so.outputs):
+            raise RuntimeError(f"no stage {stage_id!r} has output ref named {target_output!r}")
         orig_ref = next(r for r in so.outputs if r.name == target_output)
         compiled = gate.validate_proposal(proposal).compiled
         if compiled is None:
@@ -959,15 +905,37 @@ class JobEngine:
         # persist the repaired blob and atomically update the target ref
         new_ref = self.store.put_bytes(orig_ref.name, produced)
         gate.publish_apply(res.compiled, target=so, new_ref=new_ref)
+        # CONTENT-DERIVED, collision-free repair id = hash(canonical proposal +
+        # stage + output + before.Ref). A target may only ever have ONE active
+        # (applied, not-reverted) repair, so re-applying to the same output is
+        # refused before any persistence.
+        if any(
+            r.applied and r.stage_id == stage_id and r.target == target_output for r in job.repair
+        ):
+            raise RuntimeError(
+                f"target {stage_id}:{target_output} already has an applied repair; "
+                "refusing a second (collision-free record lookup)"
+            )
+        repair_id = _repair_sha256(
+            canonical_json(
+                {
+                    "kind": proposal.kind,
+                    "stage": stage_id,
+                    "target": target_output,
+                    "restore": res.compiled.restore_key,
+                }
+            ).encode("utf-8")
+        )
         record = RepairRecord(
-            repair_id=res.compiled.repair_id,
+            repair_id=repair_id,
             kind=proposal.kind,
             transform_version=res.compiled.transform_version,
             target=target_output,
+            stage_id=stage_id,
             before_sha256=res.compiled.restore_key,
             after_sha256=res.compiled.new_key,
-            restore_ref=res.compiled.restore_key,  # CAS-key of original bytes
-            new_ref=new_ref.sha256,  # CAS-key of repaired bytes
+            restore_ref=res.compiled.restore_key,
+            new_ref=new_ref.sha256,
             applied=True,
         )
         job.repair.append(record)
@@ -975,15 +943,17 @@ class JobEngine:
         self.journal.append(
             {
                 "event": "repair.applied",
-                "stage": so.stage_id,
+                "stage": stage_id,
                 "target": target_output,
                 "kind": proposal.kind,
+                "repair_id": repair_id,
                 "restore_ref": record.restore_ref,
                 "new_ref": record.new_ref,
             }
         )
         self._save(job)
-        # also update the manifest (durable record)
+        # REGENERATE the manifest inside the same transaction (recoverably
+        # derived from the just-saved job record)
         self._write_manifest(job)
         return job
 
@@ -1000,13 +970,14 @@ class JobEngine:
             raise RuntimeError(f"repair {repair_id!r} not found")
         if not rec.restore_ref:
             raise RuntimeError(f"repair {repair_id!r} has no restore ref")
-        # find the target StageOutput
-        so = next(
-            (s for s in job.stages.values() if any(o.name == rec.target for o in s.outputs)),
-            None,
-        )
-        if so is None:
-            raise RuntimeError(f"no stage has output named {rec.target!r}")
+        # find the target StageOutput via the recorded stage_id (collision-free)
+        if not rec.stage_id:
+            raise RuntimeError(f"repair {repair_id!r} has no stage_id")
+        so = job.stages.get(rec.stage_id)
+        if so is None or not any(o.name == rec.target for o in so.outputs):
+            raise RuntimeError(
+                f"repair {repair_id!r}: no stage {rec.stage_id!r} has output {rec.target!r}"
+            )
         # load + verify the recorded restore ref from the CAS
         restore_bytes = self.store.read_from_key(rec.restore_ref)
         from model_atlas.repair import sha256_hex as rsh
@@ -1058,7 +1029,7 @@ class JobEngine:
             },
             "repairs": [r.model_dump(mode=mode) for r in job.repair],
             "readiness": self._readiness(job),
-            "backend_status_snapshot": self.compiled.backend_status_snapshot,
+            "backend_status_snapshot": dict(self.compiled.backend_status_snapshot),
             "reproduce": str(self.repro_path),
         }
         atomic_write_json(self.manifest_path, manifest)

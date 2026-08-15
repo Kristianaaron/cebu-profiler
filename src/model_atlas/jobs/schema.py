@@ -101,7 +101,8 @@ class RepairRecord(BaseModel):
     repair_id: str
     kind: str  # must be a registered deterministic transform
     transform_version: str = "v1"
-    target: str  # stage_id or artifact-ref name (StageOutput output)
+    stage_id: str = ""
+    target: str  # StageOutput output name
     before_sha256: str = ""
     after_sha256: str = ""
     restore_ref: str = ""  # CAS key of the ORIGINAL bytes (persisted)

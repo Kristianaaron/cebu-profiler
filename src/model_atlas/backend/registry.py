@@ -375,7 +375,12 @@ def _builtin_records() -> dict[str, BackendRecord]:
         formats=("exl3", "safetensors"),
         represents_method="EXL3 primary quantization (4-bit row/group)",
         architectures=("glm-5.2", "k3", "any"),
-        runtime_compat=("sm121", "two-spark"),
+        compute_archs=("gb10-sm121", "any"),
+        topologies=("2x-spark", "single", "any"),
+        # EXL3 output is consumed by the EXL2/exllama serving runtime (its name
+        # at conversion/serving), not a compute-arch string. Conversion runs on
+        # the local CPU; serving runs via exllamav2.
+        runtime_compat=("exllamav2", "cpu-conversion", "any"),
         status=RecipeStatus.DISCOVERED,
         version="unpinned",
         declared_capabilities=(),
@@ -417,7 +422,12 @@ def _builtin_records() -> dict[str, BackendRecord]:
         formats=("compressed-tensors", "safetensors"),
         represents_method="LLM Compressor GPTQ/AWQ-style post-training quantization",
         architectures=("glm-5.2", "k3", "any"),
-        runtime_compat=("sm121", "two-spark"),
+        compute_archs=("gb10-sm121", "any"),
+        topologies=("2x-spark", "single", "any"),
+        # LLM Compressor produces compressed-tensors checkpoints servable by
+        # vLLM (compressed-tensors backend) — a real runtime implementation, not
+        # a compute arch.
+        runtime_compat=("vllm-compressed-tensors", "cpu-conversion", "any"),
         status=RecipeStatus.DISCOVERED,
         version="unpinned",
         declared_capabilities=(),

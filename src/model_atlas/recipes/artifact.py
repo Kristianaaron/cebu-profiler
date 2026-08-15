@@ -120,53 +120,48 @@ class CompiledPlanArtifact(BaseModel):
     def verify_pins_against(self, registry: object) -> None:
         """Compare every pinned stage's backend id, exact version, adapter
         identity, lifecycle status and capability hash against the LIVE
-        registry. Any mismatch means the artifact no longer describes the
-        runnable stack — fail closed before execution."""
+        registry. Every field is MANDATORY — a missing field fails verification
+        (an incomplete pin record can never be executed)."""
         from model_atlas.backend.registry import BackendRegistry
 
         if not isinstance(registry, BackendRegistry):
             raise ValueError("verify_pins_against requires a BackendRegistry")
+        required_fields = (
+            "backend_id",
+            "pinned_version",
+            "resolved_version",
+            "status",
+            "adapter_identity",
+            "capability_hash",
+        )
         for stage_id, pin in self.resolved_pins.items():
-            backend_id = pin.get("backend_id", "")
+            missing = [f for f in required_fields if not pin.get(f)]
+            if missing:
+                raise ValueError(f"artifact pin {stage_id}: missing mandatory field(s) {missing}")
+            backend_id = pin["backend_id"]
             rec = registry.get(backend_id)
             if rec is None:
                 raise ValueError(
                     f"artifact pin {stage_id}: backend {backend_id!r} no longer registered"
                 )
-            if (
-                pin.get("resolved_version")
-                and pin["resolved_version"]
-                not in (
-                    "unresolved",
-                    "unpinned",
-                    "",
-                )
-                and pin["resolved_version"] != rec.version
-            ):
+            if pin["resolved_version"] != rec.version:
                 raise ValueError(
                     f"artifact pin {stage_id}: resolved version {pin['resolved_version']} "
                     f"!= live {rec.version}"
                 )
-            live_adapter_id = _adapter_identity(rec)
-            if pin.get("adapter_identity") and pin["adapter_identity"] != live_adapter_id:
+            if pin["adapter_identity"] != _adapter_identity(rec):
                 raise ValueError(
                     f"artifact pin {stage_id}: adapter identity {pin['adapter_identity']} "
-                    f"!= live {live_adapter_id}"
+                    f"!= live {_adapter_identity(rec)}"
                 )
-            live_status = rec.status.value
-            if (
-                pin.get("status")
-                and pin["status"] not in ("unresolved", "")
-                and pin["status"] != live_status
-            ):
+            if pin["status"] != rec.status.value:
                 raise ValueError(
-                    f"artifact pin {stage_id}: status {pin['status']} != live {live_status}"
+                    f"artifact pin {stage_id}: status {pin['status']} != live {rec.status.value}"
                 )
-            live_cap = _capability_hash(rec)
-            if pin.get("capability_hash") and pin["capability_hash"] != live_cap:
+            if pin["capability_hash"] != _capability_hash(rec):
                 raise ValueError(
                     f"artifact pin {stage_id}: capability hash {pin['capability_hash']} "
-                    f"!= live {live_cap}"
+                    f"!= live {_capability_hash(rec)}"
                 )
 
 
@@ -210,6 +205,8 @@ def _snapshot_pins(
             "pinned_version": s.backend.version,
             "resolved_version": "unresolved",
             "status": "unresolved",
+            "adapter_identity": "unresolved-adapter",
+            "capability_hash": "unresolved-capability",
         }
         if registry is not None:
             rec = getattr(registry, "get", lambda *_: None)(s.backend.backend_id)
@@ -221,12 +218,6 @@ def _snapshot_pins(
                 )
                 pin["adapter_identity"] = _adapter_identity(rec)
                 pin["capability_hash"] = _capability_hash(rec)
-        else:
-            # no registry at compile time: fall back to the compiler's snapshot
-            # (which records lifecycle status per stage) and leave version
-            # unresolved unless the record version matches.
-            pin["resolved_version"] = s.backend.version
-            pin["status"] = compiled.backend_status_snapshot.get(s.id, "unresolved")
         pins[s.id] = pin
     return pins
 
