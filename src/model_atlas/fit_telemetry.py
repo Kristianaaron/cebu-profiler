@@ -53,6 +53,7 @@ class StopReason(StrEnum):
     MISSING_FIELD = "missing_field"
     RUNTIME_FAILURE = "runtime_failure"
     NOT_RUN = "not_run"
+    INCOMPLETE_EVIDENCE = "incomplete_evidence"
 
 
 class ProcessMemory(BaseModel):
@@ -479,48 +480,93 @@ def derive_fit_summary(
     A missing node or an incomplete paired sample set is an unmeasured failure,
     never a degraded local-only result.
     """
-    roles = {sample.node for sample in samples}
-    paired_sets: dict[str, set[NodeRole]] = {}
-    for sample in samples:
-        paired_sets.setdefault(sample.sample_set_id, set()).add(sample.node)
-    both_nodes = bool(samples) and roles == {NodeRole.HEAD, NodeRole.WORKER} and all(
-        nodes == {NodeRole.HEAD, NodeRole.WORKER} for nodes in paired_sets.values()
-    )
+    processed_rows: list[TelemetrySample] = []
+    accepted: list[StepObservation] = []
+    stop = StopReason.COMPLETED
+    complete = True
+    both_nodes = True
+
+    # Evidence is consumed only in the immutable plan order.  Every executed
+    # step requires exactly one observation and at least two paired snapshots
+    # (before/after), each containing exactly one row from each node.
+    for index, step in enumerate(plan.steps):
+        if index >= len(observations):
+            complete = False
+            stop = StopReason.INCOMPLETE_EVIDENCE
+            break
+        observation = observations[index]
+        if (
+            observation.step_id != step.step_id
+            or observation.context_tokens != step.context_tokens
+        ):
+            complete = False
+            stop = StopReason.INCOMPLETE_EVIDENCE
+            break
+        step_rows = [
+            sample
+            for sample in samples
+            if sample.phase_id == step.step_id
+            and sample.context_tokens == step.context_tokens
+        ]
+        grouped: dict[str, list[TelemetrySample]] = {}
+        for sample in step_rows:
+            grouped.setdefault(sample.sample_set_id, []).append(sample)
+        paired = len(grouped) >= 2 and all(
+            len(rows) == 2
+            and {row.node for row in rows} == {NodeRole.HEAD, NodeRole.WORKER}
+            for rows in grouped.values()
+        )
+        if not paired:
+            complete = False
+            both_nodes = False
+            stop = StopReason.MISSING_NODE if step_rows else StopReason.INCOMPLETE_EVIDENCE
+            break
+        processed_rows.extend(step_rows)
+        step_summaries = tuple(
+            _node_summary(
+                node,
+                [sample for sample in step_rows if sample.node is node],
+            )
+            for node in NodeRole
+        )
+        if observation.oom_detected:
+            stop = StopReason.OOM
+        elif any(
+            summary.new_pswpin_pages or summary.new_pswpout_pages
+            for summary in step_summaries
+        ):
+            stop = StopReason.SWAP_ACTIVITY
+        elif "RPC0" not in observation.observed_devices:
+            stop = StopReason.MISSING_RPC_DEVICE
+        elif any(
+            summary.minimum_mem_available_bytes < plan.stop_mem_available_below_bytes
+            for summary in step_summaries
+        ):
+            stop = StopReason.LOW_MEM_AVAILABLE
+        elif not observation.runtime_succeeded:
+            stop = StopReason.RUNTIME_FAILURE
+        if stop is not StopReason.COMPLETED:
+            complete = False
+            break
+        accepted.append(observation)
+
+    if complete and len(observations) != len(plan.steps):
+        complete = False
+        stop = StopReason.INCOMPLETE_EVIDENCE
+
     rows_by_node = {
-        node: [sample for sample in samples if sample.node is node] for node in NodeRole
+        node: [sample for sample in processed_rows if sample.node is node]
+        for node in NodeRole
     }
     node_summaries = tuple(
         _node_summary(node, rows_by_node[node]) for node in NodeRole if rows_by_node[node]
     )
-    stop = StopReason.COMPLETED
-    if not both_nodes:
-        stop = StopReason.MISSING_NODE
-    elif any(observation.oom_detected for observation in observations):
-        stop = StopReason.OOM
-    elif any(summary.new_pswpin_pages or summary.new_pswpout_pages for summary in node_summaries):
-        stop = StopReason.SWAP_ACTIVITY
-    elif any("RPC0" not in observation.observed_devices for observation in observations):
-        stop = StopReason.MISSING_RPC_DEVICE
-    elif any(
-        summary.minimum_mem_available_bytes < plan.stop_mem_available_below_bytes
-        for summary in node_summaries
-    ):
-        stop = StopReason.LOW_MEM_AVAILABLE
-    elif any(not observation.runtime_succeeded for observation in observations):
-        stop = StopReason.RUNTIME_FAILURE
-
-    successful = [
-        observation
-        for observation in observations
-        if observation.runtime_succeeded
-        and not observation.oom_detected
-        and "RPC0" in observation.observed_devices
-    ]
-    last = max(successful, key=lambda item: item.context_tokens, default=None)
+    both_nodes = both_nodes and len(node_summaries) == 2
+    last = accepted[-1] if accepted else None
     load = next(
         (
             item.load_duration_seconds
-            for item in observations
+            for item in accepted
             if item.load_duration_seconds is not None
         ),
         None,
@@ -528,19 +574,19 @@ def derive_fit_summary(
     throughput = next(
         (
             item
-            for item in reversed(observations)
+            for item in reversed(accepted)
             if item.prompt_tps is not None and item.decode_tps is not None
         ),
         None,
     )
-    measured = both_nodes and bool(observations) and all(
-        sample.evidence_kind is EvidenceKind.MEASURED for sample in samples
+    measured = both_nodes and bool(processed_rows) and all(
+        sample.evidence_kind is EvidenceKind.MEASURED for sample in processed_rows
     )
     return FitSummary(
         plan_sha256=plan.canonical_sha256(),
         candidate=plan.candidate,
         both_nodes_measured=both_nodes,
-        fitted=measured and stop is StopReason.COMPLETED,
+        fitted=measured and complete and stop is StopReason.COMPLETED,
         last_passing_context_tokens=last.context_tokens if last is not None else None,
         load_duration_seconds=load,
         prompt_tps=throughput.prompt_tps if throughput is not None else None,

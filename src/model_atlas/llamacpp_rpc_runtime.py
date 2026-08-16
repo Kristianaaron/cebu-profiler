@@ -238,6 +238,9 @@ class LlamaCppRpcToolProbe:
     worker_rpc_server_path: str
     worker_rpc_server_sha256: str
     remote_worker_attested: bool
+    artifact_path: str
+    artifact_sha256: str
+    artifact_verified: bool
     executed_binaries: bool = False
 
 
@@ -269,6 +272,9 @@ def probe_llamacpp_rpc_runtime(
     head = config.llama_server_path
     commit = _git_head(root)
     head_sha = _sha256_file(head) if head.is_file() else ""
+    artifact = config.artifact_path
+    artifact_sha = _sha256_file(artifact) if artifact.is_file() else ""
+    artifact_verified = artifact_sha == config.artifact_sha256
     remote_worker_attested = bool(
         worker_attestation is not None
         and worker_attestation.host == config.worker_host
@@ -284,6 +290,7 @@ def probe_llamacpp_rpc_runtime(
         and os.access(head, os.X_OK)
         and head_sha == expected_llama_server_sha256
         and remote_worker_attested
+        and artifact_verified
     )
     return LlamaCppRpcToolProbe(
         available=available,
@@ -293,6 +300,9 @@ def probe_llamacpp_rpc_runtime(
         worker_rpc_server_path=str(config.worker_rpc_server_path),
         worker_rpc_server_sha256=worker_sha,
         remote_worker_attested=remote_worker_attested,
+        artifact_path=str(artifact),
+        artifact_sha256=artifact_sha,
+        artifact_verified=artifact_verified,
     )
 
 
@@ -358,6 +368,10 @@ def validate_runtime_receipt(
         mismatches.append("probe_worker_rpc_server_sha256")
     if not probe.remote_worker_attested:
         mismatches.append("probe_remote_worker_attestation")
+    if probe.artifact_path != str(config.artifact_path):
+        mismatches.append("probe_artifact_path")
+    if probe.artifact_sha256 != config.artifact_sha256 or not probe.artifact_verified:
+        mismatches.append("probe_artifact_sha256")
     if probe.executed_binaries:
         mismatches.append("probe_executed_binaries")
     if not receipt.load_succeeded:
@@ -403,15 +417,19 @@ class LlamaCppRpcRuntimeAdapter:
         return LlamaCppRpcMtpConfig(self.config).head_argv()
 
     def validate_receipt(
-        self, receipt: LlamaCppRpcValidationReceipt | None
+        self,
+        receipt: LlamaCppRpcValidationReceipt | None,
+        *,
+        independently_measured_worker: LlamaCppRpcWorkerAttestation | None,
     ) -> LlamaCppRpcRuntimeClaim:
-        attestation = None
-        if receipt is not None and receipt.worker_hash_attested:
-            attestation = LlamaCppRpcWorkerAttestation(
-                host=receipt.worker_host,
-                rpc_server_path=receipt.worker_rpc_server_path,
-                rpc_server_sha256=receipt.worker_rpc_server_sha256,
-                commit=receipt.commit,
-                evidence_kind=receipt.evidence_kind,
-            )
-        return validate_runtime_receipt(self.config, self.probe(attestation), receipt)
+        """Validate only against independently supplied remote measurement.
+
+        The receipt is never allowed to manufacture its own worker attestation.
+        The maintenance/runtime runner must measure the remote bytes over its
+        authenticated SSH channel and pass that separate evidence object here.
+        """
+        return validate_runtime_receipt(
+            self.config,
+            self.probe(independently_measured_worker),
+            receipt,
+        )

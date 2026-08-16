@@ -21,10 +21,12 @@ class FakeRunner:
         active: set[str] | None = None,
         fail_mutation: int | None = None,
         interrupt_payload: bool = False,
+        interrupt_command: tuple[str, ...] | None = None,
     ) -> None:
         self.active = set(active or ())
         self.fail_mutation = fail_mutation
         self.interrupt_payload = interrupt_payload
+        self.interrupt_command = interrupt_command
         self.calls: list[tuple[str, ...]] = []
         self.mutations: list[tuple[str, ...]] = []
 
@@ -49,6 +51,9 @@ class FakeRunner:
         if command == ("operator-command",) and self.interrupt_payload:
             self.mutations.append(command)
             raise MaintenanceInterrupted(15)
+        if command == self.interrupt_command:
+            self.mutations.append(command)
+            raise MaintenanceInterrupted(2)
 
         self.mutations.append(command)
         result = self._mutation_result()
@@ -118,12 +123,10 @@ def test_exact_stop_and_rollback_order(tmp_path: Path) -> None:
     assert ids[5:] == [
         "preserve_head_runtime_journal",
         "stop_head_runtime",
-        "remove_head_runtime_unit",
-        "reload_after_head_runtime_removal",
         "preserve_worker_rpc_journal",
         "stop_worker_rpc",
-        "remove_worker_rpc_unit",
-        "reload_after_worker_rpc_removal",
+        "restore_worker_rpc",
+        "restore_head_runtime",
         "restore_dsv4",
         "restore_qwen",
         "restore_vision_adapter",
@@ -133,7 +136,7 @@ def test_exact_stop_and_rollback_order(tmp_path: Path) -> None:
     assert all(receipt.restoration_evidence.values())
 
 
-@pytest.mark.parametrize("failure_number", range(1, 18))
+@pytest.mark.parametrize("failure_number", range(1, 14))
 def test_partial_failure_at_every_mutating_transition_restores(
     tmp_path: Path, failure_number: int
 ) -> None:
@@ -171,6 +174,46 @@ def test_restore_starts_only_previously_active_production_services(tmp_path: Pat
     assert not actions["restore_dsv4"].executed
     assert not actions["restore_vision_adapter"].executed
     assert not actions["restore_gateway"].executed
+
+
+def test_restore_recreates_exact_preexisting_runtime_state(tmp_path: Path) -> None:
+    active = ALL_PRODUCTION | {
+        "atlas-glm52-runtime.service",
+        "atlas-glm52-rpc.service",
+    }
+    runner = FakeRunner(active=active)
+    receipt = MaintenanceCoordinator(config(tmp_path), runner, execute=True).run()
+    actions = {item.action_id: item for item in receipt.actions}
+
+    assert actions["restore_worker_rpc"].executed
+    assert actions["restore_head_runtime"].executed
+    assert runner.active >= active
+    assert receipt.restoration_evidence["worker_rpc"]
+    assert receipt.restoration_evidence["head_runtime"]
+
+
+def test_second_signal_during_restore_does_not_abort_later_actions(tmp_path: Path) -> None:
+    runner = FakeRunner(
+        active=ALL_PRODUCTION,
+        interrupt_payload=True,
+        interrupt_command=(
+            "ssh",
+            "10.77.0.2",
+            "systemctl",
+            "--user",
+            "stop",
+            "atlas-glm52-rpc.service",
+        ),
+    )
+    receipt = MaintenanceCoordinator(config(tmp_path), runner, execute=True).run(
+        ["operator-command"]
+    )
+
+    ids = action_ids(receipt)
+    assert "stop_worker_rpc" in ids
+    assert "restore_dsv4" in ids
+    assert "restore_gateway" in ids
+    assert not receipt.success
 
 
 def test_restore_is_idempotent(tmp_path: Path) -> None:

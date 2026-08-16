@@ -50,6 +50,8 @@ def _sample(
     pswpin: int = 10,
     pswpout: int = 20,
     pid: int | None = None,
+    phase_id: str = "restart-4k",
+    context_tokens: int = 4096,
 ) -> TelemetrySample:
     role = ProcessRole.SERVER if node is NodeRole.HEAD else ProcessRole.RPC
     expected_pid = (101 if node is NodeRole.HEAD else 202) if pid is None else pid
@@ -58,8 +60,8 @@ def _sample(
         timestamp=datetime(2026, 8, 16, 12, 0, tzinfo=UTC) + timedelta(seconds=offset),
         node=node,
         hostname=f"{node}-host",
-        phase_id="restart-4k",
-        context_tokens=4096,
+        phase_id=phase_id,
+        context_tokens=context_tokens,
         gpu_used_bytes=50 * 1024**3,
         gpu_free_bytes=60 * 1024**3,
         gpu_util_percent=75.0,
@@ -85,9 +87,9 @@ def _sample(
     )
 
 
-def _observation(context: int = 4096) -> StepObservation:
+def _observation(step_id: str = "restart-4k", context: int = 4096) -> StepObservation:
     return StepObservation(
-        step_id=f"restart-{context}",
+        step_id=step_id,
         context_tokens=context,
         load_duration_seconds=120.0,
         prompt_tps=100.0,
@@ -95,6 +97,45 @@ def _observation(context: int = 4096) -> StepObservation:
         observed_devices=("CUDA0", "RPC0"),
         runtime_succeeded=True,
     )
+
+
+def _plan_evidence() -> tuple[list[TelemetrySample], list[StepObservation]]:
+    plan = build_base_canary_plan(_candidate())
+    samples: list[TelemetrySample] = []
+    observations: list[StepObservation] = []
+    for step_index, step in enumerate(plan.steps):
+        observations.append(_observation(step.step_id, step.context_tokens))
+        for moment, offset in (("before", 0), ("after", 10)):
+            sample_set = f"{step.step_id}-{moment}"
+            for node in NodeRole:
+                samples.append(
+                    _sample(
+                        node,
+                        sample_set_id=sample_set,
+                        offset=step_index * 20 + offset,
+                        phase_id=step.step_id,
+                        context_tokens=step.context_tokens,
+                    )
+                )
+    return samples, observations
+
+
+def _single_step_plan():  # type: ignore[no-untyped-def]
+    plan = build_base_canary_plan(_candidate())
+    return plan.model_copy(update={"steps": (plan.steps[3],)})
+
+
+def _single_step_samples(**after_updates: int) -> list[TelemetrySample]:
+    rows = [
+        _sample(NodeRole.HEAD, sample_set_id="before", offset=0),
+        _sample(NodeRole.WORKER, sample_set_id="before", offset=0),
+        _sample(NodeRole.HEAD, sample_set_id="after", offset=10),
+        _sample(NodeRole.WORKER, sample_set_id="after", offset=10),
+    ]
+    return [
+        row.model_copy(update=after_updates) if index >= 2 else row
+        for index, row in enumerate(rows)
+    ]
 
 
 def test_collector_fails_closed_when_remote_is_missing() -> None:
@@ -183,22 +224,17 @@ def test_base_plan_is_bound_deterministic_and_keeps_mtp_separate() -> None:
 
 def test_summary_derives_two_node_fit_and_headroom() -> None:
     plan = build_base_canary_plan(_candidate())
-    samples = [
-        _sample(NodeRole.HEAD, sample_set_id="before", offset=0),
-        _sample(NodeRole.WORKER, sample_set_id="before", offset=0),
-        _sample(NodeRole.HEAD, sample_set_id="after", offset=10, mem_available=12 * 1024**3),
-        _sample(NodeRole.WORKER, sample_set_id="after", offset=10, mem_available=10 * 1024**3),
-    ]
-    summary = derive_fit_summary(plan, samples, [_observation(4096), _observation(16384)])
+    samples, observations = _plan_evidence()
+    summary = derive_fit_summary(plan, samples, observations)
     assert summary.both_nodes_measured
     assert summary.fitted
     assert summary.evidence_kind is EvidenceKind.MEASURED
     assert summary.stop_reason is StopReason.COMPLETED
-    assert summary.last_passing_context_tokens == 16384
+    assert summary.last_passing_context_tokens == 65536
     assert summary.load_duration_seconds == 120.0
     assert summary.prompt_tps == 100.0
     assert summary.decode_tps == 12.5
-    assert summary.minimum_mem_headroom_bytes == 10 * 1024**3
+    assert summary.minimum_mem_headroom_bytes == 16 * 1024**3
 
 
 @pytest.mark.parametrize(
@@ -216,19 +252,26 @@ def test_summary_derives_two_node_fit_and_headroom() -> None:
         ),
         (
             [
-                _sample(NodeRole.HEAD, mem_available=MIN_MEM_AVAILABLE_BYTES - 1),
-                _sample(NodeRole.WORKER),
+                _sample(NodeRole.HEAD, sample_set_id="a"),
+                _sample(NodeRole.WORKER, sample_set_id="a"),
+                _sample(
+                    NodeRole.HEAD,
+                    sample_set_id="b",
+                    offset=1,
+                    mem_available=MIN_MEM_AVAILABLE_BYTES - 1,
+                ),
+                _sample(NodeRole.WORKER, sample_set_id="b", offset=1),
             ],
             [_observation()],
             StopReason.LOW_MEM_AVAILABLE,
         ),
         (
-            [_sample(NodeRole.HEAD), _sample(NodeRole.WORKER)],
+            _single_step_samples(),
             [_observation().model_copy(update={"oom_detected": True})],
             StopReason.OOM,
         ),
         (
-            [_sample(NodeRole.HEAD), _sample(NodeRole.WORKER)],
+            _single_step_samples(),
             [_observation().model_copy(update={"observed_devices": ("CUDA0",)})],
             StopReason.MISSING_RPC_DEVICE,
         ),
@@ -239,17 +282,47 @@ def test_stop_thresholds(
     observations: list[StepObservation],
     reason: StopReason,
 ) -> None:
-    summary = derive_fit_summary(build_base_canary_plan(_candidate()), samples, observations)
+    summary = derive_fit_summary(_single_step_plan(), samples, observations)
     assert not summary.fitted
     assert summary.stop_reason is reason
 
 
 def test_no_measured_claim_without_both_nodes() -> None:
     summary = derive_fit_summary(
-        build_base_canary_plan(_candidate()), [_sample(NodeRole.HEAD)], [_observation()]
+        _single_step_plan(), [_sample(NodeRole.HEAD)], [_observation()]
     )
     assert not summary.both_nodes_measured
     assert not summary.fitted
     assert summary.stop_reason is StopReason.MISSING_NODE
     assert summary.evidence_kind is not EvidenceKind.MEASURED
     assert summary.minimum_mem_headroom_bytes is None
+
+
+def test_16k_observation_cannot_reuse_4k_telemetry() -> None:
+    plan = build_base_canary_plan(_candidate())
+    samples = _single_step_samples()
+    observations = [_observation(step.step_id, step.context_tokens) for step in plan.steps[:4]]
+    observations.append(_observation("restart-16k", 16384))
+    summary = derive_fit_summary(plan, samples, observations)
+    assert not summary.fitted
+    assert summary.stop_reason is StopReason.INCOMPLETE_EVIDENCE
+    assert summary.last_passing_context_tokens is None
+
+
+def test_later_success_after_failure_never_enters_accepted_prefix() -> None:
+    plan = build_base_canary_plan(_candidate())
+    samples, observations = _plan_evidence()
+    observations[3] = observations[3].model_copy(update={"oom_detected": True})
+    summary = derive_fit_summary(plan, samples, observations)
+    assert not summary.fitted
+    assert summary.stop_reason is StopReason.OOM
+    assert summary.last_passing_context_tokens == 4096
+
+
+def test_missing_or_out_of_order_steps_fail_closed() -> None:
+    plan = build_base_canary_plan(_candidate())
+    samples, observations = _plan_evidence()
+    for broken in (observations[:-1], [observations[1], observations[0], *observations[2:]]):
+        summary = derive_fit_summary(plan, samples, broken)
+        assert not summary.fitted
+        assert summary.stop_reason is StopReason.INCOMPLETE_EVIDENCE

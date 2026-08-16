@@ -27,9 +27,11 @@ ARTIFACT_SHA = "a" * 64
 
 
 def _config(tmp_path: Path) -> LlamaCppRpcRuntimeConfig:
+    artifact = tmp_path / "model.gguf"
+    artifact.write_bytes(b"artifact")
     return LlamaCppRpcRuntimeConfig(
-        artifact_path=tmp_path / "model.gguf",
-        artifact_sha256=ARTIFACT_SHA,
+        artifact_path=artifact,
+        artifact_sha256=hashlib.sha256(b"artifact").hexdigest(),
         llama_server_path=tmp_path / "llama-server",
         worker_rpc_server_path=tmp_path / "ggml-rpc-server",
     )
@@ -44,6 +46,9 @@ def _probe(config: LlamaCppRpcRuntimeConfig, available: bool = True) -> LlamaCpp
         worker_rpc_server_path=str(config.worker_rpc_server_path),
         worker_rpc_server_sha256=EXPECTED_RPC_SERVER_SHA256,
         remote_worker_attested=available,
+        artifact_path=str(config.artifact_path),
+        artifact_sha256=config.artifact_sha256,
+        artifact_verified=available,
     )
 
 
@@ -51,7 +56,7 @@ def _receipt(config: LlamaCppRpcRuntimeConfig) -> LlamaCppRpcValidationReceipt:
     return LlamaCppRpcValidationReceipt(
         runtime_id=RUNTIME_ID,
         config_sha256=config.canonical_sha256(),
-        artifact_sha256=ARTIFACT_SHA,
+        artifact_sha256=config.artifact_sha256,
         commit=PINNED_COMMIT,
         llama_server_sha256=EXPECTED_LLAMA_SERVER_SHA256,
         worker_rpc_server_sha256=EXPECTED_RPC_SERVER_SHA256,
@@ -207,9 +212,11 @@ def test_probe_is_filesystem_only_and_fails_closed_on_hash_drift(tmp_path: Path)
     worker.write_bytes(b"worker")
     os.chmod(head, 0o755)
     os.chmod(worker, 0o755)
+    artifact = tmp_path / "model.gguf"
+    artifact.write_bytes(b"artifact")
     config = LlamaCppRpcRuntimeConfig(
-        artifact_path=tmp_path / "model.gguf",
-        artifact_sha256=ARTIFACT_SHA,
+        artifact_path=artifact,
+        artifact_sha256=hashlib.sha256(b"artifact").hexdigest(),
         llama_server_path=head,
         worker_rpc_server_path=worker,
     )
@@ -246,6 +253,20 @@ def test_probe_is_filesystem_only_and_fails_closed_on_hash_drift(tmp_path: Path)
     assert not drift.executed_binaries
 
 
+def test_probe_rejects_missing_or_drifted_artifact(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    missing = replace(config, artifact_path=tmp_path / "missing.gguf")
+    missing_probe = probe_llamacpp_rpc_runtime(missing, toolchain_root=tmp_path)
+    assert not missing_probe.available
+    assert not missing_probe.artifact_verified
+
+    config.artifact_path.write_bytes(b"changed")
+    drift = probe_llamacpp_rpc_runtime(config, toolchain_root=tmp_path)
+    assert not drift.available
+    assert drift.artifact_sha256 != config.artifact_sha256
+    assert not drift.artifact_verified
+
+
 def test_no_runtime_claim_before_matching_measured_receipt(tmp_path: Path) -> None:
     config = _config(tmp_path)
     assert build_llamacpp_gguf_record().runtime_compat == ()
@@ -267,3 +288,11 @@ def test_receipt_rejects_tool_or_artifact_drift(tmp_path: Path) -> None:
     bad_artifact = replace(receipt, artifact_sha256="b" * 64)
     assert validate_runtime_receipt(config, _probe(config), bad_artifact).runtime_compat == ()
     assert validate_runtime_receipt(config, _probe(config, False), receipt).runtime_compat == ()
+
+
+def test_adapter_never_derives_worker_attestation_from_receipt(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    adapter = LlamaCppRpcRuntimeAdapter(config, tmp_path / "llama.cpp")
+    claim = adapter.validate_receipt(_receipt(config), independently_measured_worker=None)
+    assert not claim.validated
+    assert claim.runtime_compat == ()

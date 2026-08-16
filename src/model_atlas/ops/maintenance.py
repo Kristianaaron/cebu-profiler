@@ -98,8 +98,9 @@ class MaintenanceReceipt(BaseModel):
 class MaintenanceConfig(BaseModel):
     """Fixed, non-secret maintenance targets.
 
-    Unit-file removal is opt-in by supplying the corresponding path.  A journal
-    is always captured before any supplied unit file is removed.
+    Unit-file paths are retained only for receipt/config compatibility.  The
+    maintenance coordinator never removes unit files: transient units can be
+    stopped safely, while deleting persistent units is not rollback-safe.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -156,7 +157,9 @@ class MaintenanceCoordinator:
         self._states: dict[str, StateSnapshot] = {}
         self._actions: list[ActionReceipt] = []
         self._restored: set[str] = set()
+        self._runtime_drained: set[str] = set()
         self._restoration_evidence: dict[str, bool] = {}
+        self._restoring = False
 
     def _command(self, argv: Sequence[str]) -> CommandResult:
         return self.runner.run(argv)
@@ -231,7 +234,10 @@ class MaintenanceCoordinator:
                         f"journal_sha256={hashlib.sha256(result.stdout.encode()).hexdigest()}"
                     )
             except MaintenanceInterrupted:
-                raise
+                if not self._restoring:
+                    raise
+                success = False
+                evidence = "interrupted_during_restore"
             except BaseException as exc:
                 success = False
                 evidence = f"exception_type={type(exc).__name__}"
@@ -283,7 +289,8 @@ class MaintenanceCoordinator:
         remote: bool,
         unit_file: Path | None,
     ) -> None:
-        if key in self._restored:
+        del unit_file  # unit deletion is deliberately unsupported
+        if key in self._runtime_drained:
             return
         journal_path = self.config.journal_dir / f"{key}.journal.log"
         journal_command = [
@@ -296,7 +303,7 @@ class MaintenanceCoordinator:
         ]
         if remote:
             journal_command = ["ssh", self.config.worker_ssh_target, *journal_command]
-        journal_preserved = self._record(
+        self._record(
             f"preserve_{key}_journal",
             unit,
             requested=True,
@@ -307,26 +314,7 @@ class MaintenanceCoordinator:
         if remote:
             stop_command = ["ssh", self.config.worker_ssh_target, *stop_command]
         self._record(f"stop_{key}", unit, requested=True, command=stop_command)
-        if unit_file is not None and journal_preserved:
-            remove_command = ["rm", "--", str(unit_file)]
-            if remote:
-                remove_command = ["ssh", self.config.worker_ssh_target, *remove_command]
-            self._record(
-                f"remove_{key}_unit",
-                str(unit_file),
-                requested=True,
-                command=remove_command,
-            )
-            reload_command = ["systemctl", "--user", "daemon-reload"]
-            if remote:
-                reload_command = ["ssh", self.config.worker_ssh_target, *reload_command]
-            self._record(
-                f"reload_after_{key}_removal",
-                unit,
-                requested=True,
-                command=reload_command,
-            )
-        self._restored.add(key)
+        self._runtime_drained.add(key)
 
     def _restore_action(
         self, key: str, action_id: str, target: str, command: Sequence[str]
@@ -344,55 +332,75 @@ class MaintenanceCoordinator:
 
     def restore(self) -> None:
         """Best-effort, idempotent rollback; every transition is attempted."""
-        # Experimental consumers are always drained head-first, then worker.
-        self._preserve_and_stop_runtime(
-            key="head_runtime",
-            unit=self.config.head_runtime_unit,
-            remote=False,
-            unit_file=self.config.head_runtime_unit_file,
-        )
-        self._preserve_and_stop_runtime(
-            key="worker_rpc",
-            unit=self.config.worker_rpc_unit,
-            remote=True,
-            unit_file=self.config.worker_rpc_unit_file,
-        )
-        self._restore_action(
-            "dsv4",
-            "restore_dsv4",
-            str(self.config.dsv4_start_script),
-            [str(self.config.dsv4_start_script)],
-        )
-        for key, unit in (
-            ("qwen", self.config.qwen_unit),
-            ("vision_adapter", self.config.vision_adapter_unit),
-            ("gateway", self.config.gateway_unit),
-        ):
-            self._restore_action(
-                key,
-                f"restore_{key}",
-                unit,
-                ["systemctl", "--user", "start", unit],
+        self._restoring = True
+        try:
+            # Experimental consumers are always drained head-first, then worker.
+            self._preserve_and_stop_runtime(
+                key="head_runtime",
+                unit=self.config.head_runtime_unit,
+                remote=False,
+                unit_file=self.config.head_runtime_unit_file,
             )
+            self._preserve_and_stop_runtime(
+                key="worker_rpc",
+                unit=self.config.worker_rpc_unit,
+                remote=True,
+                unit_file=self.config.worker_rpc_unit_file,
+            )
+            # Restore a pre-existing runtime in dependency order: worker first.
+            self._restore_action(
+                "worker_rpc",
+                "restore_worker_rpc",
+                self.config.worker_rpc_unit,
+                [
+                    "ssh",
+                    self.config.worker_ssh_target,
+                    "systemctl",
+                    "--user",
+                    "start",
+                    self.config.worker_rpc_unit,
+                ],
+            )
+            self._restore_action(
+                "head_runtime",
+                "restore_head_runtime",
+                self.config.head_runtime_unit,
+                ["systemctl", "--user", "start", self.config.head_runtime_unit],
+            )
+            self._restore_action(
+                "dsv4",
+                "restore_dsv4",
+                str(self.config.dsv4_start_script),
+                [str(self.config.dsv4_start_script)],
+            )
+            for key, unit in (
+                ("qwen", self.config.qwen_unit),
+                ("vision_adapter", self.config.vision_adapter_unit),
+                ("gateway", self.config.gateway_unit),
+            ):
+                self._restore_action(
+                    key,
+                    f"restore_{key}",
+                    unit,
+                    ["systemctl", "--user", "start", unit],
+                )
+        finally:
+            self._restoring = False
 
         if self.execute:
             self._restoration_evidence = {
                 "dsv4": self._container_active(self.config.dsv4_container)
-                if self._states["dsv4"].active
-                else True,
+                == self._states["dsv4"].active,
                 "qwen": self._unit_active(self.config.qwen_unit)
-                if self._states["qwen"].active
-                else True,
+                == self._states["qwen"].active,
                 "vision_adapter": self._unit_active(self.config.vision_adapter_unit)
-                if self._states["vision_adapter"].active
-                else True,
+                == self._states["vision_adapter"].active,
                 "gateway": self._unit_active(self.config.gateway_unit)
-                if self._states["gateway"].active
-                else True,
-                "head_runtime_stopped": not self._unit_active(self.config.head_runtime_unit),
-                "worker_rpc_stopped": not self._unit_active(
-                    self.config.worker_rpc_unit, remote=True
-                ),
+                == self._states["gateway"].active,
+                "head_runtime": self._unit_active(self.config.head_runtime_unit)
+                == self._states["head_runtime"].active,
+                "worker_rpc": self._unit_active(self.config.worker_rpc_unit, remote=True)
+                == self._states["worker_rpc"].active,
             }
 
     def run(self, payload: Sequence[str] | None = None) -> MaintenanceReceipt:
