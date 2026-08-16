@@ -13,6 +13,8 @@ from model_atlas.evaluation.contracts import (
     ReproducibilityManifest,
     RouterDivergenceRecord,
     RouterDivergenceSummary,
+    SampleAlignment,
+    TokenKLDResult,
     TokenKLDRow,
 )
 from model_atlas.evaluation.heldout import (
@@ -37,9 +39,11 @@ __all__ = [
     "MetricEvidence",
     "CorpusSlice",
     "EvaluationIdentity",
+    "SampleAlignment",
     "TokenKLDRow",
     "DomainKLDAggregate",
     "DomainKLDReport",
+    "TokenKLDResult",
     "LayerDivergence",
     "RouterDivergenceRecord",
     "RouterDivergenceSummary",
