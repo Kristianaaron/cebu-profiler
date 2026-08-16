@@ -13,6 +13,21 @@ def test_capture_tool_keeps_custom_arguments_out_of_common_parser() -> None:
     assert '"--layers"' in source
     assert "split_custom_args(argc, argv)" in source
     assert "common_argv.data()" in source
+    for argument in (
+        "--request-id",
+        "--model-sha256",
+        "--model-artifact-manifest-sha256",
+        "--tool-binary-sha256",
+        "--build-contract-sha256",
+        "--forced-tokens-sha256",
+        "--held-out-manifest-sha256",
+        "--ordered-sample-ids-sha256",
+        "--profile-tokenizer-sha256",
+        "--runtime-argv-sha256",
+        "--role",
+        "--reference-kind",
+    ):
+        assert f'"{argument}"' in source
 
 
 def test_capture_tool_is_forced_token_only_and_atomically_published() -> None:
@@ -33,6 +48,8 @@ def test_capture_input_and_source_paths_fail_closed() -> None:
     assert "contents.size() == MAX_INPUT_BYTES" in source
     assert "paths_overlap(candidate, input_normalized)" in source
     assert "is_ancestor_or_equal(model_source, candidate)" in source
+    assert "split GGUF model names are not supported" in source
+    assert "layer >= n_layer" in source
 
 
 def test_capture_schema_has_alignment_and_raw_tensor_files() -> None:
@@ -45,6 +62,11 @@ def test_capture_schema_has_alignment_and_raw_tensor_files() -> None:
         '"logits.f32"',
         '"alignment.jsonl"',
         '"tokenizer.tsv"',
+        '"receipt"',
+        '"model_artifact_manifest_sha256"',
+        '"tool_build_contract_sha256"',
+        '"normalized_runtime_argv"',
+        '"runtime_params"',
     ):
         assert field in source
 
@@ -55,4 +77,5 @@ def test_build_links_exact_pinned_library_sonames() -> None:
     assert "libllama.so.0.1.0" in cmake
     assert "libllama-common.so.0.1.0" in cmake
     assert "libggml.so.0.20.0" in cmake
+    assert "libggml-base.so.0.20.0" in cmake
     assert "BUILD_RPATH" in cmake

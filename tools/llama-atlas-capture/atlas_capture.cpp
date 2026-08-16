@@ -14,6 +14,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <regex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -42,6 +43,18 @@ struct custom_args {
     fs::path tokens_jsonl;
     fs::path out_dir;
     std::vector<std::uint32_t> layers;
+    std::string request_id;
+    std::string model_sha256;
+    std::string model_artifact_manifest_sha256;
+    std::string tool_binary_sha256;
+    std::string tool_build_contract_sha256;
+    std::string forced_tokens_sha256;
+    std::string held_out_manifest_sha256;
+    std::string ordered_sample_ids_sha256;
+    std::string profile_tokenizer_sha256;
+    std::string runtime_argv_sha256;
+    std::string role;
+    std::string reference_kind;
 };
 
 struct sample {
@@ -142,11 +155,45 @@ std::vector<std::uint32_t> parse_layers(const std::string & value) {
     return result;
 }
 
+bool is_lowercase_sha256(const std::string & value) {
+    return value.size() == 64 &&
+           value.find_first_not_of("0123456789abcdef") == std::string::npos;
+}
+
+void set_hash_once(
+        int argc,
+        char ** argv,
+        int & index,
+        const std::string & name,
+        std::string & destination) {
+    if (!destination.empty()) {
+        fail(name + " may be supplied only once");
+    }
+    const std::string value = require_custom_value(argc, argv, index, name, name + "=");
+    if (!is_lowercase_sha256(value)) {
+        fail(name + " must be exactly 64 lowercase hexadecimal characters");
+    }
+    destination = value;
+}
+
+void validate_role_reference(const std::string & role, const std::string & reference_kind) {
+    const bool valid =
+            (role == "candidate" && reference_kind == "candidate") ||
+            (role == "identity_control" && reference_kind == "identity_control") ||
+            (role == "nvfp4_source_reference" && reference_kind == "nvfp4_source_relative") ||
+            (role == "bf16_teacher" && reference_kind == "bf16");
+    if (!valid) {
+        fail("--role and --reference-kind do not form a reviewed capture pairing");
+    }
+}
+
 std::pair<custom_args, std::vector<std::string>> split_custom_args(int argc, char ** argv) {
     custom_args custom;
     bool saw_tokens = false;
     bool saw_out = false;
     bool saw_layers = false;
+    bool saw_role = false;
+    bool saw_reference_kind = false;
     std::vector<std::string> common_args{argv[0]};
 
     for (int i = 1; i < argc; ++i) {
@@ -171,14 +218,94 @@ std::pair<custom_args, std::vector<std::string>> split_custom_args(int argc, cha
             custom.layers = parse_layers(
                     require_custom_value(argc, argv, i, "--layers", "--layers="));
             saw_layers = true;
+        } else if (arg == "--request-id" || arg.rfind("--request-id=", 0) == 0) {
+            set_hash_once(argc, argv, i, "--request-id", custom.request_id);
+        } else if (arg == "--model-sha256" || arg.rfind("--model-sha256=", 0) == 0) {
+            set_hash_once(argc, argv, i, "--model-sha256", custom.model_sha256);
+        } else if (arg == "--model-artifact-manifest-sha256" ||
+                   arg.rfind("--model-artifact-manifest-sha256=", 0) == 0) {
+            set_hash_once(
+                    argc,
+                    argv,
+                    i,
+                    "--model-artifact-manifest-sha256",
+                    custom.model_artifact_manifest_sha256);
+        } else if (arg == "--tool-binary-sha256" ||
+                   arg.rfind("--tool-binary-sha256=", 0) == 0) {
+            set_hash_once(
+                    argc, argv, i, "--tool-binary-sha256", custom.tool_binary_sha256);
+        } else if (arg == "--build-contract-sha256" ||
+                   arg.rfind("--build-contract-sha256=", 0) == 0) {
+            set_hash_once(
+                    argc,
+                    argv,
+                    i,
+                    "--build-contract-sha256",
+                    custom.tool_build_contract_sha256);
+        } else if (arg == "--forced-tokens-sha256" ||
+                   arg.rfind("--forced-tokens-sha256=", 0) == 0) {
+            set_hash_once(
+                    argc, argv, i, "--forced-tokens-sha256", custom.forced_tokens_sha256);
+        } else if (arg == "--held-out-manifest-sha256" ||
+                   arg.rfind("--held-out-manifest-sha256=", 0) == 0) {
+            set_hash_once(
+                    argc,
+                    argv,
+                    i,
+                    "--held-out-manifest-sha256",
+                    custom.held_out_manifest_sha256);
+        } else if (arg == "--ordered-sample-ids-sha256" ||
+                   arg.rfind("--ordered-sample-ids-sha256=", 0) == 0) {
+            set_hash_once(
+                    argc,
+                    argv,
+                    i,
+                    "--ordered-sample-ids-sha256",
+                    custom.ordered_sample_ids_sha256);
+        } else if (arg == "--profile-tokenizer-sha256" ||
+                   arg.rfind("--profile-tokenizer-sha256=", 0) == 0) {
+            set_hash_once(
+                    argc,
+                    argv,
+                    i,
+                    "--profile-tokenizer-sha256",
+                    custom.profile_tokenizer_sha256);
+        } else if (arg == "--runtime-argv-sha256" ||
+                   arg.rfind("--runtime-argv-sha256=", 0) == 0) {
+            set_hash_once(
+                    argc, argv, i, "--runtime-argv-sha256", custom.runtime_argv_sha256);
+        } else if (arg == "--role" || arg.rfind("--role=", 0) == 0) {
+            if (saw_role) {
+                fail("--role may be supplied only once");
+            }
+            custom.role = require_custom_value(argc, argv, i, "--role", "--role=");
+            saw_role = true;
+        } else if (arg == "--reference-kind" || arg.rfind("--reference-kind=", 0) == 0) {
+            if (saw_reference_kind) {
+                fail("--reference-kind may be supplied only once");
+            }
+            custom.reference_kind =
+                    require_custom_value(argc, argv, i, "--reference-kind", "--reference-kind=");
+            saw_reference_kind = true;
         } else {
             common_args.push_back(arg);
         }
     }
 
-    if (!saw_tokens || !saw_out || !saw_layers) {
-        fail("required custom arguments: --tokens-jsonl PATH --out-dir PATH --layers CSV");
+    const bool hashes_present = !custom.request_id.empty() && !custom.model_sha256.empty() &&
+                                !custom.model_artifact_manifest_sha256.empty() &&
+                                !custom.tool_binary_sha256.empty() &&
+                                !custom.tool_build_contract_sha256.empty() &&
+                                !custom.forced_tokens_sha256.empty() &&
+                                !custom.held_out_manifest_sha256.empty() &&
+                                !custom.ordered_sample_ids_sha256.empty() &&
+                                !custom.profile_tokenizer_sha256.empty() &&
+                                !custom.runtime_argv_sha256.empty();
+    if (!saw_tokens || !saw_out || !saw_layers || !saw_role || !saw_reference_kind ||
+            !hashes_present) {
+        fail("all capture paths, layers, receipt digests, role, and reference kind are required");
     }
+    validate_role_reference(custom.role, custom.reference_kind);
     return {std::move(custom), std::move(common_args)};
 }
 
@@ -340,6 +467,88 @@ bool paths_overlap(const fs::path & left, const fs::path & right) {
     return is_ancestor_or_equal(left, right) || is_ancestor_or_equal(right, left);
 }
 
+std::string canonical_option_name(const std::string & value) {
+    if (value == "-m") {
+        return "--model";
+    }
+    if (value == "-c") {
+        return "--ctx-size";
+    }
+    if (value == "-b") {
+        return "--batch-size";
+    }
+    if (value == "-ub") {
+        return "--ubatch-size";
+    }
+    if (value == "-t") {
+        return "--threads";
+    }
+    if (value == "-tb") {
+        return "--threads-batch";
+    }
+    return value;
+}
+
+std::vector<std::string> normalized_runtime_argv(
+        const std::vector<std::string> & common_args, const custom_args & custom) {
+    std::vector<std::string> normalized;
+    normalized.push_back(normalized_path("/proc/self/exe", "capture executable").string());
+    for (std::size_t index = 1; index < common_args.size(); ++index) {
+        std::string option = common_args[index];
+        std::string inline_value;
+        if (option.rfind("--", 0) == 0) {
+            const std::size_t equals = option.find('=');
+            if (equals != std::string::npos) {
+                inline_value = option.substr(equals + 1);
+                option.resize(equals);
+            }
+        }
+        option = canonical_option_name(option);
+        normalized.push_back(option);
+        if (!inline_value.empty()) {
+            normalized.push_back(
+                    option == "--model"
+                            ? normalized_path(inline_value, "model argument").string()
+                            : inline_value);
+        } else if (option == "--model" && index + 1 < common_args.size()) {
+            normalized.push_back(
+                    normalized_path(common_args[++index], "model argument").string());
+        }
+    }
+    normalized.insert(
+            normalized.end(),
+            {
+                    "--tokens-jsonl",
+                    normalized_path(custom.tokens_jsonl, "tokens JSONL").string(),
+                    "--out-dir",
+                    normalized_path(custom.out_dir, "output directory").string(),
+                    "--layers",
+            });
+    std::ostringstream layer_csv;
+    for (std::size_t index = 0; index < custom.layers.size(); ++index) {
+        if (index != 0) {
+            layer_csv << ',';
+        }
+        layer_csv << custom.layers[index];
+    }
+    normalized.push_back(layer_csv.str());
+    return normalized;
+}
+
+std::string split_mode_name(llama_split_mode mode) {
+    switch (mode) {
+        case LLAMA_SPLIT_MODE_NONE:
+            return "none";
+        case LLAMA_SPLIT_MODE_LAYER:
+            return "layer";
+        case LLAMA_SPLIT_MODE_ROW:
+            return "row";
+        case LLAMA_SPLIT_MODE_TENSOR:
+            return "tensor";
+    }
+    fail("common parser produced an unknown split mode");
+}
+
 fs::path temp_path_for(const fs::path & output) {
     const fs::path parent = output.has_parent_path() ? output.parent_path() : fs::path(".");
     return parent / ("." + output.filename().string() + ".atlas-capture.tmp");
@@ -356,12 +565,18 @@ void validate_capture_paths(
     const fs::path model_normalized = normalized_path(model_path, "model path");
 
     std::error_code error;
-    const bool model_is_directory = fs::is_directory(model_normalized, error);
-    if (error) {
-        fail("cannot inspect model source path: " + error.message());
+    reject_symlink(model_path, "model path");
+    if (!fs::is_regular_file(model_normalized, error) || error) {
+        fail("v1 capture requires a primary single-file GGUF model");
     }
-    const fs::path model_source =
-            model_is_directory ? model_normalized : model_normalized.parent_path();
+    if (model_normalized.extension() != ".gguf") {
+        fail("v1 capture model must have the lowercase .gguf suffix");
+    }
+    static const std::regex SPLIT_GGUF_NAME(R"(.*-[0-9]{5}-of-[0-9]{5}\.gguf)");
+    if (std::regex_match(model_normalized.filename().string(), SPLIT_GGUF_NAME)) {
+        fail("split GGUF model names are not supported by capture schema v1");
+    }
+    const fs::path model_source = model_normalized.parent_path();
 
     for (const auto & candidate : {output_normalized, temp_normalized}) {
         if (paths_overlap(candidate, input_normalized)) {
@@ -490,8 +705,8 @@ void validate_model_bounds(
         std::uint32_t n_ctx,
         std::uint32_t n_layer) {
     for (const std::uint32_t layer : layers) {
-        if (layer > n_layer) {
-            fail("requested layer " + std::to_string(layer) + " exceeds n_layer " +
+        if (layer >= n_layer) {
+            fail("requested layer " + std::to_string(layer) + " is outside [0, n_layer) for " +
                  std::to_string(n_layer));
         }
     }
@@ -508,9 +723,13 @@ void validate_model_bounds(
     }
 }
 
-int capture(const custom_args & custom, common_params & params) {
+int capture(
+        const custom_args & custom,
+        common_params & params,
+        const std::vector<std::string> & common_args) {
     const std::vector<sample> samples = load_samples(custom.tokens_jsonl);
     validate_capture_paths(custom.tokens_jsonl, custom.out_dir, params.model.path);
+    const std::vector<std::string> runtime_argv = normalized_runtime_argv(common_args, custom);
     const fs::path temp = prepare_temp_dir(custom.out_dir);
     temp_dir_guard cleanup(temp);
 
@@ -529,6 +748,7 @@ int capture(const custom_args & custom, common_params & params) {
     const std::uint32_t n_layer = static_cast<std::uint32_t>(llama_model_n_layer(model));
     const std::uint32_t n_ctx = llama_n_ctx(context);
     const std::uint32_t n_batch = llama_n_batch(context);
+    const std::uint32_t n_ubatch = llama_n_ubatch(context);
     if (n_vocab == 0 || n_embd == 0 || n_batch == 0) {
         fail("loaded model reported invalid capture dimensions");
     }
@@ -635,6 +855,48 @@ int capture(const custom_args & custom, common_params & params) {
     for (const std::uint32_t layer : custom.layers) {
         layer_files.push_back(layer_file_name(layer));
     }
+    std::vector<std::string> device_names;
+    device_names.reserve(params.devices.size());
+    for (const ggml_backend_dev_t device : params.devices) {
+        if (device == nullptr) {
+            fail("parsed runtime device list contains a null device");
+        }
+        device_names.emplace_back(ggml_backend_dev_name(device));
+    }
+    const json runtime_params = {
+            {"model_path", normalized_path(params.model.path, "model path").string()},
+            {"tokens_jsonl", normalized_path(custom.tokens_jsonl, "tokens JSONL").string()},
+            {"output_dir", normalized_path(custom.out_dir, "output directory").string()},
+            {"layers", custom.layers},
+            {"context_tokens", n_ctx},
+            {"batch_tokens", n_batch},
+            {"ubatch_tokens", n_ubatch},
+            {"threads", llama_n_threads(context)},
+            {"threads_batch", llama_n_threads_batch(context)},
+            {"split_mode", split_mode_name(params.split_mode)},
+            {"n_gpu_layers", params.n_gpu_layers},
+            {"main_gpu", params.main_gpu},
+            {"fit_params", params.fit_params},
+            {"devices", device_names},
+            {"warmup", params.warmup},
+    };
+    const json receipt = {
+            {"request_id", custom.request_id},
+            {"model_sha256", custom.model_sha256},
+            {"model_artifact_manifest_sha256", custom.model_artifact_manifest_sha256},
+            {"tool_binary_sha256", custom.tool_binary_sha256},
+            {"tool_build_contract_sha256", custom.tool_build_contract_sha256},
+            {"forced_tokens_sha256", custom.forced_tokens_sha256},
+            {"held_out_manifest_sha256", custom.held_out_manifest_sha256},
+            {"ordered_sample_ids_sha256", custom.ordered_sample_ids_sha256},
+            {"profile_tokenizer_sha256", custom.profile_tokenizer_sha256},
+            {"runtime_argv_sha256", custom.runtime_argv_sha256},
+            {"role", custom.role},
+            {"reference_kind", custom.reference_kind},
+            {"layers", custom.layers},
+            {"normalized_runtime_argv", runtime_argv},
+            {"runtime_params", runtime_params},
+    };
     const json manifest = {
             {"schema_version", 1},
             {"capture_mode", "teacher_forced"},
@@ -644,6 +906,7 @@ int capture(const custom_args & custom, common_params & params) {
             {"row_count", row},
             {"sample_count", samples.size()},
             {"layers", custom.layers},
+            {"receipt", receipt},
             {"files",
              {
                      {"logits", "logits.f32"},
@@ -694,7 +957,7 @@ int main(int argc, char ** argv) {
                     LLAMA_EXAMPLE_RESULTS)) {
             return 2;
         }
-        return capture(custom, params);
+        return capture(custom, params, common_storage);
     } catch (const std::exception & exc) {
         std::cerr << "llama-atlas-capture: " << exc.what() << '\n';
         return 1;

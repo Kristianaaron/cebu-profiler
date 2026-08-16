@@ -44,8 +44,10 @@ set(LLAMA_BIN "${LLAMA_CPP_BUILD}/bin")
 set(LLAMA_LIBRARY "${LLAMA_BIN}/libllama.so.0.1.0")
 set(COMMON_LIBRARY "${LLAMA_BIN}/libllama-common.so.0.1.0")
 set(GGML_LIBRARY "${LLAMA_BIN}/libggml.so.0.20.0")
+set(GGML_BASE_LIBRARY "${LLAMA_BIN}/libggml-base.so.0.20.0")
 
-foreach(required_file IN ITEMS "${LLAMA_LIBRARY}" "${COMMON_LIBRARY}" "${GGML_LIBRARY}")
+foreach(required_file IN ITEMS
+        "${LLAMA_LIBRARY}" "${COMMON_LIBRARY}" "${GGML_LIBRARY}" "${GGML_BASE_LIBRARY}")
     if(NOT EXISTS "${required_file}")
         message(FATAL_ERROR "Required pinned shared library is missing: ${required_file}")
     endif()
@@ -65,6 +67,7 @@ target_link_libraries(llama-atlas-capture PRIVATE
     "${COMMON_LIBRARY}"
     "${LLAMA_LIBRARY}"
     "${GGML_LIBRARY}"
+    "${GGML_BASE_LIBRARY}"
 )
 set_target_properties(llama-atlas-capture PROPERTIES
     BUILD_RPATH "${LLAMA_BIN}"
