@@ -30,9 +30,11 @@ from model_atlas.evaluation.eval_lab import (
     EvalLabStatus,
     EvalParameters,
     FrozenHeldOutManifest,
+    HandoffBlocker,
     PerformanceReport,
     TaskScore,
     TeacherRelativeBlocker,
+    canonical_directory_sha256,
     eval_lab_output_layout,
 )
 from model_atlas.evaluation.heldout import (
@@ -79,6 +81,7 @@ __all__ = [
     "EndpointTransport",
     "EndpointConfigIdentity",
     "FrozenHeldOutManifest",
+    "HandoffBlocker",
     "EvalParameters",
     "EvalLabRequest",
     "TeacherRelativeBlocker",
@@ -90,4 +93,5 @@ __all__ = [
     "EvalLabHandoff",
     "EvalLabAdapter",
     "eval_lab_output_layout",
+    "canonical_directory_sha256",
 ]

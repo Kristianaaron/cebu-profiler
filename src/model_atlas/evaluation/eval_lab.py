@@ -11,11 +11,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
+import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic.networks import HttpUrl
 
 EVAL_LAB_REVISION = "5ee2f7cc33627b6259c0b10100d84932e676f36c"
 _SHA256 = r"^[0-9a-f]{64}$"
@@ -34,6 +37,24 @@ def _file_sha256(path: Path) -> str:
     with path.open("rb") as stream:
         while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def canonical_directory_sha256(root: Path) -> str:
+    """Hash regular file names and bytes in a symlink-free directory tree."""
+
+    if not root.is_absolute() or not root.is_dir() or root.is_symlink():
+        raise ValueError("hashed directory must be an absolute, non-symlink directory")
+    digest = hashlib.sha256()
+    entries = sorted(root.rglob("*"))
+    if any(path.is_symlink() for path in entries):
+        raise ValueError("hashed directory must not contain symlinks")
+    files = [path for path in entries if path.is_file()]
+    for path in files:
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(bytes.fromhex(_file_sha256(path)))
     return digest.hexdigest()
 
 
@@ -61,7 +82,16 @@ class EndpointConfigIdentity(_StrictFrozenModel):
 
     endpoint_id: str = Field(min_length=1)
     transport: EndpointTransport
+    endpoint_url: HttpUrl
     config_sha256: str = Field(pattern=_SHA256)
+
+    @model_validator(mode="after")
+    def _non_secret_url(self) -> EndpointConfigIdentity:
+        if self.endpoint_url.username or self.endpoint_url.password:
+            raise ValueError("endpoint URL must not contain credentials")
+        if self.endpoint_url.query or self.endpoint_url.fragment:
+            raise ValueError("endpoint URL must not contain query parameters or fragments")
+        return self
 
 
 class FrozenHeldOutManifest(_StrictFrozenModel):
@@ -105,7 +135,7 @@ class FrozenHeldOutManifest(_StrictFrozenModel):
 
 
 class EvalParameters(_StrictFrozenModel):
-    seed: int = Field(ge=0)
+    seed: int | None = Field(default=None, ge=0)
     temperature: float = Field(ge=0.0, le=2.0)
     max_tokens: int = Field(gt=0)
     timeout_seconds: float = Field(gt=0.0)
@@ -129,12 +159,26 @@ class EvalLabRequest(_StrictFrozenModel):
     held_out: FrozenHeldOutManifest
     tasks: list[str] = Field(min_length=1)
     parameters: EvalParameters
+    eval_lab_root: str = Field(min_length=1)
+    suite_ref: str = Field(min_length=1)
+    tasks_dir: str = Field(min_length=1)
+    runs_root: str = Field(min_length=1)
+    db_path: str = Field(min_length=1)
+    model_id: str = Field(min_length=1)
+    model_name: str = Field(min_length=1)
 
-    @field_validator("candidate_artifact_path")
+    @field_validator(
+        "candidate_artifact_path",
+        "eval_lab_root",
+        "suite_ref",
+        "tasks_dir",
+        "runs_root",
+        "db_path",
+    )
     @classmethod
-    def _absolute_candidate_path(cls, value: str) -> str:
+    def _absolute_paths(cls, value: str) -> str:
         if not Path(value).is_absolute():
-            raise ValueError("candidate_artifact_path must be absolute")
+            raise ValueError("Eval Lab request paths must be absolute")
         return value
 
     def identity_payload(self) -> dict[str, Any]:
@@ -254,12 +298,131 @@ class EvalLabResult(_StrictFrozenModel):
         return self
 
 
+class HandoffBlocker(StrEnum):
+    REQUEST_PARAMETERS_NOT_CLI_BOUND = "request_parameters_not_cli_bound"
+    TASK_PARTITION_NOT_HELD_OUT = "task_partition_not_held_out"
+
+
 class EvalLabHandoff(_StrictFrozenModel):
     request_id: str = Field(pattern=_SHA256)
     eval_lab_revision: Literal["5ee2f7cc33627b6259c0b10100d84932e676f36c"] = (
         "5ee2f7cc33627b6259c0b10100d84932e676f36c"
     )
+    executable: bool
+    blockers: list[HandoffBlocker] = Field(default_factory=list)
     argv: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def _execution_gate(self) -> EvalLabHandoff:
+        if self.executable and self.blockers:
+            raise ValueError("executable handoff cannot contain blockers")
+        if not self.executable and not self.blockers:
+            raise ValueError("non-executable handoff requires a typed blocker")
+        return self
+
+
+def _read_pinned_git_head(root: Path) -> str:
+    """Resolve a loose or packed Git HEAD without invoking Git."""
+
+    git_dir = root / ".git"
+    if git_dir.is_file():
+        marker = git_dir.read_text(encoding="utf-8").strip()
+        if not marker.startswith("gitdir: "):
+            raise ValueError("invalid Eval Lab .git indirection")
+        git_dir = (root / marker.removeprefix("gitdir: ")).resolve()
+    head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+    if not head.startswith("ref: "):
+        return head
+    ref = head.removeprefix("ref: ")
+    loose = git_dir / ref
+    if loose.is_file():
+        return loose.read_text(encoding="utf-8").strip()
+    packed = git_dir / "packed-refs"
+    if packed.is_file():
+        for line in packed.read_text(encoding="utf-8").splitlines():
+            if not line or line.startswith(("#", "^")):
+                continue
+            revision, name = line.split(" ", 1)
+            if name == ref:
+                return revision
+    raise ValueError("Eval Lab Git HEAD ref cannot be resolved")
+
+
+def _load_yaml_mapping(path: Path) -> Mapping[str, Any]:
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"expected YAML mapping: {path}")
+    return payload
+
+
+def _index_task_yaml(tasks_dir: Path) -> dict[str, Mapping[str, Any]]:
+    indexed: dict[str, Mapping[str, Any]] = {}
+    for path in sorted(tasks_dir.rglob("*.yaml")):
+        payload = _load_yaml_mapping(path)
+        task_id = payload.get("id")
+        if not isinstance(task_id, str):
+            continue
+        if task_id in indexed:
+            raise ValueError(f"duplicate Eval Lab task id: {task_id}")
+        indexed[task_id] = payload
+    return indexed
+
+
+def _validate_cli_effective_config(request: EvalLabRequest) -> list[HandoffBlocker]:
+    """Prove settings actually applied by pinned ``eval-lab run suite``."""
+
+    suite = _load_yaml_mapping(Path(request.suite_ref))
+    raw_refs = suite.get("tasks")
+    if not isinstance(raw_refs, list):
+        raise ValueError("Eval Lab suite tasks must be a list")
+    suite_tasks: list[str] = []
+    for raw_ref in raw_refs:
+        if not isinstance(raw_ref, Mapping) or not isinstance(raw_ref.get("task_id"), str):
+            raise ValueError("invalid task reference in Eval Lab suite")
+        repetitions = raw_ref.get("repetitions") or 1
+        if not isinstance(repetitions, int) or repetitions < 1:
+            raise ValueError("invalid Eval Lab suite task repetitions")
+        suite_tasks.extend([raw_ref["task_id"]] * repetitions)
+    if suite_tasks != request.tasks:
+        raise ValueError("request tasks do not exactly match pinned suite execution order")
+
+    indexed = _index_task_yaml(Path(request.tasks_dir))
+    selected: list[Mapping[str, Any]] = []
+    for task_id in request.tasks:
+        if task_id not in indexed:
+            raise ValueError(f"pinned suite task is absent from tasks_dir: {task_id}")
+        selected.append(indexed[task_id])
+
+    # The pinned CLI supplies no sampling/seed options. DirectRunner therefore
+    # applies temperature=0, max_tokens=4096, and seed=None. Timeout is read
+    # from each task's execution section and a request-wide value is truthful
+    # only when every selected task has the same value.
+    if request.parameters.seed is not None:
+        raise ValueError("pinned Eval Lab CLI cannot apply request seed")
+    if request.parameters.temperature != 0.0:
+        raise ValueError("pinned Eval Lab CLI applies temperature=0.0")
+    if request.parameters.max_tokens != 4096:
+        raise ValueError("pinned Eval Lab CLI applies max_tokens=4096")
+    timeouts: set[float] = set()
+    for task in selected:
+        execution = task.get("execution") or {}
+        if not isinstance(execution, Mapping):
+            raise ValueError("Eval Lab task execution config must be a mapping")
+        timeout = execution.get("timeout_seconds", 300)
+        if not isinstance(timeout, (int, float)):
+            raise ValueError("Eval Lab task timeout must be numeric")
+        timeouts.add(float(timeout))
+    if timeouts != {request.parameters.timeout_seconds}:
+        raise ValueError("request timeout does not match every pinned task timeout")
+
+    # Although pinned defaults can be checked, the CLI has no request-wide
+    # seed/sampling/timeout flags and DirectRunner does not enforce the task
+    # timeout around the endpoint call. Do not label this argv executable until
+    # Eval Lab exposes and binds the complete requested parameter contract.
+    blockers = [HandoffBlocker.REQUEST_PARAMETERS_NOT_CLI_BOUND]
+    if any(task.get("data_partition", "unset") != "held_out_evaluation" for task in selected):
+        blockers.append(HandoffBlocker.TASK_PARTITION_NOT_HELD_OUT)
+    return blockers
 
 
 class EvalLabAdapter:
@@ -273,26 +436,49 @@ class EvalLabAdapter:
     def emit_argv(
         self,
         request: EvalLabRequest,
-        *,
-        request_path: Path,
-        output_dir: Path,
     ) -> EvalLabHandoff:
-        if not request_path.is_absolute() or not output_dir.is_absolute():
-            raise ValueError("Eval Lab handoff paths must be absolute")
-        on_disk = EvalLabRequest.model_validate_json(request_path.read_text())
-        if on_disk.request_id != request.request_id:
-            raise ValueError("request file does not match the authorized request")
+        eval_lab_root = Path(request.eval_lab_root)
+        if _read_pinned_git_head(eval_lab_root) != EVAL_LAB_REVISION:
+            raise ValueError("Eval Lab Git HEAD does not match pinned revision")
+        suite_ref = Path(request.suite_ref)
+        tasks_dir = Path(request.tasks_dir)
+        root_resolved = eval_lab_root.resolve()
+        if suite_ref.resolve() != suite_ref or tasks_dir.resolve() != tasks_dir:
+            raise ValueError("Eval Lab input paths must not use symlinks")
+        if not suite_ref.is_relative_to(root_resolved) or not tasks_dir.is_relative_to(
+            root_resolved
+        ):
+            raise ValueError("Eval Lab suite/tasks must be inside the pinned checkout")
+        if _file_sha256(suite_ref) != request.held_out.task_suite_sha256:
+            raise ValueError("Eval Lab suite bytes do not match request hash")
+        if canonical_directory_sha256(tasks_dir) != request.held_out.task_definitions_sha256:
+            raise ValueError("Eval Lab tasks tree does not match request hash")
+        blockers = _validate_cli_effective_config(request)
         argv = (
             self._executable,
             "run",
-            "--request",
-            str(request_path),
-            "--output-dir",
-            str(output_dir),
-            "--revision",
-            EVAL_LAB_REVISION,
+            "suite",
+            request.suite_ref,
+            "--model",
+            request.model_id,
+            "--endpoint",
+            str(request.endpoint.endpoint_url),
+            "--model-name",
+            request.model_name,
+            "--tasks-dir",
+            request.tasks_dir,
+            "--runs-root",
+            request.runs_root,
+            "--db",
+            request.db_path,
+            "--json",
         )
-        return EvalLabHandoff(request_id=request.request_id, argv=argv)  # type: ignore[arg-type]
+        return EvalLabHandoff(
+            request_id=request.request_id,  # type: ignore[arg-type]
+            executable=not blockers,
+            blockers=blockers,
+            argv=argv,
+        )
 
     def validate_result(
         self, request: EvalLabRequest, *, result_path: Path

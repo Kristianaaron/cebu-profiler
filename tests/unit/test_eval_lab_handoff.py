@@ -17,9 +17,11 @@ from model_atlas.evaluation.eval_lab import (
     EvalLabStatus,
     EvalParameters,
     FrozenHeldOutManifest,
+    HandoffBlocker,
     PerformanceReport,
     TaskScore,
     TeacherRelativeBlocker,
+    canonical_directory_sha256,
     eval_lab_output_layout,
 )
 
@@ -54,13 +56,21 @@ def _request(**changes: object) -> EvalLabRequest:
         "endpoint": EndpointConfigIdentity(
             endpoint_id="spark-pair-candidate",
             transport=EndpointTransport.OPENAI_COMPATIBLE,
+            endpoint_url="http://127.0.0.1:8100/v1",
             config_sha256=SHA_B,
         ),
         "held_out": _heldout(),
         "tasks": ["arc_easy", "gsm8k"],
         "parameters": EvalParameters(
-            seed=17, temperature=0.0, max_tokens=512, timeout_seconds=120.0
+            seed=None, temperature=0.0, max_tokens=4096, timeout_seconds=300.0
         ),
+        "eval_lab_root": "/opt/eval-lab",
+        "suite_ref": "/opt/eval-lab/configs/suites/atlas.yaml",
+        "tasks_dir": "/opt/eval-lab/tasks",
+        "runs_root": "/var/lib/eval-lab/runs",
+        "db_path": "/var/lib/eval-lab/runstore.db",
+        "model_id": "glm52-atlas-candidate",
+        "model_name": "glm-5.2",
     }
     payload.update(changes)
     return EvalLabRequest.model_validate(payload)
@@ -98,7 +108,7 @@ def test_request_and_manifest_ids_are_stable_and_timestamp_free() -> None:
     assert "timestamp" not in first.model_dump(mode="json")
     drifted = _request(
         parameters=EvalParameters(
-            seed=18, temperature=0.0, max_tokens=512, timeout_seconds=120.0
+            seed=18, temperature=0.0, max_tokens=4096, timeout_seconds=300.0
         )
     )
     assert drifted.request_id != first.request_id
@@ -163,25 +173,72 @@ def test_candidate_report_requires_explicit_teacher_blockers() -> None:
         CandidateTaskReport.model_validate(payload)
 
 
-def test_adapter_emits_only_pinned_argv_and_validates_result(tmp_path: Path) -> None:
-    request = _request()
+def _pinned_checkout(tmp_path: Path, *, held_out: bool = True) -> EvalLabRequest:
+    root = (tmp_path / "eval-lab").resolve()
+    suite = root / "configs" / "suites" / "atlas.yaml"
+    tasks = root / "tasks"
+    git_dir = root / ".git"
+    (git_dir / "refs" / "heads").mkdir(parents=True)
+    (git_dir / "HEAD").write_text("ref: refs/heads/main\n")
+    (git_dir / "refs" / "heads" / "main").write_text(f"{EVAL_LAB_REVISION}\n")
+    suite.parent.mkdir(parents=True)
+    suite.write_text(
+        "tasks:\n"
+        "  - task_id: arc_easy\n"
+        "  - task_id: gsm8k\n"
+    )
+    partition = "held_out_evaluation" if held_out else "unset"
+    for name in ("arc_easy", "gsm8k"):
+        task_dir = tasks / name
+        task_dir.mkdir(parents=True)
+        (task_dir / "task.yaml").write_text(
+            f"id: {name}\n"
+            f"data_partition: {partition}\n"
+            "execution:\n"
+            "  timeout_seconds: 300\n"
+        )
+    heldout_manifest = _heldout(
+        task_suite_sha256=hashlib.sha256(suite.read_bytes()).hexdigest(),
+        task_definitions_sha256=canonical_directory_sha256(tasks),
+    )
+    return _request(
+        held_out=heldout_manifest,
+        eval_lab_root=str(root),
+        suite_ref=str(suite),
+        tasks_dir=str(tasks),
+        runs_root=str((tmp_path / "runs").resolve()),
+        db_path=str((tmp_path / "runstore.db").resolve()),
+    )
+
+
+def test_adapter_emits_exact_pinned_cli_argv_and_validates_result(tmp_path: Path) -> None:
+    request = _pinned_checkout(tmp_path)
     layout = eval_lab_output_layout(tmp_path.resolve(), request.request_id)
     layout["root"].mkdir(parents=True)
     _write_json(layout["request"], request)
 
-    handoff = EvalLabAdapter("/opt/eval-lab/bin/eval-lab").emit_argv(
-        request, request_path=layout["request"], output_dir=layout["root"]
-    )
+    handoff = EvalLabAdapter("/opt/eval-lab/bin/eval-lab").emit_argv(request)
     assert handoff.eval_lab_revision == EVAL_LAB_REVISION
+    assert handoff.executable is False
+    assert handoff.blockers == [HandoffBlocker.REQUEST_PARAMETERS_NOT_CLI_BOUND]
     assert handoff.argv == (
         "/opt/eval-lab/bin/eval-lab",
         "run",
-        "--request",
-        str(layout["request"]),
-        "--output-dir",
-        str(layout["root"]),
-        "--revision",
-        EVAL_LAB_REVISION,
+        "suite",
+        request.suite_ref,
+        "--model",
+        "glm52-atlas-candidate",
+        "--endpoint",
+        "http://127.0.0.1:8100/v1",
+        "--model-name",
+        "glm-5.2",
+        "--tasks-dir",
+        request.tasks_dir,
+        "--runs-root",
+        request.runs_root,
+        "--db",
+        request.db_path,
+        "--json",
     )
 
     report = _report(request)
@@ -199,6 +256,37 @@ def test_adapter_emits_only_pinned_argv_and_validates_result(tmp_path: Path) -> 
     )
     assert validated.result_digest == result.result_digest
     assert validated_report == report
+
+
+def test_handoff_fails_closed_on_cli_parameter_or_config_mismatch(tmp_path: Path) -> None:
+    request = _pinned_checkout(tmp_path)
+    bad_parameters = request.model_dump(mode="json")
+    bad_parameters["request_id"] = None
+    bad_parameters["parameters"]["temperature"] = 0.7
+    with pytest.raises(ValueError, match="temperature=0.0"):
+        EvalLabAdapter().emit_argv(EvalLabRequest.model_validate(bad_parameters))
+
+    bad_hash = request.model_dump(mode="json")
+    bad_hash["request_id"] = None
+    bad_hash["held_out"]["manifest_id"] = None
+    bad_hash["held_out"]["task_definitions_sha256"] = SHA_A
+    with pytest.raises(ValueError, match="tasks tree"):
+        EvalLabAdapter().emit_argv(EvalLabRequest.model_validate(bad_hash))
+
+
+def test_handoff_blocks_unproven_task_partition_and_wrong_git_head(tmp_path: Path) -> None:
+    request = _pinned_checkout(tmp_path, held_out=False)
+    handoff = EvalLabAdapter().emit_argv(request)
+    assert handoff.executable is False
+    assert handoff.blockers == [
+        HandoffBlocker.REQUEST_PARAMETERS_NOT_CLI_BOUND,
+        HandoffBlocker.TASK_PARTITION_NOT_HELD_OUT,
+    ]
+
+    head = Path(request.eval_lab_root) / ".git" / "refs" / "heads" / "main"
+    head.write_text(f"{'e' * 40}\n")
+    with pytest.raises(ValueError, match="Git HEAD"):
+        EvalLabAdapter().emit_argv(request)
 
 
 def test_forged_result_or_report_digest_is_rejected(tmp_path: Path) -> None:
@@ -227,6 +315,7 @@ def test_contract_has_no_secret_or_api_key_fields() -> None:
     endpoint = {
         "endpoint_id": "candidate",
         "transport": "openai_compatible",
+        "endpoint_url": "http://127.0.0.1:8100/v1",
         "config_sha256": SHA_A,
         "api_key": "must-not-cross-contract",
     }
@@ -235,3 +324,17 @@ def test_contract_has_no_secret_or_api_key_fields() -> None:
     serialized = json.dumps(_request().model_dump(mode="json"))
     assert "api_key" not in serialized
     assert "secret" not in serialized
+
+
+def test_endpoint_url_rejects_embedded_credentials_or_query_secret() -> None:
+    for endpoint_url in (
+        "http://user:password@127.0.0.1:8100/v1",
+        "http://127.0.0.1:8100/v1?api_key=secret",
+    ):
+        with pytest.raises(ValidationError):
+            EndpointConfigIdentity(
+                endpoint_id="candidate",
+                transport=EndpointTransport.OPENAI_COMPATIBLE,
+                endpoint_url=endpoint_url,
+                config_sha256=SHA_A,
+            )
