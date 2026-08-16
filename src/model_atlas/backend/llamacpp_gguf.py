@@ -23,6 +23,7 @@ BACKEND_ID = "llamacpp_gguf_mixed"
 PINNED_COMMIT = "4df29be4f4c3673f428170fda944a5b19f743bb8"
 DEFAULT_TOOLCHAIN_ROOT = Path("/home/kristianaaron/tmp/atlas-toolchains/llama.cpp")
 DEFAULT_PYTHON = Path("/home/kristianaaron/ai-lab/venvs/vllm/bin/python")
+CPU_QUANTIZER_RELATIVE_PATH = Path("build-atlas-cpu/bin/llama-quantize")
 GENERIC_EXPERT_RULE = r"blk\..*\.ffn_(gate|up|down)_exps\.weight=Q1_0"
 _SENSITIVE_RULES = (
     re.compile(r"blk\\\.[0-9]+\\\.ffn_(gate|up|down)_exps\\\.weight=NVFP4"),
@@ -87,7 +88,7 @@ def probe_llamacpp_gguf(
     root = Path(toolchain_root).resolve()
     python = Path(python_executable)
     converter = root / "convert_hf_to_gguf.py"
-    quantizer = root / "build-atlas/bin/llama-quantize"
+    quantizer = root / CPU_QUANTIZER_RELATIVE_PATH
     commit = _git_head(root)
     converter_sha = _sha256_file(converter) if converter.is_file() else ""
     quantizer_sha = _sha256_file(quantizer) if quantizer.is_file() else ""
@@ -106,6 +107,10 @@ def probe_llamacpp_gguf(
         "converter_sha256": converter_sha,
         "quantizer": str(quantizer),
         "quantizer_sha256": quantizer_sha,
+        "quantizer_build_contract": {
+            "GGML_CUDA": False,
+            "GGML_RPC": False,
+        },
         "python": str(python),
         "python_resolved": str(python.resolve()),
         "probe_executed_binaries": False,

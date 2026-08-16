@@ -8,6 +8,7 @@ import pytest
 
 from model_atlas.backend.contract import BackendUnavailable
 from model_atlas.backend.llamacpp_gguf import (
+    CPU_QUANTIZER_RELATIVE_PATH,
     GENERIC_EXPERT_RULE,
     PINNED_COMMIT,
     LlamaCppGgufMixedAdapter,
@@ -57,7 +58,7 @@ def _fake_toolchain(tmp_path: Path, *, commit: str = PINNED_COMMIT) -> tuple[Pat
     (root / ".git").mkdir(parents=True)
     (root / ".git/HEAD").write_text(commit, encoding="utf-8")
     (root / "convert_hf_to_gguf.py").write_text("# fake converter\n", encoding="utf-8")
-    quantizer = root / "build-atlas/bin/llama-quantize"
+    quantizer = root / CPU_QUANTIZER_RELATIVE_PATH
     quantizer.parent.mkdir(parents=True)
     quantizer.write_text("#!/bin/sh\n", encoding="utf-8")
     quantizer.chmod(0o755)
@@ -119,6 +120,13 @@ def test_probe_is_filesystem_only_and_rejects_wrong_commit(tmp_path: Path) -> No
     assert evidence["probe_executed_binaries"] is False
     assert evidence["converter_sha256"]
     assert evidence["quantizer_sha256"]
+    assert evidence["quantizer"] == str(
+        (root / "build-atlas-cpu/bin/llama-quantize").resolve()
+    )
+    assert evidence["quantizer_build_contract"] == {
+        "GGML_CUDA": False,
+        "GGML_RPC": False,
+    }
     assert evidence["commit"] == "0" * 40
     record = build_llamacpp_gguf_record(toolchain_root=root, python_executable=python)
     registry = BackendRegistry({record.backend_id: record})

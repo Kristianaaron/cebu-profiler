@@ -4,12 +4,16 @@
     "repository": "https://github.com/ggml-org/llama.cpp.git",
     "commit": "4df29be4f4c3673f428170fda944a5b19f743bb8"
   },
-  "build_contract": {
+  "runtime_build_contract": {
     "CMAKE_CUDA_ARCHITECTURES": "121",
     "GGML_CUDA": true,
     "GGML_CUDA_FA_ALL_QUANTS": true,
     "GGML_CUDA_GRAPHS": true,
     "GGML_RPC": true
+  },
+  "conversion_quantizer_build_contract": {
+    "GGML_CUDA": false,
+    "GGML_RPC": false
   },
   "head": {
     "host": "spark-head",
@@ -19,8 +23,8 @@
       "sha256": "e38975e1c68d98ac1664dfd530616eb35c72294382a4dd873d4746b23f27779f"
     },
     "llama_quantize": {
-      "path": "/home/kristianaaron/tmp/atlas-toolchains/llama.cpp/build-atlas/bin/llama-quantize",
-      "sha256": "6098de078672bdad5353dea83566aa79f1f107d9f2871e5e18a802faf9226dc6"
+      "path": "/home/kristianaaron/tmp/atlas-toolchains/llama.cpp/build-atlas-cpu/bin/llama-quantize",
+      "sha256": "536a0cd9cafe3172d638ca6eb29402661d05c2d8954631ef2f6f0fac6fb78e48"
     },
     "llama_server": {
       "path": "/home/kristianaaron/tmp/atlas-toolchains/llama.cpp/build-atlas/bin/llama-server",
