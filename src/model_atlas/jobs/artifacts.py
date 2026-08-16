@@ -271,6 +271,53 @@ def source_manifest_digest(manifest: dict[str, object]) -> str:
     return sha256_hex(canonical_json(payload))
 
 
+def source_stat_manifest(source_path: str) -> dict[str, object]:
+    """Cheap recursive path/size/mtime identity for stage-boundary checks.
+
+    Full content hashes remain mandatory at run/resume start and final
+    promotion.  This manifest prevents rereading a multi-hundred-GB immutable
+    checkpoint at every intermediate stage while still detecting ordinary
+    replacement, truncation, addition, removal, and in-place writes.
+    """
+    path = Path(source_path)
+    if not path.exists():
+        return {"type": "missing", "file_stats": {}}
+    if path.is_file():
+        stat = path.stat()
+        return {
+            "type": "file",
+            "file_stats": {
+                "__source__": {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+            },
+        }
+    stats: dict[str, object] = {}
+    for child in sorted(path.rglob("*")):
+        if child.is_file():
+            stat = child.stat()
+            stats[str(child.relative_to(path))] = {
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+            }
+    return {"type": "dir", "file_stats": stats}
+
+
+def assert_source_stats_unchanged(
+    source_snapshot_before: dict[str, object], source_path: str
+) -> None:
+    """Fail closed when cheap stage-boundary source identity changes."""
+    expected = {
+        "type": source_snapshot_before.get("type"),
+        "file_stats": source_snapshot_before.get("file_stats", {}),
+    }
+    current = source_stat_manifest(source_path)
+    if current != expected:
+        raise SourceIntegrityError(
+            f"source {source_path} path/size/mtime changed during run"
+        )
+    if current.get("type") == "missing":
+        raise SourceIntegrityError(f"source {source_path} is missing")
+
+
 def assert_source_readonly(source_snapshot_before: dict[str, object], source_path: str) -> None:
     """Fail closed (SourceIntegrityError) if a source changed underneath a run
     (immutable_source=true) or is missing."""

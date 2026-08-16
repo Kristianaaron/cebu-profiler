@@ -28,6 +28,7 @@ from model_atlas.jobs.artifacts import (
     StageStager,
     acquire_file_lock,
     assert_source_readonly,
+    assert_source_stats_unchanged,
     release_file_lock,
     source_snapshot,
 )
@@ -949,6 +950,88 @@ def test_source_immutability_detects_change(tmp_path: Path):
     (src / "tensor.bin").write_bytes(b"weights-v2-TAMPERED")
     with pytest.raises(RuntimeError, match="changed"):
         engine_check()
+
+
+def test_source_stat_boundary_detects_change_without_content_hash(tmp_path: Path):
+    src = tmp_path / "src_dir"
+    src.mkdir()
+    tensor = src / "tensor.bin"
+    tensor.write_bytes(b"weights-v1")
+    snap = source_snapshot(str(src))
+    assert_source_stats_unchanged(snap, str(src))
+
+    tensor.write_bytes(b"weights-v2-TAMPERED")
+    with pytest.raises(RuntimeError, match="path/size/mtime changed"):
+        assert_source_stats_unchanged(snap, str(src))
+
+
+def test_engine_hashes_source_once_after_initial_snapshot(
+    compiler: RecipeCompiler, tmp_path: Path, monkeypatch
+):
+    """Stage boundaries use stats; successful finalization does one full hash."""
+    import model_atlas.jobs.engine as engine_module
+
+    src = tmp_path / "model"
+    src.mkdir()
+    (src / "w.bin").write_bytes(b"v1")
+    recipe = CompressionRecipe(
+        name="bounded-source-io",
+        source=_canonical_source(str(src)),
+        calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
+        stages=[_stage("s1", produces=["manifest.json"])],
+    )
+    compiled = compiler.compile(recipe)
+    real_manifest = engine_module.source_manifest
+    real_stats = engine_module.assert_source_stats_unchanged
+    full_calls = 0
+    stat_calls = 0
+
+    def counted_manifest(path: str):
+        nonlocal full_calls
+        full_calls += 1
+        return real_manifest(path)
+
+    def counted_stats(snapshot: dict[str, object], path: str):
+        nonlocal stat_calls
+        stat_calls += 1
+        return real_stats(snapshot, path)
+
+    monkeypatch.setattr(engine_module, "source_manifest", counted_manifest)
+    monkeypatch.setattr(engine_module, "assert_source_stats_unchanged", counted_stats)
+    job = JobEngine(compiled, build_default_registry(), tmp_path / "runs").run(inputs={})
+
+    assert job.status is JobStatus.COMPLETED
+    assert full_calls == 1
+    assert stat_calls == 2
+
+
+def test_engine_source_guard_cannot_be_disabled(
+    compiler: RecipeCompiler, tmp_path: Path
+):
+    src = tmp_path / "model"
+    src.mkdir()
+    (src / "w.bin").write_bytes(b"v1")
+    recipe = CompressionRecipe(
+        name="source-guard-required",
+        source=_canonical_source(str(src)),
+        calibration=CalibrationIdentity(calibration_id="c", corpus_name="corp"),
+        constraints=RecipeConstraints(immutable_source=False),
+        stages=[_stage("s1", produces=["manifest.json"])],
+    )
+    compiled = compiler.compile(recipe)
+    registry = build_default_registry()
+
+    def mutating_stage(context, handle):
+        (src / "w.bin").write_bytes(b"mutated")
+        return {"ok": True}
+
+    registry.adapter_for("atlas_quant_probe").execute = mutating_stage  # type: ignore[method-assign]
+    engine = JobEngine(compiled, registry, tmp_path / "runs")
+    job = engine.run(inputs={})
+
+    assert job.status is JobStatus.FAILED_TERMINAL
+    assert job.stage("s1").outputs == []
+    assert not any(event["event"] == "stage.output" for event in engine.journal.read())
 
 
 def test_engine_enforces_immutable_source(compiler: RecipeCompiler, tmp_path: Path, monkeypatch):

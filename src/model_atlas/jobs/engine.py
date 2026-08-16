@@ -38,7 +38,7 @@ from model_atlas.jobs.artifacts import (
     SourceIntegrityError,
     StageStager,
     acquire_file_lock,
-    assert_source_readonly,
+    assert_source_stats_unchanged,
     atomic_write_json,
     atomic_write_text,
     release_file_lock,
@@ -187,6 +187,7 @@ class JobEngine:
         self.job_path = self.run_dir / "job.json"
         self.manifest_path = self.run_dir / "manifest.json"
         self.repro_path = self.run_dir / "reproduce.sh"
+        self._source_full_verified = False
 
     # ------------------------------------------------------------- run dir
     def _bind_run(self, inputs: dict[str, object]) -> None:
@@ -201,6 +202,7 @@ class JobEngine:
         self.job_path = self.run_dir / "job.json"
         self.manifest_path = self.run_dir / "manifest.json"
         self.repro_path = self.run_dir / "reproduce.sh"
+        self._source_full_verified = False
 
     def _init_run_dir(self, inputs: dict[str, object]) -> Job:
         self._bind_run(inputs)
@@ -211,6 +213,7 @@ class JobEngine:
             snap: dict[str, object] = {"type": "missing"}
         else:
             snap = source_snapshot(src)
+            self._source_full_verified = True
         job = Job(
             run_id=self.compiled.run_id(inputs),
             recipe_id=self.compiled.recipe_id,
@@ -454,6 +457,9 @@ class JobEngine:
         }:
             self.journal.append({"event": "resume.refused", "status": job.status.value})
             return job
+        if not self._source_full_verified:
+            self._assert_source_immutable(job, full=True)
+            self._source_full_verified = True
         job.status = JobStatus.RUNNING
         job.failed_stage = None
         job.error = ""
@@ -474,7 +480,7 @@ class JobEngine:
                 stage.exit_code = None
                 stage.finished_at = None
                 self.journal.append({"event": "stage.retry", "stage": stage_id})
-            self._assert_source_immutable(job)
+            self._assert_source_immutable(job, full=False)
             self._execute_stage(job, stage_id, inputs)
             if stage.status is StageStatus.FAILED:
                 job.failed_stage = stage_id
@@ -502,7 +508,7 @@ class JobEngine:
             job.status = JobStatus.COMPLETED
         else:
             job.status = JobStatus.COMPLETED_WITH_WARNINGS
-        self._assert_source_immutable(job)
+        self._assert_source_immutable(job, full=True)
         self._write_manifest(job)
         # write-ahead: completed event before final snapshot
         self.journal.append({"event": "run.completed", "status": job.status.value})
@@ -517,7 +523,7 @@ class JobEngine:
             }
         )
 
-    def _assert_source_immutable(self, job: Job) -> None:
+    def _assert_source_immutable(self, job: Job, *, full: bool) -> None:
         """Verify source integrity (snapshot equality + declared path-bound
         hashes or canonical manifest digest + whole manifest digest). Any
         mismatch raises SourceIntegrityError — the run boundary catches it and
@@ -526,12 +532,22 @@ class JobEngine:
         if not src:
             return
         try:
-            # (1) stat+hash manifest equality against the run-start snapshot
-            if self.compiled.recipe.constraints.immutable_source:
-                assert_source_readonly(job.source_snapshot, src)
+            if not full:
+                # Executable jobs never permit a backend to mutate its source.
+                # ``immutable_source`` is descriptive recipe metadata, not a
+                # switch that may weaken the engine's pre-publish boundary.
+                assert_source_stats_unchanged(job.source_snapshot, src)
+                return
+            # Full content equality against the run-start snapshot. Compute the
+            # recursive manifest ONCE; the former assert_source_readonly +
+            # source_manifest sequence hashed every file twice per boundary.
             m = source_manifest(src)
             if m.get("type") == "missing":
                 raise SourceIntegrityError("source is missing (cannot verify integrity)")
+            if m != job.source_snapshot:
+                raise SourceIntegrityError(
+                    f"source {src} changed during run (immutable_source violated)"
+                )
             raw_files_obj = m.get("files", {})
             raw_files: dict[str, object] = raw_files_obj if isinstance(raw_files_obj, dict) else {}
             files: dict[str, str] = {
@@ -714,7 +730,7 @@ class JobEngine:
 
             # ══ pre-publish ordering ══
             # (1) source integrity check happens BEFORE any CAS publication
-            self._assert_source_immutable(job)
+            self._assert_source_immutable(job, full=False)
             # (2) every required gate kind runs against STAGING (all kinds:
             #     validator, eq_control, identity_control, integrity/format), and
             #     unknown/unwired kinds are rejected.
