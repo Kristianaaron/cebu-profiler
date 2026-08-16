@@ -33,6 +33,16 @@ class SourceProfileError(RuntimeError):
     """A source identity or profile evidence invariant was not satisfied."""
 
 
+def _advise_sequential(descriptor: int) -> None:
+    if hasattr(os, "posix_fadvise") and hasattr(os, "POSIX_FADV_SEQUENTIAL"):
+        os.posix_fadvise(descriptor, 0, 0, os.POSIX_FADV_SEQUENTIAL)
+
+
+def _drop_clean_cache(descriptor: int, offset: int, length: int) -> None:
+    if hasattr(os, "posix_fadvise") and hasattr(os, "POSIX_FADV_DONTNEED"):
+        os.posix_fadvise(descriptor, offset, length, os.POSIX_FADV_DONTNEED)
+
+
 @dataclass(frozen=True)
 class ManifestBuildResult:
     """Result of a completed resumable directory-manifest build."""
@@ -244,9 +254,13 @@ def _hash_checked_file(
                 f"source changed or became non-regular before hashing: {relative}"
             )
         digest = hashlib.sha256()
+        _advise_sequential(descriptor)
+        offset = 0
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
             while chunk := stream.read(_HASH_CHUNK_BYTES):
                 digest.update(chunk)
+                _drop_clean_cache(descriptor, offset, len(chunk))
+                offset += len(chunk)
         after = os.fstat(descriptor)
         if not _is_same_stat(expected, after):
             raise SourceProfileError(f"source changed while hashing: {relative}")
@@ -297,6 +311,9 @@ def _checkpoint_key(path: Path) -> bytes:
                 raise SourceProfileError(
                     "manifest checkpoint key has invalid length"
                 ) from None
+            key_stat_after = os.fstat(existing_descriptor)
+            if _reuse_stat_record(key_stat) != _reuse_stat_record(key_stat_after):
+                raise SourceProfileError("manifest checkpoint key changed while read")
             return payload
         finally:
             os.close(existing_descriptor)
@@ -518,8 +535,12 @@ def _sha256_file(path: Path) -> str:
         if not stat.S_ISREG(before.st_mode):
             raise SourceProfileError(f"expected regular file: {path}")
         digest = hashlib.sha256()
+        _advise_sequential(descriptor)
+        offset = 0
         while chunk := os.read(descriptor, _HASH_CHUNK_BYTES):
             digest.update(chunk)
+            _drop_clean_cache(descriptor, offset, len(chunk))
+            offset += len(chunk)
         after = os.fstat(descriptor)
         if _reuse_stat_record(before) != _reuse_stat_record(after):
             raise SourceProfileError(f"file changed while hashing: {path}")
