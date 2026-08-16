@@ -10,8 +10,10 @@ authoritative :func:`source_manifest_digest` helper.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
+import secrets
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -19,8 +21,10 @@ from pathlib import Path
 from typing import Any
 
 from model_atlas.jobs.artifacts import source_manifest_digest
+from model_atlas.recipes.builtin import GLM52_GGUF_TENSOR_PLAN_SHA256
 
 _HASH_CHUNK_BYTES = 4 * 1024 * 1024
+_MAX_METADATA_BYTES = 4 * 1024 * 1024
 _SHA256_HEX_LENGTH = 64
 _GLM52_SOURCE_ID = "nvidia/GLM-5.2-NVFP4"
 
@@ -41,13 +45,20 @@ class ManifestBuildResult:
 
 def _atomic_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
+    temporary = path.with_name(path.name + ".tmp-" + secrets.token_hex(8))
     payload = json.dumps(value, indent=2, sort_keys=True) + "\n"
-    with temporary.open("w", encoding="utf-8") as stream:
-        stream.write(payload)
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temporary, path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=False) as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        os.close(descriptor)
+        if temporary.exists():
+            temporary.unlink()
 
 
 def _is_sha256(value: object) -> bool:
@@ -62,8 +73,49 @@ def _stat_record(st: os.stat_result) -> dict[str, int]:
     return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
 
 
+def _reuse_stat_record(st: os.stat_result) -> dict[str, int]:
+    return {
+        **_stat_record(st),
+        "ctime_ns": st.st_ctime_ns,
+        "device": st.st_dev,
+        "inode": st.st_ino,
+    }
+
+
 def _is_same_stat(expected: Mapping[str, object], actual: os.stat_result) -> bool:
-    return expected == _stat_record(actual)
+    return expected == _reuse_stat_record(actual)
+
+
+def _read_bounded_regular(path: Path, description: str) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise SourceProfileError(f"cannot safely open {description} {path}: {exc}") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise SourceProfileError(f"{description} must be a regular file: {path}")
+        payload = b""
+        while len(payload) <= _MAX_METADATA_BYTES:
+            chunk = os.read(descriptor, min(64 * 1024, _MAX_METADATA_BYTES + 1 - len(payload)))
+            if not chunk:
+                break
+            payload += chunk
+        if len(payload) > _MAX_METADATA_BYTES:
+            raise SourceProfileError(f"{description} exceeds metadata size bound")
+        after = os.fstat(descriptor)
+        if _reuse_stat_record(before) != _reuse_stat_record(after):
+            raise SourceProfileError(f"{description} changed while being read")
+        return payload
+    finally:
+        os.close(descriptor)
+
+
+def _outside_source(root: Path, candidate: Path, description: str) -> None:
+    resolved = candidate.resolve(strict=False)
+    if resolved == root or root in resolved.parents:
+        raise SourceProfileError(f"{description} must be outside the source tree")
 
 
 def _safe_source_root(source_path: Path) -> Path:
@@ -103,7 +155,7 @@ def _enumerate_regular_files(root: Path) -> dict[str, dict[str, int]]:
             relative_text = relative.as_posix()
             if relative_text.startswith("../") or relative_text == "..":
                 raise SourceProfileError(f"source path escape: {relative_text}")
-            files[relative_text] = _stat_record(entry_stat)
+            files[relative_text] = _reuse_stat_record(entry_stat)
 
     visit(root, Path())
     return files
@@ -136,25 +188,66 @@ def _load_checkpoint(path: Path) -> dict[str, object]:
     if not path.exists():
         return {}
     try:
-        value: object = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        value: object = json.loads(_read_bounded_regular(path, "manifest checkpoint"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SourceProfileError(f"invalid manifest checkpoint {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise SourceProfileError(f"manifest checkpoint must be an object: {path}")
     return value
 
 
+def _checkpoint_key(path: Path) -> bytes:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        key_stat = path.lstat()
+        if not stat.S_ISREG(key_stat.st_mode) or key_stat.st_mode & 0o077:
+            raise SourceProfileError(
+                "manifest checkpoint key must be private mode 0600"
+            ) from None
+        payload = _read_bounded_regular(path, "manifest checkpoint key")
+        if len(payload) != 32:
+            raise SourceProfileError("manifest checkpoint key has invalid length") from None
+        return payload
+    except OSError as exc:
+        raise SourceProfileError(f"cannot create manifest checkpoint key: {exc}") from exc
+    payload = secrets.token_bytes(32)
+    try:
+        os.write(descriptor, payload)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return payload
+
+
+def _checkpoint_mac(payload: Mapping[str, object], key: bytes) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hmac.new(key, encoded, hashlib.sha256).hexdigest()
+
+
 def _checkpoint_payload(
-    *, root: Path, manifest: dict[str, object], complete: bool, digest: str | None
+    *,
+    root: Path,
+    root_identity: Mapping[str, int],
+    manifest: dict[str, object],
+    reuse_stats: Mapping[str, Mapping[str, int]],
+    complete: bool,
+    digest: str | None,
+    key: bytes,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "source_root": str(root),
+        "root_identity": dict(root_identity),
         "complete": complete,
         "manifest": manifest,
+        "reuse_stats": dict(reuse_stats),
     }
     if digest is not None:
         payload["manifest_digest"] = digest
+    payload["hmac_sha256"] = _checkpoint_mac(payload, key)
     return payload
 
 
@@ -163,6 +256,7 @@ def build_resumable_source_manifest(
     *,
     checkpoint_path: str | Path,
     output_path: str | Path,
+    checkpoint_key_path: str | Path | None = None,
 ) -> ManifestBuildResult:
     """Build a resumable, path-bound directory manifest.
 
@@ -173,33 +267,80 @@ def build_resumable_source_manifest(
     root = _safe_source_root(Path(source_path))
     checkpoint = Path(checkpoint_path)
     output = Path(output_path)
+    key_path = (
+        Path(checkpoint_key_path)
+        if checkpoint_key_path is not None
+        else checkpoint.with_name(checkpoint.name + ".key")
+    )
+    for candidate, description in (
+        (checkpoint, "checkpoint"),
+        (key_path, "checkpoint key"),
+        (output, "manifest output"),
+    ):
+        _outside_source(root, candidate, description)
+    key = _checkpoint_key(key_path)
+    root_stat = root.stat()
+    root_identity = {"device": root_stat.st_dev, "inode": root_stat.st_ino}
     current_stats = _enumerate_regular_files(root)
     previous = _load_checkpoint(checkpoint)
-    previous_root = previous.get("source_root")
-    if previous_root is not None and previous_root != str(root):
-        raise SourceProfileError("manifest checkpoint belongs to a different source root")
+    if previous:
+        supplied_mac = previous.pop("hmac_sha256", None)
+        if (
+            previous.get("schema_version") != 2
+            or previous.get("source_root") != str(root)
+            or previous.get("root_identity") != root_identity
+            or not isinstance(supplied_mac, str)
+            or not hmac.compare_digest(supplied_mac, _checkpoint_mac(previous, key))
+        ):
+            raise SourceProfileError("manifest checkpoint authentication failed")
     old_manifest = previous.get("manifest", {})
     if not isinstance(old_manifest, dict):
         raise SourceProfileError("manifest checkpoint has non-object manifest")
     old_files = old_manifest.get("files", {})
     old_stats = old_manifest.get("file_stats", {})
-    if not isinstance(old_files, dict) or not isinstance(old_stats, dict):
+    old_reuse_stats = previous.get("reuse_stats", {})
+    if (
+        not isinstance(old_files, dict)
+        or not isinstance(old_stats, dict)
+        or not isinstance(old_reuse_stats, dict)
+    ):
         raise SourceProfileError("manifest checkpoint files/file_stats must be objects")
+    if previous.get("complete") is True and previous.get(
+        "manifest_digest"
+    ) != source_manifest_digest(old_manifest):
+        raise SourceProfileError("completed manifest checkpoint digest mismatch")
 
     files: dict[str, str] = {}
     file_stats: dict[str, dict[str, int]] = {}
     for relative, record in current_stats.items():
         old_digest = old_files.get(relative)
         old_record = old_stats.get(relative)
-        if isinstance(old_digest, str) and _is_sha256(old_digest) and old_record == record:
+        old_reuse_record = old_reuse_stats.get(relative)
+        if (
+            isinstance(old_digest, str)
+            and _is_sha256(old_digest)
+            and old_record == {"size": record["size"], "mtime_ns": record["mtime_ns"]}
+            and old_reuse_record == record
+        ):
             files[relative] = old_digest
-            file_stats[relative] = record
+            file_stats[relative] = {
+                "size": record["size"],
+                "mtime_ns": record["mtime_ns"],
+            }
 
     manifest: dict[str, object] = {"type": "dir", "files": files, "file_stats": file_stats}
     # Persist stale-entry removal before any potentially long hashing work.
     _atomic_json(
         checkpoint,
-        _checkpoint_payload(root=root, manifest=manifest, complete=False, digest=None),
+        _checkpoint_payload(
+            root=root,
+            root_identity=root_identity,
+            manifest=manifest,
+            reuse_stats={path: current_stats[path] for path in files},
+            complete=False,
+            digest=None,
+            key=key,
+        ),
     )
 
     hashed_files = 0
@@ -209,11 +350,22 @@ def build_resumable_source_manifest(
             continue
         digest = _hash_checked_file(root / relative, expected)
         files[relative] = digest
-        file_stats[relative] = expected
+        file_stats[relative] = {
+            "size": expected["size"],
+            "mtime_ns": expected["mtime_ns"],
+        }
         hashed_files += 1
         _atomic_json(
             checkpoint,
-            _checkpoint_payload(root=root, manifest=manifest, complete=False, digest=None),
+            _checkpoint_payload(
+                root=root,
+                root_identity=root_identity,
+                manifest=manifest,
+                reuse_stats={path: current_stats[path] for path in files},
+                complete=False,
+                digest=None,
+                key=key,
+            ),
         )
 
     # Re-enumerate to prove the completed manifest describes the current exact
@@ -221,11 +373,22 @@ def build_resumable_source_manifest(
     # a mixed-time snapshot.
     if _enumerate_regular_files(root) != current_stats:
         raise SourceProfileError("source path set or file stats changed during manifest build")
+    final_root_stat = root.stat()
+    if root_identity != {"device": final_root_stat.st_dev, "inode": final_root_stat.st_ino}:
+        raise SourceProfileError("source root changed during manifest build")
     digest = source_manifest_digest(manifest)
     _atomic_json(output, manifest)
     _atomic_json(
         checkpoint,
-        _checkpoint_payload(root=root, manifest=manifest, complete=True, digest=digest),
+        _checkpoint_payload(
+            root=root,
+            root_identity=root_identity,
+            manifest=manifest,
+            reuse_stats=current_stats,
+            complete=True,
+            digest=digest,
+            key=key,
+        ),
     )
     return ManifestBuildResult(
         manifest=manifest,
@@ -235,28 +398,40 @@ def build_resumable_source_manifest(
     )
 
 
-def _read_json_object(path: Path, description: str) -> dict[str, Any]:
+def _read_json_object(path: Path, description: str) -> tuple[dict[str, Any], bytes]:
+    payload = _read_bounded_regular(path, description)
     try:
-        value: object = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        value: object = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SourceProfileError(f"invalid {description} JSON {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise SourceProfileError(f"{description} JSON must be an object: {path}")
-    return value
+    return value, payload
 
 
 def _sha256_file(path: Path) -> str:
-    if not path.is_file() or path.is_symlink():
-        raise SourceProfileError(f"expected regular non-symlink file: {path}")
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(_HASH_CHUNK_BYTES):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise SourceProfileError(f"cannot safely open file {path}: {exc}") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise SourceProfileError(f"expected regular file: {path}")
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, _HASH_CHUNK_BYTES):
             digest.update(chunk)
-    return digest.hexdigest()
+        after = os.fstat(descriptor)
+        if _reuse_stat_record(before) != _reuse_stat_record(after):
+            raise SourceProfileError(f"file changed while hashing: {path}")
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
 
 
 def _completed_manifest(path: Path) -> dict[str, object]:
-    manifest = _read_json_object(path, "source manifest")
+    manifest, _ = _read_json_object(path, "source manifest")
     if manifest.get("type") != "dir":
         raise SourceProfileError("source manifest must describe a directory")
     files = manifest.get("files")
@@ -287,12 +462,19 @@ def build_glm52_mixed_gguf_profile(
     files = manifest["files"]
     assert isinstance(files, dict)  # narrowed by _completed_manifest
     source = _safe_source_root(Path(source_path))
+    output = Path(output_path)
+    _outside_source(source, output, "profile output")
+    if not isinstance(source_revision, str) or not source_revision.strip():
+        raise SourceProfileError("source revision must be nonempty")
     risk_file = Path(risk_path)
     tensor_plan = Path(tensor_plan_path)
     tokenizer = Path(tokenizer_path)
-    risk = _read_json_object(risk_file, "NVFP4 risk")
-    risk_sha256 = _sha256_file(risk_file)
-    tensor_plan_sha256 = _sha256_file(tensor_plan)
+    risk, risk_payload = _read_json_object(risk_file, "NVFP4 risk")
+    risk_sha256 = hashlib.sha256(risk_payload).hexdigest()
+    tensor_plan_payload = _read_bounded_regular(tensor_plan, "tensor plan")
+    tensor_plan_sha256 = hashlib.sha256(tensor_plan_payload).hexdigest()
+    if tensor_plan_sha256 != GLM52_GGUF_TENSOR_PLAN_SHA256:
+        raise SourceProfileError("tensor plan does not match the canonical executable plan")
     tokenizer_sha256 = _sha256_file(tokenizer)
 
     expected_source = str(source)
@@ -307,7 +489,10 @@ def build_glm52_mixed_gguf_profile(
         or files.get("model.safetensors.index.json") != index_sha256
     ):
         raise SourceProfileError("manifest config/index hashes do not match source")
-    lines = tensor_plan.read_text(encoding="utf-8").splitlines()
+    try:
+        lines = tensor_plan_payload.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise SourceProfileError("tensor plan is not UTF-8") from exc
     risk_lines = risk.get("tensor_type_lines")
     if risk.get("tensor_type_sha256") != tensor_plan_sha256 or risk_lines != lines:
         raise SourceProfileError("risk tensor plan does not match supplied tensor plan")
@@ -339,5 +524,5 @@ def build_glm52_mixed_gguf_profile(
             "routing": None,
         },
     }
-    _atomic_json(Path(output_path), profile)
+    _atomic_json(output, profile)
     return profile

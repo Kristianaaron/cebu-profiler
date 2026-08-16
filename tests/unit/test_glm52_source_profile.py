@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import model_atlas.glm52_source_profile as source_profile
 from model_atlas.glm52_source_profile import (
     SourceProfileError,
     build_glm52_mixed_gguf_profile,
@@ -112,8 +113,11 @@ def _profile_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path, Path]
     return source, manifest_path, tokenizer, risk, plan, tmp_path / "profile.json"
 
 
-def test_profile_binds_completed_manifest_and_never_fabricates_calibration(tmp_path: Path) -> None:
+def test_profile_binds_completed_manifest_and_never_fabricates_calibration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     source, manifest, tokenizer, risk, plan, output = _profile_inputs(tmp_path)
+    monkeypatch.setattr(source_profile, "GLM52_GGUF_TENSOR_PLAN_SHA256", _sha(plan))
     profile = build_glm52_mixed_gguf_profile(
         manifest_path=manifest,
         source_path=source,
@@ -153,8 +157,11 @@ def test_profile_binds_completed_manifest_and_never_fabricates_calibration(tmp_p
     assert output.exists()
 
 
-def test_profile_rejects_risk_tensor_plan_mismatch(tmp_path: Path) -> None:
+def test_profile_rejects_risk_tensor_plan_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     source, manifest, tokenizer, risk, plan, output = _profile_inputs(tmp_path)
+    monkeypatch.setattr(source_profile, "GLM52_GGUF_TENSOR_PLAN_SHA256", _sha(plan))
     risk_payload = json.loads(risk.read_text())
     risk_payload["tensor_type_sha256"] = "0" * 64
     risk.write_text(json.dumps(risk_payload), encoding="utf-8")
@@ -168,3 +175,55 @@ def test_profile_rejects_risk_tensor_plan_mismatch(tmp_path: Path) -> None:
             tensor_plan_path=plan,
             output_path=output,
         )
+
+
+def test_manifest_rejects_forged_checkpoint_and_source_overlap(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    _write(source / "a.txt", "one")
+    checkpoint = tmp_path / "state.json"
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "source_root": str(source.resolve()),
+                "manifest": {
+                    "type": "dir",
+                    "files": {"a.txt": "0" * 64},
+                    "file_stats": {},
+                },
+                "hmac_sha256": "0" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+    key = tmp_path / "state.json.key"
+    key.write_bytes(b"k" * 32)
+    key.chmod(0o600)
+    with pytest.raises(SourceProfileError, match="authentication"):
+        build_resumable_source_manifest(
+            source, checkpoint_path=checkpoint, output_path=tmp_path / "manifest.json"
+        )
+    with pytest.raises(SourceProfileError, match="outside"):
+        build_resumable_source_manifest(
+            source,
+            checkpoint_path=source / "state.json",
+            output_path=tmp_path / "manifest.json",
+        )
+
+
+def test_profile_rejects_noncanonical_plan_and_oversized_metadata(tmp_path: Path) -> None:
+    source, manifest, tokenizer, risk, plan, output = _profile_inputs(tmp_path)
+    with pytest.raises(SourceProfileError, match="canonical executable plan"):
+        build_glm52_mixed_gguf_profile(
+            manifest_path=manifest,
+            source_path=source,
+            source_revision="revision",
+            tokenizer_path=tokenizer,
+            risk_path=risk,
+            tensor_plan_path=plan,
+            output_path=output,
+        )
+    oversized = tmp_path / "oversized.json"
+    oversized.write_bytes(b"{" + b" " * (4 * 1024 * 1024) + b"}")
+    with pytest.raises(SourceProfileError, match="size bound"):
+        source_profile._read_json_object(oversized, "oversized")

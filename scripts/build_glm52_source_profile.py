@@ -29,6 +29,11 @@ def main() -> int:
         "--checkpoint", type=Path, default=Path("artifacts/glm52-source-manifest.state.json")
     )
     parser.add_argument(
+        "--checkpoint-key",
+        type=Path,
+        default=Path("artifacts/glm52-source-manifest.state.key"),
+    )
+    parser.add_argument(
         "--manifest", type=Path, default=Path("artifacts/glm52-source-manifest.json")
     )
     parser.add_argument(
@@ -47,6 +52,7 @@ def main() -> int:
                 {
                     "would_build_manifest": str(args.manifest),
                     "would_checkpoint": str(args.checkpoint),
+                    "would_checkpoint_key": str(args.checkpoint_key),
                     "would_build_profile": str(args.profile),
                     "source": args.source,
                     "requires": "--execute",
@@ -56,7 +62,10 @@ def main() -> int:
         )
         return 0
     result = build_resumable_source_manifest(
-        args.source, checkpoint_path=args.checkpoint, output_path=args.manifest
+        args.source,
+        checkpoint_path=args.checkpoint,
+        checkpoint_key_path=args.checkpoint_key,
+        output_path=args.manifest,
     )
     profile = build_glm52_mixed_gguf_profile(
         manifest_path=args.manifest,
