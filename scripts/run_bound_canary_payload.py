@@ -38,11 +38,11 @@ def main() -> int:
         head_unit=args.head_unit,
         worker_unit=args.worker_unit,
     )
-    write_active_lease(args.lease, binding)
+    handle = write_active_lease(args.lease, binding)
     try:
         return subprocess.run(payload, check=False).returncode
     finally:
-        remove_active_lease(args.lease)
+        remove_active_lease(handle)
 
 
 if __name__ == "__main__":

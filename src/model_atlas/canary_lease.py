@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
+import secrets
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -26,51 +30,124 @@ class CanaryLeaseBinding(BaseModel):
 class ActiveMaintenanceLease(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     active: Literal[True] = True
+    nonce: str = Field(pattern=r"^[0-9a-f]{64}$")
+    coordinator_pid: int = Field(gt=0)
+    coordinator_start_ticks: int = Field(gt=0)
+    issued_at: datetime
+    expires_at: datetime
     binding: CanaryLeaseBinding
 
 
-def write_active_lease(path: Path, binding: CanaryLeaseBinding) -> None:
-    """Atomically create a private, exact lease after maintenance acquisition."""
+@dataclass
+class ActiveLeaseHandle:
+    path: Path
+    descriptor: int
+    device: int
+    inode: int
+
+
+def _process_start_ticks(pid: int) -> int:
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
+        value = int(fields[21])
+    except (OSError, ValueError, IndexError) as exc:
+        raise CanaryLeaseError("maintenance coordinator identity unavailable") from exc
+    if value <= 0:
+        raise CanaryLeaseError("maintenance coordinator identity unavailable")
+    return value
+
+
+def write_active_lease(
+    path: Path,
+    binding: CanaryLeaseBinding,
+    *,
+    lifetime: timedelta = timedelta(hours=6),
+) -> ActiveLeaseHandle:
+    """Create and exclusively lock authority for the live coordinator lifetime."""
     if not path.is_absolute():
         raise ValueError("maintenance lease path must be absolute")
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    descriptor = os.open(temporary, flags, 0o600)
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
     try:
-        encoded = ActiveMaintenanceLease(binding=binding).model_dump_json().encode()
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        now = datetime.now(UTC)
+        encoded = ActiveMaintenanceLease(
+            nonce=secrets.token_hex(32),
+            coordinator_pid=os.getpid(),
+            coordinator_start_ticks=_process_start_ticks(os.getpid()),
+            issued_at=now,
+            expires_at=now + lifetime,
+            binding=binding,
+        ).model_dump_json().encode()
         written = os.write(descriptor, encoded)
         if written != len(encoded):
             raise CanaryLeaseError("incomplete maintenance lease write")
         os.fsync(descriptor)
-    finally:
+        stat = os.fstat(descriptor)
+        return ActiveLeaseHandle(path, descriptor, stat.st_dev, stat.st_ino)
+    except BaseException:
         os.close(descriptor)
-    os.replace(temporary, path)
+        path.unlink(missing_ok=True)
+        raise
 
 
-def require_active_lease(path: Path, binding: CanaryLeaseBinding) -> ActiveMaintenanceLease:
+def require_active_lease(
+    path: Path,
+    binding: CanaryLeaseBinding,
+    *,
+    expected_coordinator_pid: int | None = None,
+) -> ActiveMaintenanceLease:
     """Verify exact plan/artifact/transient-unit authority before GPU execution."""
     if not path.is_absolute() or path.is_symlink():
         raise CanaryLeaseError("maintenance lease path is invalid")
+    descriptor = -1
     try:
-        stat = path.stat()
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        stat = os.fstat(descriptor)
         if stat.st_mode & 0o077:
             raise CanaryLeaseError("maintenance lease permissions are unsafe")
-        lease = ActiveMaintenanceLease.model_validate_json(path.read_bytes())
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            raise CanaryLeaseError("maintenance coordinator is not live")
+        encoded = os.read(descriptor, 16385)
+        if len(encoded) > 16384:
+            raise CanaryLeaseError("maintenance lease is oversized")
+        lease = ActiveMaintenanceLease.model_validate_json(encoded)
     except CanaryLeaseError:
         raise
     except (OSError, ValueError) as exc:
         raise CanaryLeaseError("maintenance lease unavailable") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     if lease.binding != binding:
         raise CanaryLeaseError("maintenance lease binding mismatch")
+    coordinator = os.getppid() if expected_coordinator_pid is None else expected_coordinator_pid
+    if (
+        lease.coordinator_pid != coordinator
+        or lease.coordinator_start_ticks != _process_start_ticks(coordinator)
+    ):
+        raise CanaryLeaseError("maintenance coordinator identity mismatch")
+    now = datetime.now(UTC)
+    if lease.expires_at <= now or lease.issued_at > now:
+        raise CanaryLeaseError("maintenance lease is expired")
     return lease
 
 
-def remove_active_lease(path: Path) -> None:
-    """Remove only the exact per-run lease after payload completion."""
+def remove_active_lease(handle: ActiveLeaseHandle) -> None:
+    """Remove only the same locked inode created by this coordinator."""
     try:
-        path.unlink(missing_ok=True)
+        stat = handle.path.stat()
+        if (stat.st_dev, stat.st_ino) != (handle.device, handle.inode):
+            raise CanaryLeaseError("maintenance lease inode changed")
+        handle.path.unlink()
     except OSError as exc:
         raise CanaryLeaseError("maintenance lease cleanup failed") from exc
+    finally:
+        os.close(handle.descriptor)
