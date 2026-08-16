@@ -59,12 +59,9 @@ from model_atlas.recipes import CompiledPlanArtifact
 from model_atlas.recipes.builtin import glm52_no_pruning_recipe
 from model_atlas.recommend.policy import (
     AtlasProfile,
-    CompressionIntent,
-    MethodFamily,
     Recommendation,
     RecommendationPolicy,
     RecTarget,
-    method_family,
 )
 
 # Lifetime of an opaque authorization token. After this the token is EXPIRED
@@ -158,7 +155,6 @@ class _AuthorizationSession:
         "recommendation_id",
         "profile_id",
         "target",
-        "intent",
         "no_pruning",
         "constraints_snapshot",
         "authorized_methods",
@@ -179,14 +175,12 @@ class _AuthorizationSession:
         no_pruning: bool,
         constraints_snapshot: dict[str, object],
         authorized_methods: list[str],
-        intent: CompressionIntent = CompressionIntent.QUANTIZE_ONLY,
         ttl_seconds: float = AUTH_TOKEN_TTL_SECONDS,
     ) -> None:
         self.token = token
         self.recommendation_id = recommendation_id
         self.profile_id = profile_id
         self.target = target
-        self.intent = intent
         self.no_pruning = no_pruning
         self.constraints_snapshot = constraints_snapshot
         self.authorized_methods = sorted(authorized_methods)
@@ -394,7 +388,6 @@ class RecommendationService:
         *,
         memory_target_gib: float | None = None,
         allow_pruning: bool = False,
-        intent: CompressionIntent = CompressionIntent.QUANTIZE_ONLY,
     ) -> Recommendation:
         prof = self._resolve_profile(profile)
         return self.policy.recommend(
@@ -402,7 +395,6 @@ class RecommendationService:
             target or RecTarget(),
             memory_target_gib=memory_target_gib,
             allow_pruning=allow_pruning,
-            intent=intent,
         )
 
     # --------------------------------------------------------- authorization
@@ -414,7 +406,6 @@ class RecommendationService:
         memory_target_gib: float | None = None,
         allow_pruning: bool = False,
         constraints: dict[str, object] | None = None,
-        intent: CompressionIntent = CompressionIntent.QUANTIZE_ONLY,
     ) -> dict[str, Any]:
         """Deterministic recommendation PLUS an opaque authorization token.
 
@@ -428,27 +419,23 @@ class RecommendationService:
         prof = self._resolve_profile(profile)
         effective_target = target or RecTarget()
         constraints = dict(constraints or {})
-        intent = CompressionIntent(intent)
         allow_pruning = bool(constraints.get("allow_pruning", allow_pruning))
         rec = self.policy.recommend(
             prof,
             effective_target,
             memory_target_gib=memory_target_gib,
             allow_pruning=allow_pruning,
-            intent=intent,
         )
         authorized = sorted(m.method for m in rec.methods)
         token = secrets.token_urlsafe(24)
         constraints_snapshot: dict[str, object] = {
             "allow_pruning": bool(constraints.get("allow_pruning", allow_pruning)),
-            "intent": intent.value,
         }
         session = _AuthorizationSession(
             token=token,
             recommendation_id=rec.recommendation_id,
             profile_id=rec.profile_id,
             target=effective_target,
-            intent=intent,
             no_pruning=rec.no_pruning,
             constraints_snapshot=constraints_snapshot,
             authorized_methods=authorized,
@@ -462,7 +449,6 @@ class RecommendationService:
             "recommendation_id": rec.recommendation_id,
             "profile_id": rec.profile_id,
             "no_pruning": rec.no_pruning,
-            "intent": intent.value,
             "authorized_methods": authorized,
             "selection_hash": _selection_hash(authorized),
             "recommendation": payload,
@@ -509,30 +495,13 @@ class RecommendationService:
                 "selection_not_authorized",
                 f"not authorized: {unauthorized}",
             )
-        selected_families = {method_family(method) for method in sel}
-        required_families: set[MethodFamily] = set()
-        if session.intent in {
-            CompressionIntent.QUANTIZE_ONLY,
-            CompressionIntent.HYBRID,
-        }:
-            required_families.add(MethodFamily.QUANTIZATION)
-        if session.intent in {
-            CompressionIntent.PRUNE_ONLY,
-            CompressionIntent.HYBRID,
-        }:
-            required_families.add(MethodFamily.PRUNING)
-        missing_families = sorted(
-            family.value for family in required_families - selected_families
-        )
-        intent_satisfied = not missing_families
         subset_hash = _selection_hash(sel)
         pv = self.recipe_preview(sel)
         plan = pv.get("plan") or {}
         readiness = {
             "verified_plan": bool(plan.get("plan_id") and plan.get("pins_pass")),
             "pins_pass": bool(plan.get("pins_pass")),
-            "intent_satisfied": intent_satisfied,
-            "executable": self._preview_is_executable(pv) and intent_satisfied,
+            "executable": self._preview_is_executable(pv),
         }
         recipe = self._selected_recipe(sel, session=session)
         artifact: CompiledPlanArtifact | None = None
@@ -607,20 +576,6 @@ class RecommendationService:
             "plan_id": (artifact.plan_id if artifact is not None else plan.get("plan_id")),
             "hash": authorization_digest,
             "readiness": readiness,
-            "intent": session.intent.value,
-            "intent_blockers": (
-                []
-                if intent_satisfied
-                else [
-                    {
-                        "code": "intent_not_satisfied",
-                        "message": (
-                            f"{session.intent.value} requires selected method families: "
-                            f"{missing_families}"
-                        ),
-                    }
-                ]
-            ),
             "selected_methods": list(sel),
             "run_id": package.run_id,
             "recipe_id": pv.get("recipe_id"),
@@ -722,15 +677,11 @@ class RecommendationService:
         recipe.stages = stages
         memory_gib = session.target.memory_target_gib if session is not None else 115.0
         recipe.constraints = RecipeConstraints(
-            no_pruning=session.no_pruning if session is not None else True,
-            allow_pruning_capability=(
-                not session.no_pruning if session is not None else False
-            ),
+            no_pruning=True,
+            allow_pruning_capability=False,
             preserve_non_expert_backbone=True,
             immutable_source=True,
-            allow_hybrid_precision=(
-                session is not None and session.intent == CompressionIntent.HYBRID
-            ),
+            allow_hybrid_precision=False,
             max_resident_gib=memory_gib,
             derived_format="safetensors",
         )
@@ -1469,7 +1420,6 @@ class RecommendationService:
             session.target,
             memory_target_gib=session.target.memory_target_gib,
             allow_pruning=bool((session.constraints_snapshot or {}).get("allow_pruning", False)),
-            intent=session.intent,
         )
         current = sorted(m.method for m in rec.methods)
         if _selection_hash(current) != session.selected_hash():

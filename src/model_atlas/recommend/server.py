@@ -39,7 +39,7 @@ from urllib.parse import unquote_plus, urlparse
 
 from model_atlas.recipe.schema import CompressionRecipe
 from model_atlas.recommend.api import AuthError, RecommendationService
-from model_atlas.recommend.policy import CompressionIntent, RecTarget
+from model_atlas.recommend.policy import RecTarget
 
 # --------------------------------------------------------------------------- config
 MAX_BODY_BYTES = 1 << 20  # 1 MiB
@@ -317,17 +317,10 @@ class RecommendationHandler(BaseHTTPRequestHandler):
         constraints: dict[str, object] = (
             raw_constraints if isinstance(raw_constraints, dict) else {}
         )
-        try:
-            intent = CompressionIntent(
-                body.get("intent", CompressionIntent.QUANTIZE_ONLY.value)
-            )
-        except ValueError as exc:
-            raise ServerError(_BAD_REQUEST, f"invalid compression intent: {exc}") from exc
         result = svc.authorize(
             profile_id,
             RecTarget(memory_target_gib=memory_target_gib),
             constraints=constraints,
-            intent=intent,
         )
         _send_json(self, _OK, result)
 

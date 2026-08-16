@@ -11,8 +11,6 @@ from model_atlas.recommend.gui import ATLAS_PROFILE_DEFAULT_DIR, render_gui, wri
 from model_atlas.recommend.policy import (
     RECOMMENDATION_POLICY_VERSION,
     AtlasProfile,
-    CompressionIntent,
-    MethodFamily,
     MethodRecommendation,
     RecBlock,
     RecConfidence,
@@ -25,8 +23,6 @@ from model_atlas.recommend.policy import (
 __all__ = [
     "ATLAS_PROFILE_DEFAULT_DIR",
     "AtlasProfile",
-    "CompressionIntent",
-    "MethodFamily",
     "MethodRecommendation",
     "RECOMMENDATION_POLICY_VERSION",
     "RecBlock",
