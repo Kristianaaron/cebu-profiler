@@ -483,14 +483,14 @@ class RecommendationService:
                 f"not authorized: {unauthorized}",
             )
         subset_hash = _selection_hash(sel)
-        pv = self.recipe_preview(sel)
+        recipe = self._selected_recipe(sel, session=session)
+        pv = self._recipe_preview_for(recipe, sel)
         plan = pv.get("plan") or {}
         readiness = {
             "verified_plan": bool(plan.get("plan_id") and plan.get("pins_pass")),
             "pins_pass": bool(plan.get("pins_pass")),
             "executable": self._preview_is_executable(pv),
         }
-        recipe = self._selected_recipe(sel, session=session)
         artifact: CompiledPlanArtifact | None = None
         if readiness["executable"]:
             compiled = self.plane.compile_recipe(recipe)
@@ -499,6 +499,12 @@ class RecommendationService:
             )
             artifact.verify()
             artifact.verify_pins_against(self.registry)
+            if artifact.recipe_sha256 != pv.get("recipe_sha256"):
+                raise AuthError(
+                    500,
+                    "recipe_identity_mismatch",
+                    "compiled artifact recipe identity differs from preview",
+                )
         target_snapshot: dict[str, object] = {
             "model_arch": session.target.hardware_model_arch,
             "compute": session.target.compute_arch,
@@ -723,6 +729,14 @@ class RecommendationService:
         non-fatal compile/dry-run, and report diff / compile blockers /
         readiness / verified plan (if it compiles). Never mutates."""
         recipe = self._selected_recipe(selected)
+        return self._recipe_preview_for(recipe, selected)
+
+    def _recipe_preview_for(
+        self,
+        recipe: CompressionRecipe,
+        selected: list[str] | None,
+    ) -> dict[str, Any]:
+        """Validate and summarize the exact recipe object used for artifacts."""
         issues, rid, sha = self.plane.compiler.validate(recipe)
         errors = [i for i in issues if i.severity == "error"]
         compiles = not errors

@@ -117,8 +117,26 @@ def test_catalog_has_no_implicit_pruning_classification() -> None:
         family=MethodFamily.PRUNING,
         effect_classes=(StageEffectClass.QUANTIZATION,),
     )
-    with pytest.raises(ValueError, match="lacks pruning effect"):
+    with pytest.raises(ValueError, match="pruning family/effect mismatch"):
         validate_method_catalog((*METHOD_CATALOG, forged))
+
+    hidden_pruning = replace(
+        method_spec("exl3-primary"),
+        method="hidden-pruning",
+        priority=101,
+        effect_classes=(StageEffectClass.QUANTIZATION, StageEffectClass.PRUNING),
+    )
+    with pytest.raises(ValueError, match="pruning family/effect mismatch"):
+        validate_method_catalog((*METHOD_CATALOG, hidden_pruning))
+
+    hidden_residual = replace(
+        method_spec("teacher-identity"),
+        method="planning-hidden-residual",
+        priority=102,
+        effect_classes=(StageEffectClass.RESIDUAL,),
+    )
+    with pytest.raises(ValueError, match="planning-only"):
+        validate_method_catalog((*METHOD_CATALOG, hidden_residual))
 
 
 def test_catalog_priority_is_explicit_and_digest_bound() -> None:
@@ -959,6 +977,21 @@ def test_authorize_binds_token_to_recommendation_and_method_set(tmp_path: Path):
     # recommendation payload matches the plain recommend() exactly
     plain = svc.recommend("k3-mini", RecTarget(memory_target_gib=115.0))
     assert a1["recommendation"]["recommendation_id"] == plain.recommendation_id
+
+
+def test_preview_uses_one_session_bound_recipe_identity(tmp_path: Path) -> None:
+    svc = RecommendationService(
+        profile_root=str(tmp_path / "profiles"), work_root=str(tmp_path / "runs")
+    )
+    svc.save_profile(_full_profile())
+    auth = svc.authorize("k3-mini", RecTarget(memory_target_gib=73.5))
+    preview = svc.preview_selection(auth["token"], auth["authorized_methods"])
+    package = svc.pending_previews[preview["preview_id"]]
+    _, _, actual_sha = svc.plane.compiler.validate(package.recipe)
+    assert package.recipe.constraints.max_resident_gib == 73.5
+    assert preview["recipe_sha256"] == actual_sha == package.recipe_sha256
+    if package.artifact is not None:
+        assert package.artifact.recipe_sha256 == actual_sha
 
 
 def test_start_authorized_runs_persisted_job_asynchronously(tmp_path: Path):

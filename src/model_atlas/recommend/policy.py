@@ -415,17 +415,26 @@ def validate_method_catalog(specs: tuple[MethodSpec, ...]) -> None:
         ):
             raise ValueError(f"incomplete MethodSpec identity: {spec.method!r}")
         effects = set(spec.effect_classes)
-        if spec.family == MethodFamily.PRUNING and StageEffectClass.PRUNING not in effects:
-            raise ValueError(f"pruning MethodSpec lacks pruning effect: {spec.method}")
+        is_pruning_family = spec.family == MethodFamily.PRUNING
+        has_pruning_effect = StageEffectClass.PRUNING in effects
+        if is_pruning_family != has_pruning_effect:
+            raise ValueError(f"pruning family/effect mismatch: {spec.method}")
+        if is_pruning_family and CompressionIntent.QUANTIZE_ONLY in spec.compatible_intents:
+            raise ValueError(f"pruning MethodSpec permits quantize-only: {spec.method}")
         if (
             spec.family == MethodFamily.QUANTIZATION
             and StageEffectClass.QUANTIZATION not in effects
         ):
             raise ValueError(f"quantization MethodSpec lacks quantization effect: {spec.method}")
-        if spec.planning_only and effects & {
+        artifact_mutating_effects = {
+            StageEffectClass.CONDITIONING,
             StageEffectClass.PRUNING,
             StageEffectClass.QUANTIZATION,
-        }:
+            StageEffectClass.REFINEMENT,
+            StageEffectClass.REPAIR,
+            StageEffectClass.RESIDUAL,
+        }
+        if spec.planning_only and effects & artifact_mutating_effects:
             raise ValueError(f"planning-only MethodSpec claims derivative effect: {spec.method}")
 
 
