@@ -104,6 +104,24 @@ def test_deterministic_ranking_and_stable_ids():
     }
 
 
+def test_intent_changes_identity_and_reports_missing_families() -> None:
+    policy = RecommendationPolicy(build_default_registry())
+    quant = policy.recommend(
+        _full_profile(), RecTarget(), intent=CompressionIntent.QUANTIZE_ONLY
+    )
+    prune = policy.recommend(
+        _full_profile(), RecTarget(), intent=CompressionIntent.PRUNE_ONLY
+    )
+    assert quant.recommendation_id != prune.recommendation_id
+    assert quant.intent is CompressionIntent.QUANTIZE_ONLY
+    assert prune.intent is CompressionIntent.PRUNE_ONLY
+    assert MethodFamily.PRUNING in prune.missing_families
+    assert prune.intent_satisfied is False
+    assert prune.confidence is RecConfidence.INSUFFICIENT
+    assert all(method.family is not MethodFamily.PRUNING for method in prune.methods)
+    assert prune.to_dict()["intent"] == "prune_only"
+
+
 def test_method_catalog_is_explicit_stable_and_fail_closed() -> None:
     assert METHOD_CATALOG_VERSION == 1
     assert len(METHOD_CATALOG) == len({spec.method for spec in METHOD_CATALOG})
@@ -147,6 +165,11 @@ def test_profile_execution_binding_is_strict_and_identity_bound(tmp_path: Path) 
                     field: "",
                 }
             )
+        for malformed in (None, 7, "   "):
+            serialized = _execution_binding().to_dict()
+            serialized[field] = malformed
+            with pytest.raises(ValueError, match=f"{field} must be a nonempty string"):
+                ProfileExecutionBinding.from_dict(serialized)
 
     base = _full_profile()
     bound = AtlasProfile(**{**base.__dict__, "execution": _execution_binding()})
@@ -229,6 +252,70 @@ def test_derivative_recipe_requires_and_applies_profile_execution_binding(
     _, _, recipe_sha = service.plane.compiler.validate(recipe)
     _, _, changed_sha = service.plane.compiler.validate(changed_recipe)
     assert changed_sha != recipe_sha
+
+
+def test_compiled_effect_gate_uses_recipe_effects_not_method_labels(
+    tmp_path: Path,
+) -> None:
+    bound = AtlasProfile(
+        **{
+            **_full_profile().__dict__,
+            "profile_id": "effect-bound",
+            "routing_consistency_passed": True,
+            "execution": _execution_binding(str(tmp_path / "glm-source")),
+        }
+    )
+    service = RecommendationService(
+        profile_root=str(tmp_path / "profiles"), work_root=str(tmp_path / "runs")
+    )
+    service.save_profile(bound)
+    auth = service.authorize(bound, intent=CompressionIntent.QUANTIZE_ONLY)
+    session = service.sessions[auth["token"]]
+    recipe = service._selected_recipe(["exl3-primary"], session=session)
+    ok, blockers, families = service._intent_effect_gate(
+        CompressionIntent.QUANTIZE_ONLY, recipe
+    )
+    assert ok is True
+    assert blockers == []
+    assert MethodFamily.QUANTIZATION in families
+
+    hidden_pruning = recipe.model_copy(deep=True)
+    hidden_pruning.stages.append(
+        recipe.stages[-1].model_copy(
+            update={"id": "hidden-pruning", "effect_class": StageEffectClass.PRUNING}
+        )
+    )
+    ok2, blockers2, _ = service._intent_effect_gate(
+        CompressionIntent.QUANTIZE_ONLY, hidden_pruning
+    )
+    assert ok2 is False
+    assert any(blocker["code"] == "intent_forbidden_effect" for blocker in blockers2)
+
+
+def test_authorize_rejects_string_boolean_and_binds_intent(tmp_path: Path) -> None:
+    from model_atlas.recommend.api import AuthError
+
+    service = RecommendationService(
+        profile_root=str(tmp_path / "profiles"), work_root=str(tmp_path / "runs")
+    )
+    service.save_profile(_full_profile())
+    with pytest.raises(AuthError) as exc:
+        service.authorize(
+            "k3-mini",
+            intent=CompressionIntent.PRUNE_ONLY,
+            constraints={"allow_pruning": "false"},
+        )
+    assert exc.value.code == "constraint_invalid"
+
+    auth = service.authorize(
+        "k3-mini",
+        intent=CompressionIntent.PRUNE_ONLY,
+        constraints={"allow_pruning": False},
+    )
+    session = service.sessions[auth["token"]]
+    assert auth["intent"] == "prune_only"
+    assert session.intent is CompressionIntent.PRUNE_ONLY
+    assert session.constraints_snapshot["intent"] == "prune_only"
 
 
 def test_catalog_has_no_implicit_pruning_classification() -> None:
@@ -397,7 +484,12 @@ def test_pruning_requires_verified_backend():
 
     reg = build_default_registry()
     pol = RecommendationPolicy(reg)
-    rec = pol.recommend(_full_profile(), RecTarget(), allow_pruning=True)
+    rec = pol.recommend(
+        _full_profile(),
+        RecTarget(),
+        allow_pruning=True,
+        intent=CompressionIntent.PRUNE_ONLY,
+    )
     # default registry: no pruning capable+derivative+available backend
     assert rec.no_pruning is True
 
@@ -415,7 +507,12 @@ def test_pruning_requires_verified_backend():
     )
     reg2 = BackendRegistry({**_fake_records(reg), prune.backend_id: prune})
     pol2 = RecommendationPolicy(reg2)
-    rec2 = pol2.recommend(_full_profile(), RecTarget(), allow_pruning=True)
+    rec2 = pol2.recommend(
+        _full_profile(),
+        RecTarget(),
+        allow_pruning=True,
+        intent=CompressionIntent.PRUNE_ONLY,
+    )
     assert rec2.no_pruning is False
     # still no pruning STAGE recommended unless a method maps to it
     assert not any("pruning" in m.method for m in rec2.methods)

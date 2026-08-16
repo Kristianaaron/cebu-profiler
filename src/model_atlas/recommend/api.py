@@ -62,11 +62,14 @@ from model_atlas.recipes.builtin import glm52_no_pruning_recipe
 from model_atlas.recommend.policy import (
     METHOD_CATALOG,
     AtlasProfile,
+    CompressionIntent,
+    MethodFamily,
     ProfileExecutionBinding,
     Recommendation,
     RecommendationPolicy,
     RecTarget,
     method_spec,
+    required_families,
 )
 
 # Lifetime of an opaque authorization token. After this the token is EXPIRED
@@ -145,6 +148,7 @@ class _AuthorizationSession:
         "recommendation_id",
         "profile_id",
         "target",
+        "intent",
         "no_pruning",
         "constraints_snapshot",
         "authorized_methods",
@@ -167,12 +171,14 @@ class _AuthorizationSession:
         no_pruning: bool,
         constraints_snapshot: dict[str, object],
         authorized_methods: list[str],
+        intent: CompressionIntent = CompressionIntent.QUANTIZE_ONLY,
         ttl_seconds: float = AUTH_TOKEN_TTL_SECONDS,
     ) -> None:
         self.token = token
         self.recommendation_id = recommendation_id
         self.profile_id = profile_id
         self.target = target
+        self.intent = intent
         self.no_pruning = no_pruning
         self.constraints_snapshot = constraints_snapshot
         self.authorized_methods = sorted(authorized_methods)
@@ -384,6 +390,7 @@ class RecommendationService:
         *,
         memory_target_gib: float | None = None,
         allow_pruning: bool = False,
+        intent: CompressionIntent = CompressionIntent.QUANTIZE_ONLY,
     ) -> Recommendation:
         prof = self._resolve_profile(profile)
         return self.policy.recommend(
@@ -391,6 +398,7 @@ class RecommendationService:
             target or RecTarget(),
             memory_target_gib=memory_target_gib,
             allow_pruning=allow_pruning,
+            intent=intent,
         )
 
     # --------------------------------------------------------- authorization
@@ -402,6 +410,7 @@ class RecommendationService:
         memory_target_gib: float | None = None,
         allow_pruning: bool = False,
         constraints: dict[str, object] | None = None,
+        intent: CompressionIntent = CompressionIntent.QUANTIZE_ONLY,
     ) -> dict[str, Any]:
         """Deterministic recommendation PLUS an opaque authorization token.
 
@@ -415,12 +424,21 @@ class RecommendationService:
         prof = self._resolve_profile(profile)
         effective_target = target or RecTarget()
         constraints = dict(constraints or {})
-        allow_pruning = bool(constraints.get("allow_pruning", allow_pruning))
+        intent = CompressionIntent(intent)
+        raw_allow_pruning = constraints.get("allow_pruning", allow_pruning)
+        if not isinstance(raw_allow_pruning, bool):
+            raise AuthError(
+                400,
+                "constraint_invalid",
+                "allow_pruning must be a JSON boolean",
+            )
+        allow_pruning = raw_allow_pruning
         rec = self.policy.recommend(
             prof,
             effective_target,
             memory_target_gib=memory_target_gib,
             allow_pruning=allow_pruning,
+            intent=intent,
         )
         # Bind the session to the policy's canonical target, including an
         # explicit memory_target_gib override.
@@ -428,13 +446,15 @@ class RecommendationService:
         authorized = sorted(m.method for m in rec.methods)
         token = secrets.token_urlsafe(24)
         constraints_snapshot: dict[str, object] = {
-            "allow_pruning": bool(constraints.get("allow_pruning", allow_pruning)),
+            "allow_pruning": allow_pruning,
+            "intent": intent.value,
         }
         session = _AuthorizationSession(
             token=token,
             recommendation_id=rec.recommendation_id,
             profile_id=rec.profile_id,
             target=effective_target,
+            intent=intent,
             no_pruning=rec.no_pruning,
             constraints_snapshot=constraints_snapshot,
             authorized_methods=authorized,
@@ -448,6 +468,7 @@ class RecommendationService:
             "recommendation_id": rec.recommendation_id,
             "profile_id": rec.profile_id,
             "no_pruning": rec.no_pruning,
+            "intent": intent.value,
             "authorized_methods": authorized,
             "selection_hash": _selection_hash(authorized),
             "recommendation": payload,
@@ -498,10 +519,14 @@ class RecommendationService:
         recipe = self._selected_recipe(sel, session=session)
         pv = self._recipe_preview_for(recipe, sel)
         plan = pv.get("plan") or {}
+        intent_satisfied, intent_blockers, actual_families = self._intent_effect_gate(
+            session.intent, recipe
+        )
         readiness = {
             "verified_plan": bool(plan.get("plan_id") and plan.get("pins_pass")),
             "pins_pass": bool(plan.get("pins_pass")),
-            "executable": self._preview_is_executable(pv),
+            "intent_satisfied": intent_satisfied,
+            "executable": self._preview_is_executable(pv) and intent_satisfied,
         }
         artifact: CompiledPlanArtifact | None = None
         if readiness["executable"]:
@@ -581,6 +606,9 @@ class RecommendationService:
             "plan_id": (artifact.plan_id if artifact is not None else plan.get("plan_id")),
             "hash": authorization_digest,
             "readiness": readiness,
+            "intent": session.intent.value,
+            "actual_families": [family.value for family in actual_families],
+            "intent_blockers": intent_blockers,
             "selected_methods": list(sel),
             "run_id": package.run_id,
             "recipe_id": pv.get("recipe_id"),
@@ -591,6 +619,49 @@ class RecommendationService:
     def _preview_is_executable(preview: dict[str, Any]) -> bool:
         plan = preview.get("plan") or {}
         return bool(plan.get("plan_id") and plan.get("pins_pass"))
+
+    @staticmethod
+    def _intent_effect_gate(
+        intent: CompressionIntent,
+        recipe: CompressionRecipe,
+    ) -> tuple[bool, list[dict[str, str]], tuple[MethodFamily, ...]]:
+        """Authorize intent from actual recipe effects, never method labels."""
+        effect_families: set[MethodFamily] = set()
+        for stage in recipe.stages:
+            if stage.effect_class == StageEffectClass.QUANTIZATION:
+                effect_families.add(MethodFamily.QUANTIZATION)
+            elif stage.effect_class == StageEffectClass.PRUNING:
+                effect_families.add(MethodFamily.PRUNING)
+        actual = tuple(sorted(effect_families, key=lambda family: family.value))
+        required = set(required_families(intent))
+        missing = sorted(required - effect_families, key=lambda family: family.value)
+        forbidden: list[MethodFamily] = []
+        if intent == CompressionIntent.QUANTIZE_ONLY and MethodFamily.PRUNING in effect_families:
+            forbidden.append(MethodFamily.PRUNING)
+        if intent == CompressionIntent.PRUNE_ONLY and MethodFamily.QUANTIZATION in effect_families:
+            forbidden.append(MethodFamily.QUANTIZATION)
+        blockers = [
+            {
+                "code": "intent_missing_effect",
+                "message": f"{intent.value} requires compiled {family.value} effect",
+            }
+            for family in missing
+        ]
+        blockers.extend(
+            {
+                "code": "intent_forbidden_effect",
+                "message": f"{intent.value} forbids compiled {family.value} effect",
+            }
+            for family in forbidden
+        )
+        if intent == CompressionIntent.CUSTOM:
+            blockers.append(
+                {
+                    "code": "custom_effect_contract_required",
+                    "message": "custom execution requires an explicit declared effect set",
+                }
+            )
+        return not blockers, blockers, actual
 
     def _persist_preview(self, package: _PendingPreview) -> None:
         """Atomically persist the verified preview package (preview.json +
@@ -750,11 +821,15 @@ class RecommendationService:
         recipe.stages = stages
         memory_gib = session.target.memory_target_gib if session is not None else 115.0
         recipe.constraints = RecipeConstraints(
-            no_pruning=True,
-            allow_pruning_capability=False,
+            no_pruning=session.no_pruning if session is not None else True,
+            allow_pruning_capability=(
+                not session.no_pruning if session is not None else False
+            ),
             preserve_non_expert_backbone=True,
             immutable_source=True,
-            allow_hybrid_precision=False,
+            allow_hybrid_precision=(
+                session is not None and session.intent == CompressionIntent.HYBRID
+            ),
             max_resident_gib=memory_gib,
             derived_format="safetensors",
         )
@@ -1503,9 +1578,15 @@ class RecommendationService:
             session.target,
             memory_target_gib=session.target.memory_target_gib,
             allow_pruning=bool((session.constraints_snapshot or {}).get("allow_pruning", False)),
+            intent=session.intent,
         )
         current = sorted(m.method for m in rec.methods)
-        if _selection_hash(current) != session.selected_hash():
+        if (
+            rec.recommendation_id != session.recommendation_id
+            or rec.no_pruning != session.no_pruning
+            or rec.intent != session.intent
+            or _selection_hash(current) != session.selected_hash()
+        ):
             raise AuthError(401, "token_stale", "policy changed since authorization; re-authorize")
 
     def revoke_token(self, token: str) -> bool:

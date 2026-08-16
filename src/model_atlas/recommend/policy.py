@@ -211,7 +211,7 @@ class ProfileExecutionBinding:
             "corpus_records_path": self.corpus_records_path,
             "tokenizer_hash": self.tokenizer_hash,
         }
-        if any(not value for value in required.values()):
+        if any(not isinstance(value, str) or not value.strip() for value in required.values()):
             raise ValueError("profile execution identity fields must be nonempty")
         if not self.source_manifest_digest and not self.source_sha256:
             raise ValueError("profile execution identity requires source hashes")
@@ -227,23 +227,37 @@ class ProfileExecutionBinding:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ProfileExecutionBinding:
+        def required_string(name: str, *, default: str | None = None) -> str:
+            raw = data.get(name, default)
+            if not isinstance(raw, str) or not raw.strip():
+                raise ValueError(f"{name} must be a nonempty string")
+            return raw
+
         hashes = data.get("source_sha256") or {}
         if not isinstance(hashes, dict):
             raise ValueError("source_sha256 must be a path-to-digest object")
+        normalized_hashes: list[tuple[str, str]] = []
+        for path, digest in hashes.items():
+            if not isinstance(path, str) or not isinstance(digest, str):
+                raise ValueError("source_sha256 paths and digests must be strings")
+            normalized_hashes.append((path, digest))
+        manifest = data.get("source_manifest_digest", "")
+        if not isinstance(manifest, str):
+            raise ValueError("source_manifest_digest must be a string")
         return cls(
-            source_id=str(data.get("source_id", "")),
-            checkpoint_path=str(data.get("checkpoint_path", "")),
-            checkpoint_revision=str(data.get("checkpoint_revision", "")),
-            source_manifest_digest=str(data.get("source_manifest_digest", "")),
-            source_sha256=tuple(
-                sorted((str(path), str(digest)) for path, digest in hashes.items())
-            ),
-            calibration_id=str(data.get("calibration_id", "")),
-            corpus_name=str(data.get("corpus_name", "")),
+            source_id=required_string("source_id"),
+            checkpoint_path=required_string("checkpoint_path"),
+            checkpoint_revision=required_string("checkpoint_revision"),
+            source_manifest_digest=manifest,
+            source_sha256=tuple(sorted(normalized_hashes)),
+            calibration_id=required_string("calibration_id"),
+            corpus_name=required_string("corpus_name"),
             calibration_seed=int(data.get("calibration_seed", 0)),
-            calibration_partition=str(data.get("calibration_partition", "atlas_calibration")),
-            corpus_records_path=str(data.get("corpus_records_path", "")),
-            tokenizer_hash=str(data.get("tokenizer_hash", "")),
+            calibration_partition=required_string(
+                "calibration_partition", default="atlas_calibration"
+            ),
+            corpus_records_path=required_string("corpus_records_path"),
+            tokenizer_hash=required_string("tokenizer_hash"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -361,6 +375,7 @@ class RecBlock:
 @dataclass(frozen=True)
 class MethodRecommendation:
     method: str
+    family: MethodFamily
     rank: int
     reason: str
     evidence_refs: list[str] = field(default_factory=list)
@@ -381,6 +396,11 @@ class Recommendation:
     policy_version: str
     profile_id: str
     target: RecTarget
+    intent: CompressionIntent = CompressionIntent.QUANTIZE_ONLY
+    required_families: tuple[MethodFamily, ...] = ()
+    available_families: tuple[MethodFamily, ...] = ()
+    missing_families: tuple[MethodFamily, ...] = ()
+    intent_satisfied: bool = False
     no_pruning: bool = True
     methods: tuple[MethodRecommendation, ...] = ()
     blocked_methods: tuple[MethodRecommendation, ...] = ()
@@ -400,6 +420,11 @@ class Recommendation:
                 "runtime_backend": self.target.runtime_backend,
                 "memory_target_gib": self.target.memory_target_gib,
             },
+            "intent": self.intent.value,
+            "required_families": [family.value for family in self.required_families],
+            "available_families": [family.value for family in self.available_families],
+            "missing_families": [family.value for family in self.missing_families],
+            "intent_satisfied": self.intent_satisfied,
             "no_pruning": self.no_pruning,
             "methods": [_m(m) for m in self.methods],
             "blocked_methods": [_m(m) for m in self.blocked_methods],
@@ -412,6 +437,7 @@ class Recommendation:
 def _m(m: MethodRecommendation) -> dict[str, Any]:
     return {
         "method": m.method,
+        "family": m.family.value,
         "rank": m.rank,
         "reason": m.reason,
         "evidence_refs": list(m.evidence_refs),
@@ -555,6 +581,16 @@ def method_catalog_digest(specs: tuple[MethodSpec, ...] = METHOD_CATALOG) -> str
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def required_families(intent: CompressionIntent) -> tuple[MethodFamily, ...]:
+    if intent == CompressionIntent.QUANTIZE_ONLY:
+        return (MethodFamily.QUANTIZATION,)
+    if intent == CompressionIntent.PRUNE_ONLY:
+        return (MethodFamily.PRUNING,)
+    if intent == CompressionIntent.HYBRID:
+        return (MethodFamily.QUANTIZATION, MethodFamily.PRUNING)
+    return ()
+
+
 _METHOD_STAGES = {
     spec.method: list(spec.evidence_stages) for spec in METHOD_CATALOG
 }
@@ -666,6 +702,7 @@ class RecommendationPolicy:
         *,
         allow_pruning: bool = False,
         memory_target_gib: float | None = None,
+        intent: CompressionIntent = CompressionIntent.QUANTIZE_ONLY,
     ) -> Recommendation:
         """Deterministic ranking. Missing evidence reduces confidence/blocks;
         never invents metrics."""
@@ -677,28 +714,60 @@ class RecommendationPolicy:
                 runtime_backend=target.runtime_backend,
                 memory_target_gib=memory_target_gib,
             )
-        no_pruning = not self._pruning_permitted(allow_pruning)  # no_pruning defaults True
+        intent = CompressionIntent(intent)
+        pruning_intent = intent in {
+            CompressionIntent.PRUNE_ONLY,
+            CompressionIntent.HYBRID,
+            CompressionIntent.CUSTOM,
+        }
+        no_pruning = not self._pruning_permitted(allow_pruning and pruning_intent)
         methods: list[MethodRecommendation] = []
         blocked: list[MethodRecommendation] = []
         for method, stage_ids in _METHOD_STAGES.items():
             rec = self._score(profile, target, method, stage_ids, no_pruning)
+            spec = method_spec(method)
+            if intent not in spec.compatible_intents:
+                rec = MethodRecommendation(
+                    **{
+                        **rec.__dict__,
+                        "blockers": [
+                            *rec.blockers,
+                            RecBlock(
+                                "intent_family_mismatch",
+                                f"{spec.family.value} method is outside {intent.value}",
+                            ),
+                        ],
+                    }
+                )
             (blocked if rec.blockers else methods).append(rec)
         methods.sort(key=lambda r: self._ordering_sort_key(r, profile, target))
         blocked.sort(key=lambda r: r.method)
         # overall confidence = min over non-blocked recommended methods (plus
         # profile coverage), INSUFFICIENT if any critical stage evidence missing
         conf = self._overall_confidence(methods, profile)
-        rid = self._recommendation_id(profile, target, no_pruning)
+        required = required_families(intent)
+        available = tuple(
+            sorted({method.family for method in methods}, key=lambda family: family.value)
+        )
+        missing = tuple(family for family in required if family not in available)
+        if missing:
+            conf = RecConfidence.INSUFFICIENT
+        rid = self._recommendation_id(profile, target, no_pruning, intent)
         return Recommendation(
             recommendation_id=rid,
             policy_version=RECOMMENDATION_POLICY_VERSION,
             profile_id=profile.profile_id_of(),
             target=target,
+            intent=intent,
+            required_families=required,
+            available_families=available,
+            missing_families=missing,
+            intent_satisfied=not missing,
             no_pruning=no_pruning,
             methods=tuple(methods),
             blocked_methods=tuple(blocked),
             confidence=conf,
-            summary=_summarize(conf, no_pruning),
+            summary=_summarize(conf, no_pruning, intent, missing),
         )
 
     # --------------------------------------------------------- scoring
@@ -772,6 +841,7 @@ class RecommendationPolicy:
         if missing:
             rec = MethodRecommendation(
                 method=method,
+                family=method_spec(method).family,
                 rank=99,
                 reason="missing evidence for required stage(s); confidence "
                 "INSUFFICIENT and decision blocked until re-profiled",
@@ -797,6 +867,7 @@ class RecommendationPolicy:
             _status = RecipeStatus.DISCOVERED
         return MethodRecommendation(
             method=method,
+            family=method_spec(method).family,
             rank=rank,
             reason=reason,
             evidence_refs=evidence_refs,
@@ -952,7 +1023,13 @@ class RecommendationPolicy:
             return 0.0
         return sum(covs) / len(covs)
 
-    def _recommendation_id(self, profile: AtlasProfile, target: RecTarget, no_pruning: bool) -> str:
+    def _recommendation_id(
+        self,
+        profile: AtlasProfile,
+        target: RecTarget,
+        no_pruning: bool,
+        intent: CompressionIntent,
+    ) -> str:
         payload = canonical_json(
             {
                 "policy": RECOMMENDATION_POLICY_VERSION,
@@ -966,6 +1043,7 @@ class RecommendationPolicy:
                     "memory_gib": target.memory_target_gib,
                 },
                 "no_pruning": no_pruning,
+                "intent": intent.value,
             }
         )
         return "rec-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
@@ -979,9 +1057,16 @@ _C_RANK = {
 }
 
 
-def _summarize(conf: RecConfidence, no_pruning: bool) -> str:
+def _summarize(
+    conf: RecConfidence,
+    no_pruning: bool,
+    intent: CompressionIntent,
+    missing: tuple[MethodFamily, ...],
+) -> str:
+    missing_text = ",".join(family.value for family in missing) or "none"
     return (
-        f"Deterministic policy recommendation. no_pruning={no_pruning}; overall "
-        f"confidence {conf.value}. Missing evidence reduces confidence and blocks "
-        "decisions; predictions are never reported as measured."
+        f"Deterministic policy recommendation. intent={intent.value}; "
+        f"no_pruning={no_pruning}; missing_families={missing_text}; overall "
+        f"confidence {conf.value}. Missing evidence reduces confidence and "
+        "blocks decisions; predictions are never reported as measured."
     )
