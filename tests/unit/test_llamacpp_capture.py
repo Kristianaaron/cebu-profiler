@@ -8,6 +8,11 @@ from pathlib import Path
 
 import pytest
 
+from model_atlas.evaluation.capture_metrics import (
+    CaptureMetricError,
+    evaluate_capture_pair,
+    full_vocab_kld_row,
+)
 from model_atlas.evaluation.llamacpp_capture import (
     LLAMA_CPP_CAPTURE_COMMIT,
     CaptureRequest,
@@ -446,3 +451,69 @@ def test_profile_tokenizer_identity_is_pair_bound(tmp_path: Path) -> None:
     reference = finalize_capture(reference_request)
     with pytest.raises(CaptureValidationError, match="exact candidate model"):
         validate_capture_pair(reference, candidate)
+
+
+def test_streaming_identity_control_kld_and_cka(tmp_path: Path) -> None:
+    candidate_request, candidate_root = _raw_capture(tmp_path / "candidate")
+    candidate = finalize_capture(candidate_request)
+    reference_request, reference_root = _raw_capture(
+        tmp_path / "reference", role=CaptureRole.IDENTITY_CONTROL
+    )
+    reference = finalize_capture(reference_request)
+
+    report = evaluate_capture_pair(
+        reference_root=reference_root,
+        reference=reference,
+        candidate_root=candidate_root,
+        candidate=candidate,
+        cka_rows=3,
+    )
+    assert report.identity_control_passed is True
+    assert report.kld.report.overall.token_weighted_mean == pytest.approx(0.0, abs=1e-12)
+    assert all(result.score == pytest.approx(1.0) for result in report.layer_cka)
+
+
+def test_full_vocab_kld_row_matches_analytic_binary_case() -> None:
+    measured = full_vocab_kld_row(
+        [math.log(0.8), math.log(0.2)],
+        [math.log(0.5), math.log(0.5)],
+    )
+    expected = 0.8 * math.log(0.8 / 0.5) + 0.2 * math.log(0.2 / 0.5)
+    assert measured == pytest.approx(expected, rel=1e-12, abs=1e-12)
+
+
+def test_streaming_metrics_reject_tamper_and_false_identity(tmp_path: Path) -> None:
+    candidate_request, candidate_root = _raw_capture(tmp_path / "candidate")
+    logits = candidate_root / "logits.f32"
+    values = list(struct.unpack("<12f", logits.read_bytes()))
+    values = [value + 7.0 for value in values]
+    logits.write_bytes(struct.pack("<12f", *values))
+    for layer in (0, 2):
+        path = candidate_root / f"layer-{layer:03d}.f32"
+        hidden = list(struct.unpack("<9f", path.read_bytes()))
+        path.write_bytes(struct.pack("<9f", *(value * 3.0 for value in hidden)))
+    candidate = finalize_capture(candidate_request)
+    reference_request, reference_root = _raw_capture(
+        tmp_path / "reference", role=CaptureRole.IDENTITY_CONTROL
+    )
+    reference = finalize_capture(reference_request)
+    with pytest.raises(CaptureMetricError, match="identity-control"):
+        evaluate_capture_pair(
+            reference_root=reference_root,
+            reference=reference,
+            candidate_root=candidate_root,
+            candidate=candidate,
+            cka_rows=3,
+        )
+
+    clean_request, clean_root = _raw_capture(tmp_path / "clean")
+    clean = finalize_capture(clean_request)
+    (clean_root / "logits.f32").write_bytes(b"tampered")
+    with pytest.raises(CaptureMetricError, match="size/type"):
+        evaluate_capture_pair(
+            reference_root=reference_root,
+            reference=reference,
+            candidate_root=clean_root,
+            candidate=clean,
+            cka_rows=3,
+        )

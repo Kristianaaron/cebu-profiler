@@ -1,5 +1,13 @@
 """Held-out evaluation and leakage gate."""
 
+from model_atlas.evaluation.capture_metrics import (
+    CAPTURE_METRICS_VERSION,
+    CaptureMetricError,
+    CaptureMetricReport,
+    LayerCKAResult,
+    evaluate_capture_pair,
+    full_vocab_kld_row,
+)
 from model_atlas.evaluation.cka import CKA, centered_linear_cka
 from model_atlas.evaluation.contracts import (
     CorpusSlice,
@@ -92,6 +100,13 @@ __all__ = [
     # cka
     "CKA",
     "centered_linear_cka",
+    # measured capture metrics
+    "CAPTURE_METRICS_VERSION",
+    "CaptureMetricError",
+    "CaptureMetricReport",
+    "LayerCKAResult",
+    "evaluate_capture_pair",
+    "full_vocab_kld_row",
     # candidate-only Eval Lab handoff
     "EVAL_LAB_REVISION",
     "DataPartition",
