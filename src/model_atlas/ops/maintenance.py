@@ -1,0 +1,488 @@
+"""Trap-safe two-node maintenance coordination.
+
+The coordinator owns no model/runtime implementation.  It only brackets an
+operator-supplied payload with a deterministic production drain and best-effort
+restoration.  Every external command goes through ``CommandRunner`` so tests
+never touch real services.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import signal
+import subprocess
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
+from pathlib import Path
+from types import FrameType
+from typing import Literal, Protocol
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+class CommandResult(BaseModel):
+    """Sanitized command result; output is never serialized into the receipt."""
+
+    model_config = ConfigDict(frozen=True)
+    returncode: int
+    stdout: str = ""
+
+
+class CommandRunner(Protocol):
+    def run(self, argv: Sequence[str]) -> CommandResult:
+        """Run argv directly (never through a shell)."""
+
+
+class SubprocessCommandRunner:
+    """Production runner.  stderr is intentionally not retained."""
+
+    def run(self, argv: Sequence[str]) -> CommandResult:
+        result = subprocess.run(
+            list(argv),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=None,
+        )
+        return CommandResult(returncode=result.returncode, stdout=result.stdout)
+
+
+class BinaryHash(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    path: str
+    sha256: str | None
+    readable: bool
+
+
+class StateSnapshot(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    target: str
+    kind: Literal["user_unit", "container"]
+    active: bool
+    observed_at: datetime
+
+
+class ActionReceipt(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    action_id: str
+    target: str
+    requested: bool
+    executed: bool
+    success: bool
+    started_at: datetime
+    finished_at: datetime
+    evidence: str = ""
+
+
+class MaintenanceReceipt(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    schema_version: Literal[1] = 1
+    run_id: str
+    dry_run: bool
+    started_at: datetime
+    finished_at: datetime | None = None
+    previous_states: list[StateSnapshot] = Field(default_factory=list)
+    binary_hashes: list[BinaryHash] = Field(default_factory=list)
+    actions: list[ActionReceipt] = Field(default_factory=list)
+    restoration_evidence: dict[str, bool] = Field(default_factory=dict)
+    success: bool = False
+    failure: str | None = None
+
+
+class MaintenanceConfig(BaseModel):
+    """Fixed, non-secret maintenance targets.
+
+    Unit-file removal is opt-in by supplying the corresponding path.  A journal
+    is always captured before any supplied unit file is removed.
+    """
+
+    model_config = ConfigDict(frozen=True)
+    gateway_unit: str = "hermes-gateway.service"
+    vision_adapter_unit: str = "dsv4-vision-adapter.service"
+    qwen_unit: str = "qwen35-vision.service"
+    dsv4_container: str = "deepseek-v4-flash-vllm-dspark-1"
+    dsv4_stop_script: Path = Path(
+        "/home/kristianaaron/ai-lab/repos/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark/"
+        "stop-deepseek-v4-flash-dspark.sh"
+    )
+    dsv4_start_script: Path = Path(
+        "/home/kristianaaron/ai-lab/repos/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark/"
+        "start-deepseek-v4-flash-dspark.sh"
+    )
+    head_runtime_unit: str = "atlas-glm52-runtime.service"
+    worker_rpc_unit: str = "atlas-glm52-rpc.service"
+    worker_ssh_target: str = "10.77.0.2"
+    head_runtime_unit_file: Path | None = None
+    worker_rpc_unit_file: Path | None = None
+    binary_paths: tuple[Path, ...] = ()
+    journal_dir: Path
+    receipt_path: Path
+
+    def all_binary_paths(self) -> tuple[Path, ...]:
+        return (self.dsv4_stop_script, self.dsv4_start_script, *self.binary_paths)
+
+
+class MaintenanceInterrupted(RuntimeError):
+    def __init__(self, signum: int) -> None:
+        self.signum = signum
+        super().__init__(f"signal:{signum}")
+
+
+class MaintenanceFailure(RuntimeError):
+    pass
+
+
+class MaintenanceCoordinator:
+    """Execute and always unwind a two-node maintenance window."""
+
+    def __init__(
+        self,
+        config: MaintenanceConfig,
+        runner: CommandRunner,
+        *,
+        execute: bool = False,
+        clock: Callable[[], datetime] = _now,
+    ) -> None:
+        self.config = config
+        self.runner = runner
+        self.execute = execute
+        self.clock = clock
+        self._states: dict[str, StateSnapshot] = {}
+        self._actions: list[ActionReceipt] = []
+        self._restored: set[str] = set()
+        self._restoration_evidence: dict[str, bool] = {}
+
+    def _command(self, argv: Sequence[str]) -> CommandResult:
+        return self.runner.run(argv)
+
+    def _unit_active(self, unit: str, *, remote: bool = False) -> bool:
+        command = ["systemctl", "--user", "is-active", "--quiet", unit]
+        if remote:
+            command = ["ssh", self.config.worker_ssh_target, *command]
+        return self._command(command).returncode == 0
+
+    def _container_active(self, name: str) -> bool:
+        result = self._command(["docker", "inspect", "--format", "{{.State.Running}}", name])
+        return result.returncode == 0 and result.stdout.strip() == "true"
+
+    def _snapshot(self) -> None:
+        observed = self.clock()
+        units = (
+            ("gateway", self.config.gateway_unit, False),
+            ("vision_adapter", self.config.vision_adapter_unit, False),
+            ("qwen", self.config.qwen_unit, False),
+            ("head_runtime", self.config.head_runtime_unit, False),
+            ("worker_rpc", self.config.worker_rpc_unit, True),
+        )
+        for key, unit, remote in units:
+            self._states[key] = StateSnapshot(
+                target=unit,
+                kind="user_unit",
+                active=self._unit_active(unit, remote=remote),
+                observed_at=observed,
+            )
+        self._states["dsv4"] = StateSnapshot(
+            target=self.config.dsv4_container,
+            kind="container",
+            active=self._container_active(self.config.dsv4_container),
+            observed_at=observed,
+        )
+
+    @staticmethod
+    def _hash_binary(path: Path) -> BinaryHash:
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError:
+            return BinaryHash(path=str(path), sha256=None, readable=False)
+        return BinaryHash(path=str(path), sha256=digest.hexdigest(), readable=True)
+
+    def _record(
+        self,
+        action_id: str,
+        target: str,
+        *,
+        requested: bool,
+        command: Sequence[str] | None,
+        output_path: Path | None = None,
+    ) -> bool:
+        started = self.clock()
+        executed = bool(self.execute and requested and command is not None)
+        success = True
+        evidence = "dry_run" if requested and not self.execute else "not_previously_active"
+        if executed:
+            assert command is not None
+            try:
+                result = self._command(command)
+                success = result.returncode == 0
+                evidence = "return_code=0" if success else f"return_code={result.returncode}"
+                if output_path is not None and success:
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_text(result.stdout, encoding="utf-8")
+                    evidence = (
+                        f"journal_sha256={hashlib.sha256(result.stdout.encode()).hexdigest()}"
+                    )
+            except MaintenanceInterrupted:
+                raise
+            except BaseException as exc:
+                success = False
+                evidence = f"exception_type={type(exc).__name__}"
+        self._actions.append(
+            ActionReceipt(
+                action_id=action_id,
+                target=target,
+                requested=requested,
+                executed=executed,
+                success=success,
+                started_at=started,
+                finished_at=self.clock(),
+                evidence=evidence,
+            )
+        )
+        return success
+
+    def _required(
+        self, action_id: str, target: str, command: Sequence[str], *, active: bool
+    ) -> None:
+        if not self._record(action_id, target, requested=active, command=command):
+            raise MaintenanceFailure(f"{action_id}:return_code")
+
+    def _acquire(self) -> None:
+        # External dependency order is part of the safety contract.
+        for key, unit in (
+            ("gateway", self.config.gateway_unit),
+            ("vision_adapter", self.config.vision_adapter_unit),
+            ("qwen", self.config.qwen_unit),
+        ):
+            self._required(
+                f"stop_{key}",
+                unit,
+                ["systemctl", "--user", "stop", unit],
+                active=self._states[key].active,
+            )
+        self._required(
+            "stop_dsv4",
+            str(self.config.dsv4_stop_script),
+            [str(self.config.dsv4_stop_script)],
+            active=self._states["dsv4"].active,
+        )
+
+    def _preserve_and_stop_runtime(
+        self,
+        *,
+        key: Literal["head_runtime", "worker_rpc"],
+        unit: str,
+        remote: bool,
+        unit_file: Path | None,
+    ) -> None:
+        if key in self._restored:
+            return
+        journal_path = self.config.journal_dir / f"{key}.journal.log"
+        journal_command = [
+            "journalctl",
+            "--user",
+            "-u",
+            unit,
+            "--no-pager",
+            "--output=short-iso-precise",
+        ]
+        if remote:
+            journal_command = ["ssh", self.config.worker_ssh_target, *journal_command]
+        journal_preserved = self._record(
+            f"preserve_{key}_journal",
+            unit,
+            requested=True,
+            command=journal_command,
+            output_path=journal_path,
+        )
+        stop_command = ["systemctl", "--user", "stop", unit]
+        if remote:
+            stop_command = ["ssh", self.config.worker_ssh_target, *stop_command]
+        self._record(f"stop_{key}", unit, requested=True, command=stop_command)
+        if unit_file is not None and journal_preserved:
+            remove_command = ["rm", "--", str(unit_file)]
+            if remote:
+                remove_command = ["ssh", self.config.worker_ssh_target, *remove_command]
+            self._record(
+                f"remove_{key}_unit",
+                str(unit_file),
+                requested=True,
+                command=remove_command,
+            )
+            reload_command = ["systemctl", "--user", "daemon-reload"]
+            if remote:
+                reload_command = ["ssh", self.config.worker_ssh_target, *reload_command]
+            self._record(
+                f"reload_after_{key}_removal",
+                unit,
+                requested=True,
+                command=reload_command,
+            )
+        self._restored.add(key)
+
+    def _restore_action(
+        self, key: str, action_id: str, target: str, command: Sequence[str]
+    ) -> None:
+        if key in self._restored:
+            return
+        previously_active = self._states[key].active
+        self._record(
+            action_id,
+            target,
+            requested=previously_active,
+            command=command,
+        )
+        self._restored.add(key)
+
+    def restore(self) -> None:
+        """Best-effort, idempotent rollback; every transition is attempted."""
+        # Experimental consumers are always drained head-first, then worker.
+        self._preserve_and_stop_runtime(
+            key="head_runtime",
+            unit=self.config.head_runtime_unit,
+            remote=False,
+            unit_file=self.config.head_runtime_unit_file,
+        )
+        self._preserve_and_stop_runtime(
+            key="worker_rpc",
+            unit=self.config.worker_rpc_unit,
+            remote=True,
+            unit_file=self.config.worker_rpc_unit_file,
+        )
+        self._restore_action(
+            "dsv4",
+            "restore_dsv4",
+            str(self.config.dsv4_start_script),
+            [str(self.config.dsv4_start_script)],
+        )
+        for key, unit in (
+            ("qwen", self.config.qwen_unit),
+            ("vision_adapter", self.config.vision_adapter_unit),
+            ("gateway", self.config.gateway_unit),
+        ):
+            self._restore_action(
+                key,
+                f"restore_{key}",
+                unit,
+                ["systemctl", "--user", "start", unit],
+            )
+
+        if self.execute:
+            self._restoration_evidence = {
+                "dsv4": self._container_active(self.config.dsv4_container)
+                if self._states["dsv4"].active
+                else True,
+                "qwen": self._unit_active(self.config.qwen_unit)
+                if self._states["qwen"].active
+                else True,
+                "vision_adapter": self._unit_active(self.config.vision_adapter_unit)
+                if self._states["vision_adapter"].active
+                else True,
+                "gateway": self._unit_active(self.config.gateway_unit)
+                if self._states["gateway"].active
+                else True,
+                "head_runtime_stopped": not self._unit_active(self.config.head_runtime_unit),
+                "worker_rpc_stopped": not self._unit_active(
+                    self.config.worker_rpc_unit, remote=True
+                ),
+            }
+
+    def run(self, payload: Sequence[str] | None = None) -> MaintenanceReceipt:
+        started = self.clock()
+        run_id = f"maintenance-{started.strftime('%Y%m%dT%H%M%S.%fZ')}"
+        failure: str | None = None
+        self._snapshot()
+        hashes = [self._hash_binary(path) for path in self.config.all_binary_paths()]
+        try:
+            self._acquire()
+            if payload and not self._record(
+                "operator_payload",
+                "operator_payload",
+                requested=True,
+                command=list(payload),
+            ):
+                raise MaintenanceFailure("operator_payload:return_code")
+        except BaseException as exc:
+            failure = self._failure_label(exc)
+        finally:
+            try:
+                self.restore()
+            except BaseException as exc:
+                restore_failure = self._failure_label(exc)
+                failure = f"{failure};restore={restore_failure}" if failure else restore_failure
+
+        action_success = all(action.success for action in self._actions)
+        evidence_success = all(self._restoration_evidence.values())
+        receipt = MaintenanceReceipt(
+            run_id=run_id,
+            dry_run=not self.execute,
+            started_at=started,
+            finished_at=self.clock(),
+            previous_states=list(self._states.values()),
+            binary_hashes=hashes,
+            actions=list(self._actions),
+            restoration_evidence=dict(self._restoration_evidence),
+            success=failure is None and action_success and evidence_success,
+            failure=failure,
+        )
+        self.config.receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.config.receipt_path.with_suffix(self.config.receipt_path.suffix + ".tmp")
+        temporary.write_text(receipt.model_dump_json(indent=2), encoding="utf-8")
+        os.replace(temporary, self.config.receipt_path)
+        return receipt
+
+    @staticmethod
+    def _failure_label(exc: BaseException) -> str:
+        # Never persist arbitrary exception text: command/library exceptions may
+        # contain argv, environment fragments, or credentials.
+        if isinstance(exc, MaintenanceInterrupted):
+            return f"MaintenanceInterrupted:signal:{exc.signum}"
+        return type(exc).__name__
+
+
+SignalHandler = Callable[[int, FrameType | None], object] | int | None
+
+
+def install_signal_traps() -> dict[int, SignalHandler]:
+    """Install SIGINT/SIGTERM traps and return handlers for later restoration."""
+
+    previous: dict[int, SignalHandler] = {}
+
+    def interrupt(signum: int, _frame: object) -> None:
+        raise MaintenanceInterrupted(signum)
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous[signum] = signal.getsignal(signum)
+        signal.signal(signum, interrupt)
+    return previous
+
+
+def restore_signal_traps(previous: dict[int, SignalHandler]) -> None:
+    for signum, handler in previous.items():
+        signal.signal(signum, handler)
+
+
+def receipt_contains_secret_keys(receipt: MaintenanceReceipt) -> bool:
+    """Defense-in-depth assertion for serialized audit output."""
+    forbidden = ("token", "secret", "password", "credential", "environment", "env")
+    payload = json.loads(receipt.model_dump_json())
+
+    def visit(value: object) -> bool:
+        if isinstance(value, dict):
+            return any(
+                any(word in str(key).lower() for word in forbidden) or visit(item)
+                for key, item in value.items()
+            )
+        if isinstance(value, list):
+            return any(visit(item) for item in value)
+        return False
+
+    return visit(payload)
