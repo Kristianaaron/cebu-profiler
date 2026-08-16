@@ -48,7 +48,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artifact", required=True, type=Path)
     parser.add_argument("--artifact-sha256", required=True)
     parser.add_argument("--evidence", required=True, type=Path)
-    parser.add_argument("--telemetry-probe", required=True, type=Path)
+    parser.add_argument(
+        "--telemetry-probe",
+        type=Path,
+        default=Path(__file__).with_name("collect_two_node_telemetry.py"),
+    )
+    parser.add_argument("--rdma-interface")
+    parser.add_argument("--disk-device")
     parser.add_argument("--worker-ssh-target", default="10.77.0.2")
     parser.add_argument("--worker-host", default="169.254.200.197")
     parser.add_argument(
@@ -106,6 +112,8 @@ def main() -> int:
             )
         )
         return 0
+    if not args.rdma_interface or not args.disk_device:
+        raise RuntimeError("--rdma-interface and --disk-device are required with --execute")
 
     argv_runner = _ArgvRunner()
     requests = CanaryRequestClient(config, transport=LoopbackHttpTransport())
@@ -123,7 +131,13 @@ def main() -> int:
         runner=argv_runner,
     )
     telemetry = TwoNodeTelemetryCollector(
-        probe_argv=(str(args.telemetry_probe),),
+        probe_argv=(
+            str(args.telemetry_probe),
+            "--rdma-interface",
+            args.rdma_interface,
+            "--disk-device",
+            args.disk_device,
+        ),
         worker_ssh_target=args.worker_ssh_target,
         runner=SubprocessTelemetryRunner(),
     )
