@@ -22,6 +22,11 @@
       "path": "/home/kristianaaron/tmp/atlas-toolchains/llama.cpp/convert_hf_to_gguf.py",
       "sha256": "e38975e1c68d98ac1664dfd530616eb35c72294382a4dd873d4746b23f27779f"
     },
+    "converter_python": {
+      "path": "/home/kristianaaron/ai-lab/venvs/vllm/bin/python",
+      "resolved_path": "/usr/bin/python3.12",
+      "sha256": "a7d56a8a764faf7bbf5c164055a48fd072be52287bdeb523a9e07b2042f4e7e1"
+    },
     "llama_quantize": {
       "path": "/home/kristianaaron/tmp/atlas-toolchains/llama.cpp/build-atlas-cpu/bin/llama-quantize",
       "sha256": "536a0cd9cafe3172d638ca6eb29402661d05c2d8954631ef2f6f0fac6fb78e48"

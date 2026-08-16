@@ -89,6 +89,9 @@ def _tool_hashes(root: Path) -> dict[str, str]:
         "expected_quantizer_sha256": hashlib.sha256(
             (root / CPU_QUANTIZER_RELATIVE_PATH).read_bytes()
         ).hexdigest(),
+        "expected_python_sha256": hashlib.sha256(
+            (root.parent / "venv/bin/python").read_bytes()
+        ).hexdigest(),
     }
 
 
@@ -380,6 +383,15 @@ def test_scratch_may_not_overlap_immutable_source(tmp_path: Path) -> None:
     with pytest.raises(BackendUnavailable, match="scratch and immutable source"):
         adapter.prepare(context)
 
+    safe_source = tmp_path / "safe-source"
+    safe_source.mkdir()
+    stage = tmp_path / "alias-stage"
+    stage.mkdir()
+    (stage / "llamacpp-work").symlink_to(safe_source, target_is_directory=True)
+    alias_context = _context(safe_source, stage / "staging")
+    with pytest.raises(BackendUnavailable, match="scratch must not be a symlink"):
+        adapter.prepare(alias_context)
+
 
 def test_resume_rejects_changed_plan_provenance_before_subprocess(tmp_path: Path) -> None:
     root, python = _fake_toolchain(tmp_path)
@@ -407,4 +419,12 @@ def test_resume_rejects_changed_plan_provenance_before_subprocess(tmp_path: Path
     )
     with pytest.raises(BackendUnavailable, match="resume provenance does not match"):
         adapter2.resume(changed, "second")
+    assert resumed.calls == []
+
+    changed_threads = _context(source, staging)
+    parameters = changed_threads["parameters"]
+    assert isinstance(parameters, dict)
+    parameters["threads"] = "7"
+    with pytest.raises(BackendUnavailable, match="resume provenance does not match"):
+        adapter2.resume(changed_threads, "third")
     assert resumed.calls == []
