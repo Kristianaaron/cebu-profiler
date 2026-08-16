@@ -40,6 +40,8 @@ def test_decode_is_strictly_bounded() -> None:
         decode_nvfp4_rows(b"", b"", 1.0, rows=9, packed_columns=8)
     with pytest.raises(ValueError, match="scale byte count"):
         decode_nvfp4_rows(bytes(8), b"", 1.0, rows=1, packed_columns=8)
+    with pytest.raises(ValueError, match="absolute element limit"):
+        decode_nvfp4_rows(b"", b"", 1.0, rows=1, packed_columns=1 << 20)
 
 
 def test_real_glm_nvfp4_sample_is_stable_when_mounted() -> None:

@@ -22,6 +22,8 @@ from model_atlas.checkpoint.safetensors import read_safetensors_header
 _E2M1 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
          0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
 _MAX_ROWS = 8
+_MAX_SAMPLE_BYTES = 1 << 20
+_MAX_DECODED_ELEMENTS = 1 << 17
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,10 @@ def decode_nvfp4_rows(
     scale_columns, remainder = divmod(packed_columns * 2, block_size)
     if remainder:
         raise ValueError("decoded columns must be divisible by block_size")
+    if rows * packed_columns * 2 > _MAX_DECODED_ELEMENTS:
+        raise ValueError("decoded sample exceeds the absolute element limit")
+    if expected_weight + rows * scale_columns > _MAX_SAMPLE_BYTES:
+        raise ValueError("NVFP4 sample exceeds the absolute byte-read limit")
     if len(packed) != expected_weight:
         raise ValueError("packed row byte count does not match shape")
     if len(scales_e4m3) != rows * scale_columns:
@@ -132,6 +138,10 @@ def probe_nvfp4_tensor(
     scale_rows, scale_columns = (int(v) for v in scale["shape"])
     if weight_rows != scale_rows or packed_columns * 2 != scale_columns * 16:
         raise ValueError("NVFP4 weight/scale geometry mismatch")
+    if rows * packed_columns * 2 > _MAX_DECODED_ELEMENTS:
+        raise ValueError("decoded sample exceeds the absolute element limit")
+    if rows * (packed_columns + scale_columns) + 4 > _MAX_SAMPLE_BYTES:
+        raise ValueError("NVFP4 sample exceeds the absolute byte-read limit")
     if row_start + rows > weight_rows:
         raise ValueError("requested row range exceeds tensor shape")
     header_size = _header_size(shard)

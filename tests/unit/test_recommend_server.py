@@ -603,13 +603,11 @@ def test_loopback_allowed():
 
 
 # --- endpoint-level async start via persisted job engine (feasible seeding) ---
-def test_start_async_immediate_return_monkeypatched(
+def test_start_rejects_legacy_preview_without_authorization_lineage(
     server: RecommendationServer, service, tmp_path
 ):
-    """Endpoint /api/start with a seeded executable preview returns run_id
-    immediately (background worker), the job is durable (status via
-    /api/jobs/<id>), and a duplicate start is rejected as replay — all through
-    the real HTTP server + persisted job engine."""
+    """A legacy/internal preview without canonical authorization lineage must
+    fail closed through the real HTTP endpoint."""
     from model_atlas.recipe.compiler import RecipeCompiler
     from model_atlas.recipe.schema import (
         CalibrationIdentity,
@@ -676,23 +674,6 @@ def test_start_async_immediate_return_monkeypatched(
          "plan_id": artifact.plan_id, "recipe_sha256": artifact.recipe_sha256,
          "selected": ["m1"], "inputs": {}},
     )
-    assert status == 200
-    body = _json((status, data))
-    assert body["status"] == "started"
-    run_id = body["run_id"]
-    assert run_id == artifact.run_id
-
-    # durable + observable
-    status, data = _request(server, "GET", "/api/jobs/" + run_id)
-    assert status == 200
-    assert _json((status, data))["run_id"] == run_id
-
-    # replay rejected deterministically
-    status, data = _post(
-        server, "/api/start",
-        {"token": tok, "preview_id": "pv-ep", "hash": h,
-         "plan_id": artifact.plan_id, "recipe_sha256": artifact.recipe_sha256,
-         "selected": ["m1"], "inputs": {}},
-    )
     assert status == 409
-    assert _json((status, data))["code"] == "replay"
+    body = _json((status, data))
+    assert body["code"] == "authorization_snapshot_mismatch"

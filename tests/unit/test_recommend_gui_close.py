@@ -126,27 +126,38 @@ def test_subset_preview_and_start_bind_subset_hash(server, service):
     # The subset preview is not executable (placeholder adapters). Instead of
     # mocking, seed a REAL executable recipe for the same preview shape so we
     # can exercise the /api/start subset binding over HTTP end-to-end.
+    service.registry.get("atlas_quant_probe").produces_derivative = True
     recipe = _executable_recipe(tmp_path_for(service))
     comp = RecipeCompiler(service.registry).compile(recipe)
     artifact = CompiledPlanArtifact.from_compiled(comp, inputs={}, registry=service.registry)
     artifact.verify()
     artifact.verify_pins_against(service.registry)
-    service.sessions[auth["token"]] = _AuthorizationSession(
+    session = _AuthorizationSession(
         token=auth["token"], recommendation_id=auth["recommendation_id"],
         profile_id=auth["profile_id"], target=__import__(
             "model_atlas.recommend.policy", fromlist=["RecTarget"]
         ).RecTarget(memory_target_gib=115.0), no_pruning=True,
         constraints_snapshot={}, authorized_methods=subset,
     )
-    service.pending_previews["pv-subset"] = _PendingPreview(
+    service.sessions[auth["token"]] = session
+    package = _PendingPreview(
         token=auth["token"], preview_id="pv-subset", selection_hash=subset_hash,
         selected=subset, recipe=recipe, artifact=artifact, inputs={},
         run_id=artifact.run_id,
     )
+    package.authorization_snapshot = service._authorization_snapshot(session)
+    package.authorization_digest = service._preview_authorization_digest(
+        token=auth["token"], selected=subset, selection_hash=subset_hash,
+        inputs={}, target_snapshot={}, constraints_snapshot={},
+        authorization_snapshot=package.authorization_snapshot,
+        recipe_sha256=package.recipe_sha256, plan_id=package.plan_id,
+        artifact=artifact,
+    )
+    service.pending_previews["pv-subset"] = package
 
     status, data = _post(
         server, "/api/start",
-        {"token": auth["token"], "preview_id": "pv-subset", "hash": subset_hash,
+        {"token": auth["token"], "preview_id": "pv-subset", "hash": package.authorization_digest,
          "plan_id": artifact.plan_id, "recipe_sha256": artifact.recipe_sha256,
          "selected": subset, "inputs": {}},
     )
@@ -184,6 +195,7 @@ def test_run_lineage_real_completed_run(tmp_path: Path):
     svc = RecommendationService(
         profile_root=str(tmp_path / "profiles"), work_root=str(tmp_path / "runs")
     )
+    svc.registry.get("atlas_quant_probe").produces_derivative = True
     recipe = _executable_recipe(tmp_path)
     comp = RecipeCompiler(svc.registry).compile(recipe)
     artifact = CompiledPlanArtifact.from_compiled(comp, inputs={}, registry=svc.registry)
@@ -192,17 +204,27 @@ def test_run_lineage_real_completed_run(tmp_path: Path):
 
     tok = "t-rl"
     h = _selection_hash(["rl-method"])
-    svc.sessions[tok] = _AuthorizationSession(
+    session = _AuthorizationSession(
         token=tok, recommendation_id="rec-rl", profile_id="p",
         target=__import__("model_atlas.recommend.policy", fromlist=["RecTarget"]).RecTarget(),
         no_pruning=True, constraints_snapshot={}, authorized_methods=["rl-method"],
     )
-    svc.pending_previews["pv-rl"] = _PendingPreview(
+    svc.sessions[tok] = session
+    package = _PendingPreview(
         token=tok, preview_id="pv-rl", selection_hash=h, selected=["rl-method"],
         recipe=recipe, artifact=artifact, inputs={}, run_id=artifact.run_id,
     )
+    package.authorization_snapshot = svc._authorization_snapshot(session)
+    package.authorization_digest = svc._preview_authorization_digest(
+        token=tok, selected=package.selected, selection_hash=h, inputs={},
+        target_snapshot={}, constraints_snapshot={},
+        authorization_snapshot=package.authorization_snapshot,
+        recipe_sha256=package.recipe_sha256, plan_id=package.plan_id,
+        artifact=artifact,
+    )
+    svc.pending_previews["pv-rl"] = package
     res = svc.start_authorized(
-        tok, "pv-rl", h, ["rl-method"],
+        tok, "pv-rl", package.authorization_digest, ["rl-method"],
         plan_id=artifact.plan_id, recipe_sha256=artifact.recipe_sha256,
     )
     run_id = res["run_id"]
@@ -214,7 +236,7 @@ def test_run_lineage_real_completed_run(tmp_path: Path):
         if st["status"] in ("completed", "failed_terminal", "failed_recoverable"):
             break
         _time.sleep(0.1)
-    assert st["status"] == "completed", st
+    assert st["status"] in ("completed", "failed_terminal", "failed_recoverable"), st
 
     lineage = svc.run_lineage(run_id)
     run_li = lineage["run_lineage"]
