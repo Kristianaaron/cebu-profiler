@@ -209,6 +209,14 @@ def test_manifest_rejects_forged_checkpoint_and_source_overlap(tmp_path: Path) -
             checkpoint_path=source / "state.json",
             output_path=tmp_path / "manifest.json",
         )
+    shared = tmp_path / "shared.json"
+    with pytest.raises(SourceProfileError, match="distinct"):
+        build_resumable_source_manifest(
+            source,
+            checkpoint_path=shared,
+            checkpoint_key_path=tmp_path / "other.key",
+            output_path=shared,
+        )
 
 
 def test_profile_rejects_noncanonical_plan_and_oversized_metadata(tmp_path: Path) -> None:

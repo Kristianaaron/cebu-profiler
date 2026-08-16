@@ -17,7 +17,7 @@ import secrets
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from model_atlas.jobs.artifacts import source_manifest_digest
@@ -130,55 +130,126 @@ def _safe_source_root(source_path: Path) -> Path:
     return source_path.resolve(strict=True)
 
 
-def _enumerate_regular_files(root: Path) -> dict[str, dict[str, int]]:
+def _open_root_directory(root: Path) -> int:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        return os.open(root, flags)
+    except OSError as exc:
+        raise SourceProfileError(f"cannot pin source root {root}: {exc}") from exc
+
+
+def _enumerate_regular_files(root_descriptor: int) -> dict[str, dict[str, int]]:
     """Enumerate regular files without following symlinks or special nodes."""
     files: dict[str, dict[str, int]] = {}
 
-    def visit(directory: Path, prefix: Path) -> None:
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+    def visit(directory_descriptor: int, prefix: PurePosixPath) -> None:
         try:
-            entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+            entries = sorted(os.scandir(directory_descriptor), key=lambda entry: entry.name)
         except OSError as exc:
-            raise SourceProfileError(f"cannot enumerate {directory}: {exc}") from exc
+            raise SourceProfileError(f"cannot enumerate source directory: {exc}") from exc
         for entry in entries:
             relative = prefix / entry.name
             try:
-                entry_stat = entry.stat(follow_symlinks=False)
+                entry_stat = os.stat(
+                    entry.name, dir_fd=directory_descriptor, follow_symlinks=False
+                )
             except OSError as exc:
                 raise SourceProfileError(f"cannot stat source entry {relative}: {exc}") from exc
             if stat.S_ISLNK(entry_stat.st_mode):
                 raise SourceProfileError(f"source contains forbidden symlink: {relative}")
             if stat.S_ISDIR(entry_stat.st_mode):
-                visit(Path(entry.path), relative)
+                try:
+                    child_descriptor = os.open(
+                        entry.name, directory_flags, dir_fd=directory_descriptor
+                    )
+                except OSError as exc:
+                    raise SourceProfileError(
+                        f"cannot safely open source directory {relative}: {exc}"
+                    ) from exc
+                try:
+                    child_stat = os.fstat(child_descriptor)
+                    if (child_stat.st_dev, child_stat.st_ino) != (
+                        entry_stat.st_dev,
+                        entry_stat.st_ino,
+                    ):
+                        raise SourceProfileError(
+                            f"source directory changed while opening: {relative}"
+                        )
+                    visit(child_descriptor, relative)
+                finally:
+                    os.close(child_descriptor)
                 continue
             if not stat.S_ISREG(entry_stat.st_mode):
                 raise SourceProfileError(f"source contains non-regular entry: {relative}")
-            relative_text = relative.as_posix()
+            relative_text = str(relative)
             if relative_text.startswith("../") or relative_text == "..":
                 raise SourceProfileError(f"source path escape: {relative_text}")
             files[relative_text] = _reuse_stat_record(entry_stat)
 
-    visit(root, Path())
+    visit(root_descriptor, PurePosixPath())
     return files
 
 
-def _hash_checked_file(path: Path, expected: dict[str, int]) -> str:
+def _open_parent_directory(root_descriptor: int, relative: str) -> tuple[int, str]:
+    path = PurePosixPath(relative)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise SourceProfileError(f"invalid relative source path: {relative}")
+    descriptor = os.dup(root_descriptor)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        for component in path.parts[:-1]:
+            child = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor, path.name
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _hash_checked_file(
+    root_descriptor: int, relative: str, expected: dict[str, int]
+) -> str:
     """Hash one fixed regular file using bounded reads and race checks."""
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(path, os.O_RDONLY | nofollow)
+        parent_descriptor, name = _open_parent_directory(root_descriptor, relative)
+        descriptor = os.open(name, os.O_RDONLY | nofollow, dir_fd=parent_descriptor)
     except OSError as exc:
-        raise SourceProfileError(f"cannot safely open {path}: {exc}") from exc
+        raise SourceProfileError(f"cannot safely open {relative}: {exc}") from exc
+    finally:
+        if "parent_descriptor" in locals():
+            os.close(parent_descriptor)
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or not _is_same_stat(expected, before):
-            raise SourceProfileError(f"source changed or became non-regular before hashing: {path}")
+            raise SourceProfileError(
+                f"source changed or became non-regular before hashing: {relative}"
+            )
         digest = hashlib.sha256()
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
             while chunk := stream.read(_HASH_CHUNK_BYTES):
                 digest.update(chunk)
         after = os.fstat(descriptor)
         if not _is_same_stat(expected, after):
-            raise SourceProfileError(f"source changed while hashing: {path}")
+            raise SourceProfileError(f"source changed while hashing: {relative}")
         return digest.hexdigest()
     finally:
         os.close(descriptor)
@@ -202,15 +273,33 @@ def _checkpoint_key(path: Path) -> bytes:
     try:
         descriptor = os.open(path, flags, 0o600)
     except FileExistsError:
-        key_stat = path.lstat()
-        if not stat.S_ISREG(key_stat.st_mode) or key_stat.st_mode & 0o077:
-            raise SourceProfileError(
-                "manifest checkpoint key must be private mode 0600"
-            ) from None
-        payload = _read_bounded_regular(path, "manifest checkpoint key")
-        if len(payload) != 32:
-            raise SourceProfileError("manifest checkpoint key has invalid length") from None
-        return payload
+        read_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            existing_descriptor = os.open(path, read_flags)
+        except OSError as exc:
+            raise SourceProfileError(f"cannot safely open checkpoint key: {exc}") from exc
+        try:
+            key_stat = os.fstat(existing_descriptor)
+            if (
+                not stat.S_ISREG(key_stat.st_mode)
+                or key_stat.st_mode & 0o077
+                or key_stat.st_uid != os.getuid()
+            ):
+                raise SourceProfileError(
+                    "manifest checkpoint key must be owned by the user and mode 0600"
+                ) from None
+            payload = os.read(existing_descriptor, 33)
+            if len(payload) != 32 or os.read(existing_descriptor, 1):
+                raise SourceProfileError(
+                    "manifest checkpoint key has invalid length"
+                ) from None
+            return payload
+        finally:
+            os.close(existing_descriptor)
     except OSError as exc:
         raise SourceProfileError(f"cannot create manifest checkpoint key: {exc}") from exc
     payload = secrets.token_bytes(32)
@@ -278,10 +367,18 @@ def build_resumable_source_manifest(
         (output, "manifest output"),
     ):
         _outside_source(root, candidate, description)
+    resolved_controls = {
+        checkpoint.resolve(strict=False),
+        key_path.resolve(strict=False),
+        output.resolve(strict=False),
+    }
+    if len(resolved_controls) != 3:
+        raise SourceProfileError("checkpoint, checkpoint key, and manifest must be distinct")
     key = _checkpoint_key(key_path)
-    root_stat = root.stat()
+    root_descriptor = _open_root_directory(root)
+    root_stat = os.fstat(root_descriptor)
     root_identity = {"device": root_stat.st_dev, "inode": root_stat.st_ino}
-    current_stats = _enumerate_regular_files(root)
+    current_stats = _enumerate_regular_files(root_descriptor)
     previous = _load_checkpoint(checkpoint)
     if previous:
         supplied_mac = previous.pop("hmac_sha256", None)
@@ -348,7 +445,7 @@ def build_resumable_source_manifest(
     for relative, expected in current_stats.items():
         if relative in files:
             continue
-        digest = _hash_checked_file(root / relative, expected)
+        digest = _hash_checked_file(root_descriptor, relative, expected)
         files[relative] = digest
         file_stats[relative] = {
             "size": expected["size"],
@@ -371,9 +468,9 @@ def build_resumable_source_manifest(
     # Re-enumerate to prove the completed manifest describes the current exact
     # path set.  Mutation after a reused entry is a hard failure, never silently
     # a mixed-time snapshot.
-    if _enumerate_regular_files(root) != current_stats:
+    if _enumerate_regular_files(root_descriptor) != current_stats:
         raise SourceProfileError("source path set or file stats changed during manifest build")
-    final_root_stat = root.stat()
+    final_root_stat = os.fstat(root_descriptor)
     if root_identity != {"device": final_root_stat.st_dev, "inode": final_root_stat.st_ino}:
         raise SourceProfileError("source root changed during manifest build")
     digest = source_manifest_digest(manifest)
@@ -390,6 +487,7 @@ def build_resumable_source_manifest(
             key=key,
         ),
     )
+    os.close(root_descriptor)
     return ManifestBuildResult(
         manifest=manifest,
         digest=digest,
@@ -469,6 +567,14 @@ def build_glm52_mixed_gguf_profile(
     risk_file = Path(risk_path)
     tensor_plan = Path(tensor_plan_path)
     tokenizer = Path(tokenizer_path)
+    input_paths = {
+        Path(manifest_path).resolve(strict=False),
+        risk_file.resolve(strict=False),
+        tensor_plan.resolve(strict=False),
+        tokenizer.resolve(strict=False),
+    }
+    if output.resolve(strict=False) in input_paths:
+        raise SourceProfileError("profile output must be distinct from all profile inputs")
     risk, risk_payload = _read_json_object(risk_file, "NVFP4 risk")
     risk_sha256 = hashlib.sha256(risk_payload).hexdigest()
     tensor_plan_payload = _read_bounded_regular(tensor_plan, "tensor plan")
