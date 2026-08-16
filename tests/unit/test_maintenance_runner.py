@@ -527,3 +527,44 @@ def test_second_signal_during_reap_is_suppressed_until_group_is_gone_then_restor
     assert receipt.failure == "MaintenanceInterrupted:signal:15"
     assert events[:4] == ["kill-15", "kill-15", "wait-1", "wait-2"]
     assert events.index("kill-0") < events.index("restore")
+
+
+@pytest.mark.parametrize("failure_site", ["term_permission", "group_probe", "leader_wait"])
+def test_uncertain_payload_cleanup_requires_manual_intervention_without_restore(
+    tmp_path: Path, failure_site: str
+) -> None:
+    class Child:
+        pid = 909
+
+        def communicate(self) -> tuple[str, str | None]:
+            raise MaintenanceInterrupted(15)
+
+        def wait(self, timeout: float | None = None) -> int:
+            if failure_site == "leader_wait":
+                raise OSError("wait failed")
+            return 0
+
+    def killpg(_pid: int, sig: int) -> None:
+        if failure_site == "term_permission" and sig == signal.SIGTERM:
+            raise PermissionError("denied")
+        if failure_site == "group_probe" and sig == 0:
+            raise OSError("probe failed")
+        if sig == 0:
+            raise ProcessLookupError
+
+    payload_runner = SubprocessCommandRunner(
+        process_factory=lambda *_args, **_kwargs: Child(), killpg=killpg, wait_timeout_seconds=1
+    )
+
+    class IntegratedRunner(FakeRunner):
+        def run(self, argv: Sequence[str]) -> CommandResult:
+            if tuple(argv) == ("operator-command",):
+                return payload_runner.run(argv)
+            return super().run(argv)
+
+    receipt = MaintenanceCoordinator(
+        config(tmp_path), IntegratedRunner(active=ALL_PRODUCTION), execute=True
+    ).run(["operator-command"])
+    assert receipt.manual_intervention_required
+    assert receipt.failure == "ProcessGroupQuiescenceError"
+    assert not any(action.action_id.startswith("restore_") for action in receipt.actions)

@@ -168,7 +168,14 @@ class SubprocessCommandRunner:
         try:
             stdout, _stderr = process.communicate()
         except BaseException:
-            self._reap_group(process)
+            try:
+                self._reap_group(process)
+            except ProcessGroupQuiescenceError:
+                raise
+            except BaseException as exc:
+                raise ProcessGroupQuiescenceError(
+                    "payload process group cleanup could not be proven"
+                ) from exc
             raise
         returncode = process.wait()
         return CommandResult(returncode=returncode, stdout=stdout)
