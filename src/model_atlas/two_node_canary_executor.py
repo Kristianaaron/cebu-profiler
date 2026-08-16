@@ -102,23 +102,40 @@ class SshWorkerHashProbe:
         ssh_target: str,
         worker_host: str,
         rpc_server_path: Path,
+        toolchain_root: Path,
         runner: ArgvTextRunner,
         ssh_argv: Sequence[str] = ("ssh", "-o", "BatchMode=yes"),
     ) -> None:
-        if not ssh_target or not worker_host or not rpc_server_path.is_absolute():
-            raise ValueError("SSH target, RPC host, and absolute RPC path are required")
+        if (
+            not ssh_target
+            or not worker_host
+            or not rpc_server_path.is_absolute()
+            or not toolchain_root.is_absolute()
+        ):
+            raise ValueError("worker identities and absolute tool paths are required")
         if not ssh_argv or any(not value for value in ssh_argv):
             raise ValueError("ssh_argv must contain non-empty values")
         self._target = ssh_target
         self._worker_host = worker_host
         self._path = rpc_server_path
+        self._toolchain_root = toolchain_root
         self._runner = runner
         self._ssh_argv = tuple(ssh_argv)
 
     def measure(self) -> LlamaCppRpcWorkerAttestation:
-        argv = self._ssh_argv + ("--", self._target, _SHA256, str(self._path))
+        hash_argv = self._ssh_argv + ("--", self._target, _SHA256, str(self._path))
+        commit_argv = self._ssh_argv + (
+            "--",
+            self._target,
+            "git",
+            "-C",
+            str(self._toolchain_root),
+            "rev-parse",
+            "HEAD",
+        )
         try:
-            output = self._runner(argv)
+            output = self._runner(hash_argv)
+            commit = self._runner(commit_argv).strip()
         except Exception as exc:  # noqa: BLE001 - normalize a sensitive boundary
             raise CanaryExecutionError("worker RPC hash unavailable") from exc
         fields = output.strip().split()
@@ -127,15 +144,15 @@ class SshWorkerHashProbe:
             and len(fields[0]) == 64
             and all(char in "0123456789abcdef" for char in fields[0])
         )
-        if not valid_hash:
+        if not valid_hash or fields[1] != str(self._path):
             raise CanaryExecutionError("worker RPC hash output invalid")
-        # The pinned commit is checked by the runtime adapter.  The binary hash
-        # itself is freshly measured at the SSH boundary above.
+        if commit != PINNED_COMMIT:
+            raise CanaryExecutionError("worker llama.cpp commit mismatch")
         return LlamaCppRpcWorkerAttestation(
             host=self._worker_host,
             rpc_server_path=str(self._path),
             rpc_server_sha256=fields[0],
-            commit=PINNED_COMMIT,
+            commit=commit,
             evidence_kind="measured",
         )
 

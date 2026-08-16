@@ -168,11 +168,20 @@ def _plan() -> CanaryPlan:
 
 def test_worker_hash_probe_uses_exact_ssh_argv() -> None:
     seen: list[tuple[str, ...]] = []
+
+    def runner(argv: object) -> str:
+        command = tuple(argv)  # type: ignore[arg-type]
+        seen.append(command)
+        if "sha256sum" in command:
+            return "d" * 64 + "  /tools/ggml-rpc-server\n"
+        return "4df29be4f4c3673f428170fda944a5b19f743bb8\n"
+
     probe = SshWorkerHashProbe(
         ssh_target="10.77.0.2",
         worker_host="169.254.200.197",
         rpc_server_path=Path("/tools/ggml-rpc-server"),
-        runner=lambda argv: seen.append(tuple(argv)) or ("d" * 64 + "  rpc\n"),
+        toolchain_root=Path("/tools/llama.cpp"),
+        runner=runner,
     )
     attestation = probe.measure()
     assert seen == [
@@ -184,7 +193,19 @@ def test_worker_hash_probe_uses_exact_ssh_argv() -> None:
             "10.77.0.2",
             "sha256sum",
             "/tools/ggml-rpc-server",
-        )
+        ),
+        (
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "--",
+            "10.77.0.2",
+            "git",
+            "-C",
+            "/tools/llama.cpp",
+            "rev-parse",
+            "HEAD",
+        ),
     ]
     assert attestation.host == "169.254.200.197"
     assert attestation.rpc_server_sha256 == "d" * 64
