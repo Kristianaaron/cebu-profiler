@@ -55,6 +55,10 @@ Delegate to OMP when all conditions are true:
 
 ## Concurrency policy
 
+- DSV4 runs at `--thinking high`, never `max`. Bounded implementation benefits
+  from deliberate reasoning, but max-thinking has produced inspection stalls
+  and does not justify its latency here. A healthy in-flight worker is not
+  restarted solely to change its thinking level.
 - Maximum active implementation lanes: two OMP builders plus the integration
   lead. A third agent may review or monitor read-only.
 - Never run two builders against the same worktree.
