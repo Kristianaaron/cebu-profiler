@@ -26,9 +26,15 @@ from model_atlas.recommend import (
     write_gui,
 )
 from model_atlas.recommend.policy import (
+    METHOD_CATALOG,
+    METHOD_CATALOG_VERSION,
+    CompressionIntent,
+    MethodFamily,
     RecConfidence,
     RecommendationPolicy,
     canonical_stage,
+    method_catalog_digest,
+    method_spec,
 )
 from model_atlas.schemas.evidence import EvidenceKind
 
@@ -77,6 +83,36 @@ def test_deterministic_ranking_and_stable_ids():
         "modelopt-nvfp4",
         "nvfp4-substitute",
     }
+
+
+def test_method_catalog_is_explicit_stable_and_fail_closed() -> None:
+    assert METHOD_CATALOG_VERSION == 1
+    assert len(METHOD_CATALOG) == len({spec.method for spec in METHOD_CATALOG})
+    assert len(method_catalog_digest()) == 64
+    for spec in METHOD_CATALOG:
+        assert method_spec(spec.method) is spec
+        assert spec.backend_id
+        assert spec.evidence_stages
+        assert spec.recipe_stage_ids
+        assert spec.effect_classes
+        assert spec.compatible_intents
+    with pytest.raises(KeyError, match="unknown or unclassified"):
+        method_spec("tenp-pruning-not-catalogued")
+
+    exl3 = method_spec("exl3-primary")
+    assert exl3.family is MethodFamily.QUANTIZATION
+    assert CompressionIntent.PRUNE_ONLY not in exl3.compatible_intents
+    assert exl3.routing_dependent is True
+
+
+def test_catalog_has_no_implicit_pruning_classification() -> None:
+    pruning = [spec for spec in METHOD_CATALOG if spec.family is MethodFamily.PRUNING]
+    assert pruning == []
+    assert all(
+        spec.family is not MethodFamily.PRUNING
+        or StageEffectClass.PRUNING in spec.effect_classes
+        for spec in METHOD_CATALOG
+    )
 
 
 def test_v3_string_and_object_evidence_parsing():

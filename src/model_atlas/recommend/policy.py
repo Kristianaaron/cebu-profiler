@@ -30,7 +30,7 @@ from typing import Any
 
 from model_atlas.backend.registry import BackendRegistry
 from model_atlas.recipe.compiler import canonical_json
-from model_atlas.recipe.schema import RecipeStatus
+from model_atlas.recipe.schema import RecipeStatus, StageEffectClass
 from model_atlas.schemas.evidence import EvidenceKind
 
 
@@ -41,7 +41,60 @@ class RecConfidence(StrEnum):
     INSUFFICIENT = "insufficient"
 
 
-RECOMMENDATION_POLICY_VERSION = "policy-v1"
+RECOMMENDATION_POLICY_VERSION = "policy-v2-catalog"
+METHOD_CATALOG_VERSION = 1
+
+
+class CompressionIntent(StrEnum):
+    QUANTIZE_ONLY = "quantize_only"
+    PRUNE_ONLY = "prune_only"
+    HYBRID = "hybrid"
+    CUSTOM = "custom"
+
+
+class MethodFamily(StrEnum):
+    ANALYSIS = "analysis"
+    CONDITIONING = "conditioning"
+    ALLOCATION = "allocation"
+    QUANTIZATION = "quantization"
+    PRUNING = "pruning"
+    REFINEMENT = "refinement"
+    RESIDUAL = "residual"
+    RECOVERY = "recovery"
+    KV = "kv"
+    EVALUATION = "evaluation"
+
+
+@dataclass(frozen=True)
+class MethodSpec:
+    """Single fail-closed authority for a selectable Atlas method."""
+
+    method: str
+    family: MethodFamily
+    backend_id: str
+    evidence_stages: tuple[str, ...]
+    recipe_stage_ids: tuple[str, ...]
+    effect_classes: tuple[StageEffectClass, ...]
+    compatible_intents: tuple[CompressionIntent, ...]
+    memory_direction: str
+    routing_dependent: bool = False
+    planning_only: bool = False
+    provenance_ids: tuple[str, ...] = ()
+
+    def identity_dict(self) -> dict[str, Any]:
+        return {
+            "method": self.method,
+            "family": self.family.value,
+            "backend_id": self.backend_id,
+            "evidence_stages": list(self.evidence_stages),
+            "recipe_stage_ids": list(self.recipe_stage_ids),
+            "effect_classes": [effect.value for effect in self.effect_classes],
+            "compatible_intents": [intent.value for intent in self.compatible_intents],
+            "memory_direction": self.memory_direction,
+            "routing_dependent": self.routing_dependent,
+            "planning_only": self.planning_only,
+            "provenance_ids": list(self.provenance_ids),
+        }
 
 
 @dataclass(frozen=True)
@@ -281,26 +334,98 @@ def _m(m: MethodRecommendation) -> dict[str, Any]:
     }
 
 
-# stages the policy matches against the profile evidence + registry
-_METHOD_STAGES = {
-    "teacher-identity": ["identity"],
-    "calibration": ["corpus_semantic"],
-    "sensitivity": ["spectral", "shared_structure", "routing_consistency"],
-    "bit-allocation": ["global_bit_budget"],
-    "nvfp4-substitute": ["nvfp4_suitability"],
-    "kv-optimization": ["kv_budget"],
-    "exl3-primary": ["global_bit_budget"],
-    "llm-compressor": ["global_bit_budget"],
-    "modelopt-nvfp4": ["nvfp4_suitability"],
-}
+_ALL_INTENTS = tuple(CompressionIntent)
+_QUANT_INTENTS = (
+    CompressionIntent.QUANTIZE_ONLY,
+    CompressionIntent.HYBRID,
+    CompressionIntent.CUSTOM,
+)
 
-# ANALYSIS/PLANNING methods produce profile evidence (in-repo, no derivative).
+METHOD_CATALOG: tuple[MethodSpec, ...] = (
+    MethodSpec(
+        "teacher-identity", MethodFamily.ANALYSIS, "atlas_analysis_v3",
+        ("identity",), ("t1-identity",), (StageEffectClass.IDENTITY,),
+        _ALL_INTENTS, "same", planning_only=True,
+    ),
+    MethodSpec(
+        "calibration", MethodFamily.ANALYSIS, "atlas_analysis_v3",
+        ("corpus_semantic",), ("t2-calibration",), (StageEffectClass.PROFILING,),
+        _ALL_INTENTS, "same", planning_only=True,
+    ),
+    MethodSpec(
+        "sensitivity", MethodFamily.ANALYSIS, "atlas_analysis_v3",
+        ("spectral", "shared_structure", "routing_consistency"),
+        ("t3-sensitivity",), (StageEffectClass.SENSITIVITY,), _ALL_INTENTS,
+        "down", planning_only=True,
+    ),
+    MethodSpec(
+        "bit-allocation", MethodFamily.ALLOCATION, "atlas_analysis_v3",
+        ("global_bit_budget",), ("t6-bit-allocation",),
+        (StageEffectClass.ALLOCATION,), _ALL_INTENTS, "down", planning_only=True,
+        provenance_ids=("GEMQ", "MixQuant"),
+    ),
+    MethodSpec(
+        "nvfp4-substitute", MethodFamily.QUANTIZATION, "modelopt_nvfp4",
+        ("nvfp4_suitability",), ("t10-nvfp4",),
+        (StageEffectClass.QUANTIZATION,), _QUANT_INTENTS, "down",
+        routing_dependent=True, provenance_ids=("NVIDIA-ModelOpt-NVFP4",),
+    ),
+    MethodSpec(
+        "kv-optimization", MethodFamily.KV, "atlas_analysis_v3",
+        ("kv_budget",), ("t12-kv",), (StageEffectClass.KV,), _ALL_INTENTS,
+        "down", planning_only=True,
+    ),
+    MethodSpec(
+        "exl3-primary", MethodFamily.QUANTIZATION, "exl3",
+        ("global_bit_budget",), ("t7-exl3",),
+        (StageEffectClass.QUANTIZATION,), _QUANT_INTENTS, "down",
+        routing_dependent=True, provenance_ids=("EXL3",),
+    ),
+    MethodSpec(
+        "llm-compressor", MethodFamily.QUANTIZATION, "llm_compressor",
+        ("global_bit_budget",), ("t11-tail",),
+        (StageEffectClass.QUANTIZATION,), _QUANT_INTENTS, "down",
+        routing_dependent=True, provenance_ids=("LLM-Compressor",),
+    ),
+    MethodSpec(
+        "modelopt-nvfp4", MethodFamily.QUANTIZATION, "modelopt_nvfp4",
+        ("nvfp4_suitability",), ("t10-nvfp4",),
+        (StageEffectClass.QUANTIZATION,), _QUANT_INTENTS, "down",
+        routing_dependent=True, provenance_ids=("NVIDIA-ModelOpt-NVFP4",),
+    ),
+)
+
+_METHOD_SPECS = {spec.method: spec for spec in METHOD_CATALOG}
+if len(_METHOD_SPECS) != len(METHOD_CATALOG):
+    raise RuntimeError("duplicate method IDs in METHOD_CATALOG")
+
+
+def method_spec(method: str) -> MethodSpec:
+    """Resolve an explicit catalog entry; unknown methods never gain a family."""
+    try:
+        return _METHOD_SPECS[method]
+    except KeyError as exc:
+        raise KeyError(f"unknown or unclassified compression method: {method}") from exc
+
+
+def method_catalog_digest() -> str:
+    payload = canonical_json(
+        {
+            "catalog_version": METHOD_CATALOG_VERSION,
+            "methods": [
+                spec.identity_dict()
+                for spec in sorted(METHOD_CATALOG, key=lambda item: item.method)
+            ],
+        }
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+_METHOD_STAGES = {
+    spec.method: list(spec.evidence_stages) for spec in METHOD_CATALOG
+}
 _ANALYSIS_METHODS = {
-    "teacher-identity",
-    "calibration",
-    "sensitivity",
-    "bit-allocation",
-    "kv-optimization",
+    spec.method for spec in METHOD_CATALOG if spec.planning_only
 }
 
 # The compression methods that operate on router-indexed expert tensors. Their
@@ -309,7 +434,9 @@ _ANALYSIS_METHODS = {
 # router/expert index suspect, so these methods are BLOCKED (typed blocker), not
 # merely confidence-downgraded. Analysis/planning methods run in-repo and are
 # not blocked on this gate.
-_ROUTING_DEPENDENT = frozenset(_METHOD_STAGES) - frozenset(_ANALYSIS_METHODS)
+_ROUTING_DEPENDENT = frozenset(
+    spec.method for spec in METHOD_CATALOG if spec.routing_dependent
+)
 
 # Evidence keys produced by the real V3 pipeline → canonical policy stage names.
 # V3 run evidence (run.evidence: stage -> kind) names the NVFP4 suitability key
@@ -322,20 +449,6 @@ _EVIDENCE_ALIASES = {
 _PRUNE_CAP = "pruning"
 # versions that mean "not pinned to a real release" — a blocker for execution.
 _UNPINNED_VERSIONS = frozenset({"", "n/a", "unpinned", "needs-pin", "none"})
-
-# method -> registered backend id (all are registered; an absent registration
-# surfaces as backend_missing instead of silently recommending).
-_BACKEND_ALIASES = {
-    "teacher-identity": "atlas_analysis_v3",
-    "calibration": "atlas_analysis_v3",
-    "sensitivity": "atlas_analysis_v3",
-    "bit-allocation": "atlas_analysis_v3",
-    "kv-optimization": "atlas_analysis_v3",
-    "exl3-primary": "exl3",
-    "llm-compressor": "llm_compressor",
-    "modelopt-nvfp4": "modelopt_nvfp4",
-    "nvfp4-substitute": "modelopt_nvfp4",
-}
 
 # Strength of an evidence source: measured/causally_tested > estimated >
 # predicted > inferred. Used to keep the strongest observed claim when an
@@ -594,9 +707,7 @@ class RecommendationPolicy:
         return (band, conf, self._rank_for(rec.method))
 
     def _backend_for(self, method: str) -> dict[str, Any] | None:
-        bid = _BACKEND_ALIASES.get(method)
-        if bid is None:
-            return None
+        bid = method_spec(method).backend_id
         rec = self._registry.get(bid)
         if rec is None:
             return None
@@ -640,10 +751,11 @@ class RecommendationPolicy:
         return False
 
     def _rank_for(self, method: str) -> int:
-        return list(_METHOD_STAGES).index(method) + 1
+        method_spec(method)
+        return list(_METHOD_SPECS).index(method) + 1
 
     def _mem_dir(self, method: str) -> str:
-        return {"teacher-identity": "same", "calibration": "same"}.get(method, "down")
+        return method_spec(method).memory_direction
 
     def _reason(
         self,
@@ -711,6 +823,7 @@ class RecommendationPolicy:
         payload = canonical_json(
             {
                 "policy": RECOMMENDATION_POLICY_VERSION,
+                "method_catalog": method_catalog_digest(),
                 "profile": profile.profile_id_of(),
                 "target": {
                     "model_arch": target.hardware_model_arch,
