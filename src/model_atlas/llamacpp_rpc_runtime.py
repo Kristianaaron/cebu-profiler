@@ -96,7 +96,7 @@ def _port(value: int, label: str) -> int:
 
 @dataclass(frozen=True)
 class LlamaCppRpcRuntimeConfig:
-    """Conservative base run: two devices, 4K, parallel one, no MTP."""
+    """Conservative two-device run at one explicitly supported context size."""
 
     artifact_path: Path
     artifact_sha256: str
@@ -122,8 +122,8 @@ class LlamaCppRpcRuntimeConfig:
         object.__setattr__(self, "api_host", _loopback_api_host(self.api_host))
         _port(self.rpc_port, "rpc_port")
         _port(self.api_port, "api_port")
-        if self.context_size != 4096 or self.parallel != 1:
-            raise ValueError("base validation is fixed to 4K context and parallel=1")
+        if self.context_size not in {4096, 16384, 32768, 65536} or self.parallel != 1:
+            raise ValueError("validation contexts are 4K/16K/32K/64K at parallel=1")
 
     def worker_argv(self) -> tuple[str, ...]:
         return (

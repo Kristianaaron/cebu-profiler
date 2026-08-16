@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -269,6 +269,7 @@ class SystemdUserRuntimeLifecycle:
         self._ssh_argv, self._attempts, self._sleep = tuple(ssh_argv), max_health_attempts, sleep
         self._started = False
         self._launch_evidence: RuntimeLaunchEvidence | None = None
+        self._active_config: LlamaCppRpcRuntimeConfig | None = None
 
     @property
     def launch_evidence(self) -> RuntimeLaunchEvidence | None:
@@ -305,7 +306,7 @@ class SystemdUserRuntimeLifecycle:
             raise RuntimeDriverError("runtime MainPID unavailable")
         return int(output)
 
-    def _identity(self, pid: int, *, worker: bool) -> tuple[str, str]:
+    def _identity(self, pid: int, *, worker: bool) -> tuple[str, str, tuple[str, ...]]:
         exe = self._run(("readlink", "-f", f"/proc/{pid}/exe"), worker=worker).strip()
         if not exe.startswith("/"):
             raise RuntimeDriverError("runtime executable path unavailable")
@@ -314,11 +315,17 @@ class SystemdUserRuntimeLifecycle:
             raise RuntimeDriverError("runtime executable hash unavailable")
         if any(char not in "0123456789abcdef" for char in fields[0]):
             raise RuntimeDriverError("runtime executable hash unavailable")
-        return exe, fields[0]
+        raw_cmdline = self._run(("cat", f"/proc/{pid}/cmdline"), worker=worker)
+        argv = tuple(part for part in raw_cmdline.split("\0") if part)
+        if not argv:
+            raise RuntimeDriverError("runtime command line unavailable")
+        return exe, fields[0], argv
 
-    def _measure_launch(self, pids: RuntimeProcessIds) -> RuntimeLaunchEvidence:
-        head_path, head_hash = self._identity(pids.head_server_pid, worker=False)
-        worker_path, worker_hash = self._identity(pids.worker_rpc_pid, worker=True)
+    def _measure_launch(
+        self, pids: RuntimeProcessIds, config: LlamaCppRpcRuntimeConfig
+    ) -> RuntimeLaunchEvidence:
+        head_path, head_hash, head_argv = self._identity(pids.head_server_pid, worker=False)
+        worker_path, worker_hash, worker_argv = self._identity(pids.worker_rpc_pid, worker=True)
         if (
             head_path != str(self._config.llama_server_path)
             or head_hash != EXPECTED_LLAMA_SERVER_SHA256
@@ -329,31 +336,35 @@ class SystemdUserRuntimeLifecycle:
             or worker_hash != EXPECTED_RPC_SERVER_SHA256
         ):
             raise RuntimeDriverError("worker runtime identity mismatch")
+        if head_argv != config.head_argv() or worker_argv != config.worker_argv():
+            raise RuntimeDriverError("runtime command line mismatch")
         return RuntimeLaunchEvidence(
             head_pid=pids.head_server_pid,
             worker_pid=pids.worker_rpc_pid,
-            head_argv=self._config.head_argv(),
-            worker_argv=self._config.worker_argv(),
+            head_argv=head_argv,
+            worker_argv=worker_argv,
             head_exe_path=head_path,
             head_exe_sha256=head_hash,
             worker_exe_path=worker_path,
             worker_exe_sha256=worker_hash,
         )
 
-    def start(self) -> RuntimeProcessIds:
+    def start(self, step: CanaryStep) -> RuntimeProcessIds:
         worker_started = head_started = False
+        step_config = replace(self._config, context_size=step.context_tokens)
         try:
-            self._run(self._start_argv(self._worker_unit, self._config.worker_argv()), worker=True)
+            self._run(self._start_argv(self._worker_unit, step_config.worker_argv()), worker=True)
             worker_started = True
             worker_pid = self._pid(self._worker_unit, worker=True)
-            self._run(self._start_argv(self._head_unit, self._config.head_argv()))
+            self._run(self._start_argv(self._head_unit, step_config.head_argv()))
             head_started = True
             head_pid = self._pid(self._head_unit, worker=False)
             pids = RuntimeProcessIds(head_pid, worker_pid)
-            self._launch_evidence = self._measure_launch(pids)
+            self._launch_evidence = self._measure_launch(pids, step_config)
             for attempt in range(self._attempts):
                 if self._health_ready():
                     self._started = True
+                    self._active_config = step_config
                     return pids
                 if attempt + 1 < self._attempts:
                     self._sleep(1.0)
@@ -364,6 +375,7 @@ class SystemdUserRuntimeLifecycle:
             if worker_started:
                 self._best_effort_stop(self._worker_unit, worker=True)
             self._launch_evidence = None
+            self._active_config = None
             if isinstance(exc, RuntimeDriverError):
                 raise
             raise RuntimeDriverError("transient runtime start failed") from exc
@@ -383,14 +395,18 @@ class SystemdUserRuntimeLifecycle:
             except RuntimeDriverError as exc:
                 errors.append(exc)
         self._started = False
+        self._active_config = None
         if errors:
             raise RuntimeDriverError("transient runtime stop failed") from errors[0]
 
     def measure_post_run_worker(self, pids: RuntimeProcessIds) -> RuntimeLaunchEvidence:
         """Freshly re-check worker MainPID and executable after canary execution."""
         current_pid = self._pid(self._worker_unit, worker=True)
-        if current_pid != pids.worker_rpc_pid:
-            raise RuntimeDriverError("worker MainPID changed during canary")
-        evidence = self._measure_launch(pids)
+        current_head_pid = self._pid(self._head_unit, worker=False)
+        if current_pid != pids.worker_rpc_pid or current_head_pid != pids.head_server_pid:
+            raise RuntimeDriverError("runtime MainPID changed during canary")
+        if self._active_config is None:
+            raise RuntimeDriverError("runtime configuration identity is missing")
+        evidence = self._measure_launch(pids, self._active_config)
         self._launch_evidence = evidence
         return evidence

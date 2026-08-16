@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from model_atlas.fit_telemetry import (
     CanaryPlan,
+    CanaryStep,
     CandidateBinding,
     NodeRole,
     ProcessMemory,
@@ -87,22 +89,25 @@ class _Lifecycle:
         self.started = 0
         self.stopped = 0
         self._pids = RuntimeProcessIds(101, 202)
+        self._step = _plan().steps[0]
 
     @property
     def launch_evidence(self) -> RuntimeLaunchEvidence:
+        config = replace(_Runtime.config, context_size=self._step.context_tokens)
         return RuntimeLaunchEvidence(
             head_pid=101,
             worker_pid=202,
-            head_argv=_Runtime.config.head_argv(),
-            worker_argv=_Runtime.config.worker_argv(),
+            head_argv=config.head_argv(),
+            worker_argv=config.worker_argv(),
             head_exe_path=str(_Runtime.config.llama_server_path),
             head_exe_sha256=EXPECTED_LLAMA_SERVER_SHA256,
             worker_exe_path=str(_Runtime.config.worker_rpc_server_path),
             worker_exe_sha256=EXPECTED_RPC_SERVER_SHA256,
         )
 
-    def start(self) -> RuntimeProcessIds:
+    def start(self, step: CanaryStep) -> RuntimeProcessIds:
         self.started += 1
+        self._step = step
         return self._pids
 
     def stop(self) -> None:
@@ -279,7 +284,7 @@ def test_executor_stops_immediately_on_runtime_failure_without_later_steps(tmp_p
 
 def test_lifecycle_start_failure_still_persists_terminal_receipt(tmp_path: Path) -> None:
     class StartFails(_Lifecycle):
-        def start(self) -> RuntimeProcessIds:
+        def start(self, step: CanaryStep) -> RuntimeProcessIds:
             raise RuntimeError("sensitive start detail")
 
     store = JsonlEvidenceStore(tmp_path / "canary.jsonl")

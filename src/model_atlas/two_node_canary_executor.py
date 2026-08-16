@@ -12,7 +12,7 @@ import json
 import os
 import subprocess
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol
@@ -189,7 +189,7 @@ class RuntimeProcessIds:
 
 
 class RuntimeLifecycle(Protocol):
-    def start(self) -> RuntimeProcessIds: ...
+    def start(self, step: CanaryStep) -> RuntimeProcessIds: ...
 
     def stop(self) -> None: ...
 
@@ -346,13 +346,15 @@ class TwoNodeCanaryExecutor:
         plan: CanaryPlan,
         pids: RuntimeProcessIds,
         evidence: RuntimeLaunchSnapshot,
+        step: CanaryStep,
     ) -> None:
         config = self._runtime.config
         candidate = plan.candidate
+        step_config = replace(config, context_size=step.context_tokens)
         if (
             evidence.head_pid != pids.head_server_pid
             or evidence.worker_pid != pids.worker_rpc_pid
-            or evidence.head_argv != candidate.head_argv
+            or evidence.head_argv != step_config.head_argv()
             or evidence.worker_argv != candidate.worker_argv
             or evidence.head_exe_path != str(config.llama_server_path)
             or evidence.worker_exe_path != str(config.worker_rpc_server_path)
@@ -440,6 +442,7 @@ class TwoNodeCanaryExecutor:
         stop = StopReason.COMPLETED
         pids: RuntimeProcessIds | None = None
         launch: RuntimeLaunchSnapshot | None = None
+        launched_step: CanaryStep | None = None
         lifecycle_failed = False
         try:
             for step in plan.steps:
@@ -449,7 +452,9 @@ class TwoNodeCanaryExecutor:
                             post_launch = self._snapshot_launch(
                                 self._lifecycle.measure_post_run_worker(pids)
                             )
-                            self._verify_launch(plan, pids, post_launch)
+                            if launched_step is None:
+                                raise CanaryExecutionError("launched step identity is missing")
+                            self._verify_launch(plan, pids, post_launch, launched_step)
                             if launch is None or post_launch != launch:
                                 raise CanaryExecutionError(
                                     "runtime identity changed during canary"
@@ -462,9 +467,10 @@ class TwoNodeCanaryExecutor:
                             break
                         pids = None
                     try:
-                        pids = self._lifecycle.start()
+                        pids = self._lifecycle.start(step)
                         launch = self._snapshot_launch(self._lifecycle.launch_evidence)
-                        self._verify_launch(plan, pids, launch)
+                        self._verify_launch(plan, pids, launch, step)
+                        launched_step = step
                         self._evidence.append("runtime_launch_pre", launch)
                     except Exception:  # noqa: BLE001 - terminal evidence below
                         lifecycle_failed = True
@@ -538,7 +544,9 @@ class TwoNodeCanaryExecutor:
                     post_launch = self._snapshot_launch(
                         self._lifecycle.measure_post_run_worker(pids)
                     )
-                    self._verify_launch(plan, pids, post_launch)
+                    if launched_step is None:
+                        raise CanaryExecutionError("launched step identity is missing")
+                    self._verify_launch(plan, pids, post_launch, launched_step)
                     if launch is None or post_launch != launch:
                         raise CanaryExecutionError("runtime identity changed during canary")
                     self._evidence.append("runtime_launch_post", post_launch)

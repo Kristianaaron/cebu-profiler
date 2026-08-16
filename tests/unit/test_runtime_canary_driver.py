@@ -53,7 +53,22 @@ class _Runner:
             path = command[-1]
             digest = EXPECTED_RPC_SERVER_SHA256 if worker else EXPECTED_LLAMA_SERVER_SHA256
             return f"{digest}  {path}\n"
+        if "cat" in command and any("/proc/" in item for item in command):
+            runtime = self.config.worker_argv() if worker else self.config.head_argv()
+            return "\0".join(runtime) + "\0"
         return ""
+
+
+def _step(context: int = 4096) -> CanaryStep:
+    return CanaryStep(
+        step_id=f"restart-{context}",
+        phase=CanaryPhase.CONTEXT_RESTART,
+        context_tokens=context,
+        max_output_tokens=1,
+        repeats=1,
+        discard_warmup_repeats=0,
+        restart_runtime=True,
+    )
 
 
 def test_lifecycle_starts_worker_then_head_measures_pids_and_stops_head_first() -> None:
@@ -65,7 +80,7 @@ def test_lifecycle_starts_worker_then_head_measures_pids_and_stops_head_first() 
         runner=runner,
         health_ready=lambda: True,
     )
-    pids = lifecycle.start()
+    pids = lifecycle.start(_step())
     assert pids.head_server_pid == 101
     assert pids.worker_rpc_pid == 202
     assert lifecycle.launch_evidence is not None
@@ -100,7 +115,7 @@ def test_lifecycle_fails_closed_and_rolls_back_partial_start() -> None:
         health_ready=lambda: True,
     )
     with pytest.raises(RuntimeDriverError, match="runtime service command failed"):
-        lifecycle.start()
+        lifecycle.start(_step())
     assert any(item[-1:] == ("atlas-glm52-rpc-worker",) and "stop" in item for item in runner.calls)
     assert lifecycle.launch_evidence is None
 
@@ -114,10 +129,34 @@ def test_lifecycle_rejects_worker_pid_change_after_run() -> None:
         runner=runner,
         health_ready=lambda: True,
     )
-    pids = lifecycle.start()
+    pids = lifecycle.start(_step())
     runner.worker_pid = 303
     with pytest.raises(RuntimeDriverError, match="MainPID changed"):
         lifecycle.measure_post_run_worker(pids)
+
+
+def test_lifecycle_launches_and_measures_exact_16k_cmdline() -> None:
+    config = _config()
+    runner = _Runner(config)
+    step_config = LlamaCppRpcRuntimeConfig(
+        artifact_path=config.artifact_path,
+        artifact_sha256=config.artifact_sha256,
+        llama_server_path=config.llama_server_path,
+        worker_rpc_server_path=config.worker_rpc_server_path,
+        context_size=16384,
+    )
+    runner.config = step_config
+    lifecycle = SystemdUserRuntimeLifecycle(
+        config,
+        worker_ssh_target="10.77.0.2",
+        runner=runner,
+        health_ready=lambda: True,
+    )
+    lifecycle.start(_step(16384))
+    assert lifecycle.launch_evidence is not None
+    assert lifecycle.launch_evidence.head_argv[
+        lifecycle.launch_evidence.head_argv.index("--ctx-size") + 1
+    ] == "16384"
 
 
 class _Http:
