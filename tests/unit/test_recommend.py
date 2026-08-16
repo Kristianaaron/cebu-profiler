@@ -317,6 +317,28 @@ def test_authorize_rejects_string_boolean_and_binds_intent(tmp_path: Path) -> No
     assert session.intent is CompressionIntent.PRUNE_ONLY
     assert session.constraints_snapshot["intent"] == "prune_only"
 
+    quant_auth = service.authorize("k3-mini", intent=CompressionIntent.QUANTIZE_ONLY)
+    preview = service.preview_selection(
+        quant_auth["token"], quant_auth["authorized_methods"]
+    )
+    persisted = json.loads(
+        (
+            service.store_root
+            / "previews"
+            / preview["preview_id"]
+            / "preview.json"
+        ).read_text(encoding="utf-8")
+    )
+    snapshot = persisted["authorization_snapshot"]
+    assert snapshot["recommendation_id"] == quant_auth["recommendation_id"]
+    assert snapshot["profile_id"] == quant_auth["profile_id"]
+    assert snapshot["profile_bytes_sha256"] == service.sessions[
+        quant_auth["token"]
+    ].profile_bytes_hash
+    assert snapshot["intent"] == "quantize_only"
+    assert snapshot["method_catalog_version"] == METHOD_CATALOG_VERSION
+    assert len(snapshot["method_catalog_sha256"]) == 64
+
 
 def test_catalog_has_no_implicit_pruning_classification() -> None:
     pruning = [spec for spec in METHOD_CATALOG if spec.family is MethodFamily.PRUNING]

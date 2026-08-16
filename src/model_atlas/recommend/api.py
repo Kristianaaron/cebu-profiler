@@ -61,6 +61,8 @@ from model_atlas.recipes import CompiledPlanArtifact
 from model_atlas.recipes.builtin import glm52_no_pruning_recipe
 from model_atlas.recommend.policy import (
     METHOD_CATALOG,
+    METHOD_CATALOG_VERSION,
+    RECOMMENDATION_POLICY_VERSION,
     AtlasProfile,
     CompressionIntent,
     MethodFamily,
@@ -68,6 +70,7 @@ from model_atlas.recommend.policy import (
     Recommendation,
     RecommendationPolicy,
     RecTarget,
+    method_catalog_digest,
     method_spec,
     required_families,
 )
@@ -243,6 +246,7 @@ class _PendingPreview:
         "recipe_sha256",
         "target_snapshot",
         "constraints_snapshot",
+        "authorization_snapshot",
         "dispatch_started",
     )
 
@@ -271,6 +275,7 @@ class _PendingPreview:
         self.recipe_sha256 = artifact.recipe_sha256 if artifact is not None else ""
         self.target_snapshot: dict[str, object] = {}
         self.constraints_snapshot: dict[str, object] = {}
+        self.authorization_snapshot: dict[str, object] = {}
         self.dispatch_started = False
 
 
@@ -550,6 +555,19 @@ class RecommendationService:
             "memory_gib": session.target.memory_target_gib,
         }
         constraints_snapshot = dict(session.constraints_snapshot or {})
+        authorization_snapshot: dict[str, object] = {
+            "recommendation_id": session.recommendation_id,
+            "policy_version": RECOMMENDATION_POLICY_VERSION,
+            "method_catalog_version": METHOD_CATALOG_VERSION,
+            "method_catalog_sha256": method_catalog_digest(),
+            "profile_id": session.profile_id,
+            "profile_fingerprint": session.profile_fingerprint,
+            "profile_bytes_sha256": session.profile_bytes_hash,
+            "profile_model_arch": session.profile_model_arch,
+            "intent": session.intent.value,
+            "no_pruning": session.no_pruning,
+            "authorized_methods": list(session.authorized_methods),
+        }
         recipe_sha256 = str(pv.get("recipe_sha256") or "")
         plan_id = artifact.plan_id if artifact is not None else str(plan.get("plan_id") or "")
         artifact_identity = (
@@ -564,6 +582,7 @@ class RecommendationService:
                     "inputs": inputs or {},
                     "target": target_snapshot,
                     "constraints": constraints_snapshot,
+                    "authorization": authorization_snapshot,
                     "recipe_sha256": recipe_sha256,
                     "plan_id": plan_id,
                     "artifact_identity": artifact_identity,
@@ -589,6 +608,7 @@ class RecommendationService:
         package.recipe_sha256 = recipe_sha256
         package.target_snapshot = target_snapshot
         package.constraints_snapshot = constraints_snapshot
+        package.authorization_snapshot = authorization_snapshot
         # IMMUTABLE preview: once created, a preview_id may NEVER be repointed to
         # a different recipe/identity. Overwriting is refused outright.
         if preview_id in self.pending_previews:
@@ -687,6 +707,7 @@ class RecommendationService:
             "recipe_sha256": package.recipe_sha256,
             "target_snapshot": dict(package.target_snapshot),
             "constraints_snapshot": dict(package.constraints_snapshot),
+            "authorization_snapshot": dict(package.authorization_snapshot),
         }
         try:
             atomic_write_json(staging / "preview.json", preview_data)
@@ -1325,6 +1346,7 @@ class RecommendationService:
             pkg.recipe_sha256 = str(meta.get("recipe_sha256", ""))
             pkg.target_snapshot = dict(meta.get("target_snapshot") or {})
             pkg.constraints_snapshot = dict(meta.get("constraints_snapshot") or {})
+            pkg.authorization_snapshot = dict(meta.get("authorization_snapshot") or {})
             if preview_id not in self.pending_previews:
                 self.pending_previews[preview_id] = pkg
 
