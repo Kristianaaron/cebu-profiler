@@ -22,6 +22,7 @@ from model_atlas.jobs.engine import JobEngine
 from model_atlas.jobs.schema import JobStatus
 from model_atlas.recipe.compiler import RecipeCompiler
 from model_atlas.recipe.schema import SourceIdentity, StageEffectClass
+from model_atlas.recipes.artifact import CompiledPlanArtifact
 from model_atlas.recipes.builtin import (
     GLM52_GGUF_TENSOR_PLAN_SHA256,
     llamacpp_gguf_mixed_recipe,
@@ -334,6 +335,28 @@ def test_probe_rejects_modified_toolchain_bytes_without_execution(tmp_path: Path
 
     assert not result.available
     assert json.loads(result.evidence)["probe_executed_binaries"] is False
+
+
+def test_compiled_artifact_binds_and_freshly_rechecks_tool_bytes(tmp_path: Path) -> None:
+    root, python = _fake_toolchain(tmp_path)
+    _source_path, identity = _source(tmp_path)
+    record = build_llamacpp_gguf_record(
+        toolchain_root=root,
+        python_executable=python,
+        **_tool_hashes(root),
+    )
+    registry = BackendRegistry({record.backend_id: record})
+    recipe = llamacpp_gguf_mixed_recipe(identity, tensor_plan_content=PLAN, threads=3)
+    compiled = RecipeCompiler(registry).compile(recipe)
+    artifact = CompiledPlanArtifact.from_compiled(compiled, registry=registry)
+
+    pin = artifact.resolved_pins[recipe.stages[0].id]
+    assert len(pin["execution_identity_sha256"]) == 64
+    artifact.verify_pins_against(registry)
+
+    (root / "convert_hf_to_gguf.py").write_text("# drifted converter\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="no longer available|execution identity"):
+        artifact.verify_pins_against(registry)
 
 
 def test_validator_rejects_partial_and_unknown_payloads(

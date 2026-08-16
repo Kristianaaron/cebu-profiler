@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import subprocess
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -39,6 +40,17 @@ class AvailabilityProbe(Protocol):
     """Probe signature: returns (available, version, evidence_note)."""
 
     def __call__(self) -> tuple[bool, str | None, str]: ...
+
+
+class ExecutionIdentityProbe(Protocol):
+    """Return the fresh, canonical identity of execution-affecting tools.
+
+    This probe must be read-only.  It exists separately from the cached
+    availability probe because a compiled artifact must bind the exact bytes
+    that will execute and start must re-check those bytes under its lock.
+    """
+
+    def __call__(self) -> Mapping[str, str]: ...
 
 
 def module_present(name: str) -> bool:
@@ -151,6 +163,7 @@ class BackendRecord:
     resource_limits: ResourceEstimate | None = None
     # probe
     availability_probe: AvailabilityProbe | None = None
+    execution_identity_probe: ExecutionIdentityProbe | None = None
     _availability_cached: tuple[bool, str | None, str] | None = field(default=None, repr=False)
 
     # typed parameter schema (validated before execute)
@@ -179,6 +192,29 @@ class BackendRecord:
             else:
                 self._availability_cached = self.availability_probe()
         return self._availability_cached
+
+    def probe_fresh(self) -> tuple[bool, str | None, str]:
+        """Perform an uncached availability check for dispatch-time safety."""
+        if self.availability_probe is None:
+            return False, None, f"{self.backend_id}: no availability probe registered"
+        result = self.availability_probe()
+        self._availability_cached = result
+        return result
+
+    def fresh_execution_identity(self) -> Mapping[str, str]:
+        """Return fresh tool identity, or a stable in-process backend identity."""
+        if self.execution_identity_probe is not None:
+            return self.execution_identity_probe()
+        adapter = self.adapter
+        return {
+            "backend_id": self.backend_id,
+            "backend_version": self.version,
+            "adapter": (
+                "none-adapter"
+                if adapter is None
+                else f"{adapter.backend_id}::{adapter.__class__.__name__}"
+            ),
+        }
 
     # ------------------------------------------------------------ lifetime
     def note_discovered(self, evidence: str) -> None:

@@ -30,7 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from model_atlas.recipe.compiler import CompiledRecipe, canonical_json
 from model_atlas.recipe.schema import CompressionRecipe
 
-PLAN_ARTIFACT_SCHEMA = 2
+PLAN_ARTIFACT_SCHEMA = 3
 
 
 class CompiledPlanArtifact(BaseModel):
@@ -222,6 +222,7 @@ class CompiledPlanArtifact(BaseModel):
             "status",
             "adapter_identity",
             "capability_hash",
+            "execution_identity_sha256",
         )
         # EXACT stage-id pin set: every recipe stage must have exactly one pin
         # record (no missing, no extra).
@@ -261,6 +262,23 @@ class CompiledPlanArtifact(BaseModel):
                     f"artifact pin {stage_id}: capability hash {pin['capability_hash']} "
                     f"!= live {_capability_hash(rec)}"
                 )
+            stage = next(s for s in self.recipe.stages if s.id == stage_id)
+            if stage.backend.require_available:
+                available, version, evidence = rec.probe_fresh()
+                if not available:
+                    raise ValueError(
+                        f"artifact pin {stage_id}: backend is no longer available: {evidence}"
+                    )
+                if version is not None and version != rec.version:
+                    raise ValueError(
+                        f"artifact pin {stage_id}: fresh version {version} != live {rec.version}"
+                    )
+            live_execution_identity = _execution_identity_hash(rec)
+            if pin["execution_identity_sha256"] != live_execution_identity:
+                raise ValueError(
+                    f"artifact pin {stage_id}: execution identity "
+                    f"{pin['execution_identity_sha256']} != live {live_execution_identity}"
+                )
 
 
 def _adapter_identity(record: object) -> str:
@@ -291,6 +309,18 @@ def _capability_hash(record: object) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _execution_identity_hash(record: object) -> str:
+    """Hash a freshly measured, execution-affecting backend/tool identity."""
+    fresh = getattr(record, "fresh_execution_identity", None)
+    if not callable(fresh):
+        raise ValueError("backend record cannot provide an execution identity")
+    identity = fresh()
+    if not identity:
+        raise ValueError("backend execution identity must not be empty")
+    payload = canonical_json(dict(identity))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _snapshot_pins(
     compiled: CompiledRecipe, registry: object | None = None
 ) -> dict[str, dict[str, str]]:
@@ -305,6 +335,7 @@ def _snapshot_pins(
             "status": "unresolved",
             "adapter_identity": "unresolved-adapter",
             "capability_hash": "unresolved-capability",
+            "execution_identity_sha256": "unresolved-execution-identity",
         }
         if registry is not None:
             rec = getattr(registry, "get", lambda *_: None)(s.backend.backend_id)
@@ -316,6 +347,7 @@ def _snapshot_pins(
                 )
                 pin["adapter_identity"] = _adapter_identity(rec)
                 pin["capability_hash"] = _capability_hash(rec)
+                pin["execution_identity_sha256"] = _execution_identity_hash(rec)
         pins[s.id] = pin
     return pins
 

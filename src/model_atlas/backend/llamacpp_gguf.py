@@ -102,6 +102,7 @@ class LlamaCppProbeResult:
     quantizer: str
     quantizer_sha256: str
     python: str
+    python_resolved: str
     python_sha256: str
     evidence: str
 
@@ -162,6 +163,7 @@ def probe_llamacpp_gguf(
         quantizer=str(quantizer),
         quantizer_sha256=quantizer_sha,
         python=str(python),
+        python_resolved=str(resolved_python),
         python_sha256=python_sha,
         evidence=json.dumps(evidence_obj, sort_keys=True),
     )
@@ -512,6 +514,29 @@ def build_llamacpp_gguf_record(
         )
         return result.available, result.commit, result.evidence
 
+    def execution_identity() -> Mapping[str, str]:
+        result = probe_llamacpp_gguf(
+            toolchain_root,
+            python_executable,
+            expected_converter_sha256=expected_converter_sha256,
+            expected_quantizer_sha256=expected_quantizer_sha256,
+            expected_python_sha256=expected_python_sha256,
+        )
+        if not result.available or result.commit is None:
+            raise BackendUnavailable("llama.cpp execution tool identity is unavailable or drifted")
+        return {
+            "commit": result.commit,
+            "converter": result.converter,
+            "converter_sha256": result.converter_sha256,
+            "quantizer": result.quantizer,
+            "quantizer_sha256": result.quantizer_sha256,
+            "python": result.python,
+            "python_resolved": result.python_resolved,
+            "python_sha256": result.python_sha256,
+            "quantizer_ggml_cuda": "false",
+            "quantizer_ggml_rpc": "false",
+        }
+
     return BackendRecord(
         backend_id=BACKEND_ID,
         display_name="llama.cpp mixed GGUF quantization (artifact only)",
@@ -530,6 +555,7 @@ def build_llamacpp_gguf_record(
         fail_closed=True,
         produces_derivative=True,
         availability_probe=availability,
+        execution_identity_probe=execution_identity,
         parameters=(
             ParameterSpec("tensor_plan_content", "string", "recipe-bound tensor override plan"),
             ParameterSpec("tensor_plan_path", "string", "path to tensor override plan"),
