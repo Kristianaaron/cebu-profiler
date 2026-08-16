@@ -170,6 +170,16 @@ def test_profile_execution_binding_is_strict_and_identity_bound(tmp_path: Path) 
             serialized[field] = malformed
             with pytest.raises(ValueError, match=f"{field} must be a nonempty string"):
                 ProfileExecutionBinding.from_dict(serialized)
+    whitespace_path = _execution_binding().to_dict()
+    whitespace_path["source_manifest_digest"] = ""
+    whitespace_path["source_sha256"] = {"   ": "a" * 64}
+    with pytest.raises(ValueError, match="paths must be nonempty"):
+        ProfileExecutionBinding.from_dict(whitespace_path)
+    for malformed_execution in (None, 7, "   "):
+        with pytest.raises(ValueError, match="execution must be an object"):
+            AtlasProfile.from_dict(
+                {"model": "glm-5.2", "execution": malformed_execution}
+            )
 
     base = _full_profile()
     bound = AtlasProfile(**{**base.__dict__, "execution": _execution_binding()})

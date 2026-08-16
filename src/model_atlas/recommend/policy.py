@@ -222,7 +222,7 @@ class ProfileExecutionBinding:
         if any(not _SHA256_RE.fullmatch(digest) for digest in digests):
             raise ValueError("profile execution digests must be lowercase SHA-256")
         paths = [path for path, _ in self.source_sha256]
-        if len(paths) != len(set(paths)) or any(not path for path in paths):
+        if len(paths) != len(set(paths)) or any(not path.strip() for path in paths):
             raise ValueError("profile source hash paths must be nonempty and unique")
 
     @classmethod
@@ -306,12 +306,12 @@ class AtlasProfile:
                 if _SRC_PRECEDENCE.get(st.kind, 5) <= _SRC_PRECEDENCE.get(prev.kind, 5):
                     continue  # keep the strongest observed claim
             evidence[canonical] = st
-        execution_data = data.get("execution")
-        execution = (
-            ProfileExecutionBinding.from_dict(execution_data)
-            if isinstance(execution_data, dict)
-            else None
-        )
+        execution: ProfileExecutionBinding | None = None
+        if "execution" in data:
+            execution_data = data["execution"]
+            if not isinstance(execution_data, dict):
+                raise ValueError("execution must be an object when provided")
+            execution = ProfileExecutionBinding.from_dict(execution_data)
         return cls(
             profile_id=str(
                 data.get("declared_profile_id")

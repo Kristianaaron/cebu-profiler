@@ -1656,13 +1656,12 @@ class RecommendationService:
 
 
 def _profile_to_dict(profile: AtlasProfile) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "profile_id": profile.profile_id_of(),
         "declared_profile_id": profile.profile_id,
         "model": profile.model,
         "seed": profile.seed,
         "hardware_model_arch": profile.hardware_model_arch,
-        "execution": profile.execution.to_dict() if profile.execution else None,
         "routing_consistency_passed": profile.routing_consistency_passed,
         "evidence": {
             k: {"kind": v.kind, "present": v.present, "coverage": v.coverage}
@@ -1670,6 +1669,9 @@ def _profile_to_dict(profile: AtlasProfile) -> dict[str, Any]:
         },
         "notes": profile.notes,
     }
+    if profile.execution is not None:
+        payload["execution"] = profile.execution.to_dict()
+    return payload
 
 
 def _profile_from_dict(data: dict[str, Any]) -> AtlasProfile:
