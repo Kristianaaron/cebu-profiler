@@ -31,6 +31,7 @@ from model_atlas.backend.contract import (
     command_exists,
     module_present,
 )
+from model_atlas.backend.nvfp4_width_slice import AtlasNvfp4WidthSliceAdapter
 from model_atlas.recipe.schema import RecipeStage, RecipeStatus
 
 # ---------------------------------------------------------------------------
@@ -462,6 +463,36 @@ def _builtin_records() -> dict[str, BackendRecord]:
         adapter=CommandBackedAdapter(backend_id="eval_lab"),
     )
 
+    nvfp4_width_slice = BackendRecord(
+        backend_id="atlas_nvfp4_width_slice",
+        display_name="Atlas NVFP4 uniform width slice (opt-in pruning)",
+        method_family="pruning",
+        formats=("pruned-checkpoint", "safetensors"),
+        represents_method="uniform aligned expert-channel width slicing",
+        architectures=("glm-5.2",),
+        compute_archs=("gb10-sm121", "any"),
+        topologies=("2x-spark", "single", "any"),
+        runtime_compat=("vllm-modelopt",),
+        conversion_tool_compat=("atlas-loader",),
+        status=RecipeStatus.VALIDATED,
+        version="1.0.0",
+        declared_capabilities=(_PRUNE_CAP,),
+        supported_formats=("pruned-checkpoint", "safetensors"),
+        fail_closed=True,
+        produces_derivative=True,
+        availability_probe=lambda: (True, "1.0.0", "in-repo transactional loader"),
+        parameters=(
+            ParameterSpec(
+                "width",
+                "int",
+                "uniform retained expert width (loader enforces 16-channel alignment)",
+                required=True,
+                minimum=16,
+            ),
+        ),
+        adapter=AtlasNvfp4WidthSliceAdapter(),
+    )
+
     # A separately-registered OPT-IN pruning capability (TENP/FlexMoE). It is
     # NOT part of any canonical recipe; it declares the pruning capability for
     # the compiler's capability gate, and stays UNAVAILABLE until wired.
@@ -492,6 +523,7 @@ def _builtin_records() -> dict[str, BackendRecord]:
             modelopt,
             llm_compressor,
             eval_lab,
+            nvfp4_width_slice,
             tenp_pruning,
         )
     }

@@ -258,7 +258,13 @@ def _whole_checkpoint_digest(files: list[Path]) -> str:
 # registered validators (derivative backends only)
 # --------------------------------------------------------------------------
 
-for _backend in ("exl3", "modelopt_nvfp4", "llm_compressor", "atlas_quant_probe"):
+for _backend in (
+    "exl3",
+    "modelopt_nvfp4",
+    "llm_compressor",
+    "atlas_quant_probe",
+    "atlas_nvfp4_width_slice",
+):
     register_checkpoint_validator(_backend, "integrity", _safetensors_structure)
     register_checkpoint_validator(_backend, "format", _safetensors_structure)
     register_checkpoint_validator(_backend, "checkpoint", _safetensors_structure)

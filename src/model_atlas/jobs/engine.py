@@ -694,6 +694,7 @@ class JobEngine:
                 StageEffectClass.REFINEMENT,
                 StageEffectClass.RESIDUAL,
                 StageEffectClass.CONDITIONING,
+                StageEffectClass.PRUNING,
             }:
                 rec = self._backend_record(recipe_stage.backend.backend_id)
                 adapter = self.registry.adapter_for(recipe_stage.backend.backend_id)

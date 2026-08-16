@@ -677,7 +677,9 @@ def materialize_uniform_width(
         # Copy every SAFE top-level asset (all non-shard files) byte-for-byte,
         # except the files we deliberately rebuild above. Do not follow symlinks
         # that point outside the source directory.
-        for asset in sorted(p.name for p in source.iterdir() if p.is_file()):
+        for asset in sorted(
+            p.name for p in source.iterdir() if p.is_file() and not p.name.startswith("._")
+        ):
             if asset in _REBUILT or asset.endswith(".safetensors"):
                 continue
             srcp = source / asset

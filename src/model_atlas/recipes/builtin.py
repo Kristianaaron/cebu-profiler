@@ -30,6 +30,7 @@ from model_atlas.recipe.schema import (
     PublishRule,
     RecipeConstraints,
     RecipeStage,
+    RecipeStatus,
     ResourceBounds,
     SourceIdentity,
     StageBackendPin,
@@ -395,4 +396,76 @@ def tenp_pruning_optin_recipe(
             require_runtime_benchmarked=True,
             require_repair_or_validated=True,
         ),
+    )
+
+
+def nvfp4_width_slice_optin_recipe(
+    source: SourceIdentity,
+    width: int,
+) -> CompressionRecipe:
+    """Explicit uniform-width NVFP4 structural pruning recipe.
+
+    This is a deterministic engineering control, not a quality-aware pruning
+    recommendation and not a runtime-loadability claim.
+    """
+    stage = RecipeStage(
+        id="width-slice",
+        name="Uniform aligned NVFP4 expert-channel width slice",
+        effect_class=StageEffectClass.PRUNING,
+        backend=StageBackendPin(
+            backend_id="atlas_nvfp4_width_slice",
+            version="1.0.0",
+            minimum_status=RecipeStatus.VALIDATED,
+        ),
+        parameters={"width": str(width)},
+        produces_format=["pruned-checkpoint", "safetensors"],
+        expected_outputs=["config.json", "model.safetensors.index.json"],
+        seed=0,
+        validation_gates=[
+            ValidationGate(gate_id="width-slice-checkpoint", kind="checkpoint", required=True)
+        ],
+        resources=ResourceBounds(
+            max_host_gb=16.0,
+            max_scratch_gb=192.0,
+            max_workers=1,
+            note="bounded streaming exporter plus staged/CAS derivative copies",
+        ),
+        evidence_policy=EvidenceKind.PREDICTED,
+        notes=(
+            "OPT-IN uniform width control; no TENP, quality-retention, or runtime "
+            "validation claim"
+        ),
+    )
+    return CompressionRecipe(
+        name=f"atlas-nvfp4-width-slice-w{width}",
+        description=(
+            "Explicit uniform aligned expert-channel pruning control. The output "
+            "is structurally validated but remains runtime-unvalidated."
+        ),
+        source=source,
+        calibration=CalibrationIdentity(
+            calibration_id="not-used-uniform-width-slice",
+            corpus_name="none",
+            seed=0,
+            note="uniform structural control uses no quality calibration",
+        ),
+        hardware=GLM52_HARDWARE,
+        constraints=RecipeConstraints(
+            no_pruning=False,
+            allow_pruning_capability=True,
+            preserve_non_expert_backbone=True,
+            immutable_source=True,
+            allow_hybrid_precision=False,
+            max_resident_gib=115.0,
+            derived_format="safetensors",
+        ),
+        stages=[stage],
+        publish=PublishRule(
+            require_all_stages_validated=True,
+            require_no_pruning=False,
+            evidence_kind_min=EvidenceKind.PREDICTED,
+            require_runtime_benchmarked=False,
+            require_repair_or_validated=False,
+        ),
+        backend_pins={"atlas_nvfp4_width_slice": "1.0.0"},
     )
