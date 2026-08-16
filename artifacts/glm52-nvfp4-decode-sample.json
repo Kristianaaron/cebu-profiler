@@ -1,0 +1,21 @@
+{
+  "block_size": 16,
+  "bytes_read": 3460,
+  "decoded_f32_sha256": "1075992dc7af8875f65f0fadcb5dc8143c50ceff8f42b474a3a7c85d423542b3",
+  "decoded_shape": [
+    1,
+    6144
+  ],
+  "finite": true,
+  "l2_norm": 1.409204088715542,
+  "maximum": 0.07094028987921774,
+  "minimum": -0.06305803544819355,
+  "producer": "modelopt@0.46.0.dev65+g977d34dc3",
+  "raw_sha256": "9dfd6bb2c7687c3cc7381e3166b16ab8a5a7c830ea9964c2b8e87468bb7e2cfc",
+  "row_start": 0,
+  "rows": 1,
+  "scale2": 4.1053408494917676e-05,
+  "schema_version": 1,
+  "source": "/media/glm52/models/nvidia/GLM-5.2-NVFP4",
+  "tensor": "model.layers.10.mlp.experts.0.gate_proj.weight"
+}
