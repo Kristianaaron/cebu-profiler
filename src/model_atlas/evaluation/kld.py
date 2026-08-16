@@ -57,6 +57,10 @@ def _validate_logits(name: str, logits: object) -> list[list[list[float]]]:
                 f"{name} logits sample {bi} must be a sequence"
             )
         seq = list(sample)
+        if not seq:
+            raise KLDMismatchError(
+                f"{name} logits sequence dimension must be >= 1 at batch {bi}"
+            )
         if seq_len is None:
             seq_len = len(seq)
         elif len(seq) != seq_len:
@@ -152,10 +156,10 @@ def _align_sample(
                 f"alignment {alignment.sample_id!r} has {len(positions)} "
                 f"positions but sequence length is {seq_len}"
             )
-        if sample_ids is not None and alignment.sample_id not in sample_ids:
+        if sample_ids is not None and alignment.sample_id != sample_ids[batch_index]:
             raise KLDMismatchError(
-                f"teacher/candidate alignment sample {alignment.sample_id!r} "
-                "is not present in ordered sample_ids"
+                f"alignment sample {alignment.sample_id!r} at batch {batch_index} "
+                f"does not match ordered sample_id {sample_ids[batch_index]!r}"
             )
         sid = alignment.sample_id
     else:
@@ -261,8 +265,9 @@ def token_kld(
     ``[batch][seq]`` boolean/0-1. ``sample_ids`` and ``domains`` are
     batch-bound; token positions reset per sample. Independent teacher and
     candidate alignment identities (ordered sample IDs plus per-sample valid
-    token positions/token IDs) may be passed via ``teacher_alignment`` /
-    ``candidate_alignment`` and any mismatch is rejected before math.
+    token positions/token IDs) are required via ``teacher_alignment`` /
+    ``candidate_alignment`` and any mismatch is rejected before math. The
+    kernel never silently assumes that independent model outputs are aligned.
 
     Returns ``(rows, result)`` where ``result`` is a strict ``TokenKLDResult``
     carrying unique ``(sample_id, position)`` rows, token-weighted overall and
@@ -311,26 +316,25 @@ def token_kld(
             "token_ids must be supplied via teacher_alignment/candidate_alignment"
         )
 
-    if teacher_alignment is None and candidate_alignment is not None:
-        raise KLDMismatchError("candidate_alignment provided without teacher_alignment")
-    if candidate_alignment is None and teacher_alignment is not None:
-        raise KLDMismatchError("teacher_alignment provided without candidate_alignment")
-    if teacher_alignment is not None and candidate_alignment is not None:
-        if len(teacher_alignment) != batch:
-            raise KLDMismatchError(
-                f"teacher_alignment length {len(teacher_alignment)} != batch {batch}"
-            )
-        if len(candidate_alignment) != batch:
-            raise KLDMismatchError(
-                f"candidate_alignment length {len(candidate_alignment)} != batch {batch}"
-            )
-        t_keys = [_alignment_key(a) for a in teacher_alignment]
-        c_keys = [_alignment_key(a) for a in candidate_alignment]
-        if sorted(t_keys) != sorted(c_keys):
-            raise KLDMismatchError(
-                "teacher/candidate alignment mismatch: sample ids, positions, "
-                "or token ids differ between teacher and candidate"
-            )
+    if teacher_alignment is None or candidate_alignment is None:
+        raise KLDMismatchError(
+            "independent teacher_alignment and candidate_alignment are required"
+        )
+    if len(teacher_alignment) != batch:
+        raise KLDMismatchError(
+            f"teacher_alignment length {len(teacher_alignment)} != batch {batch}"
+        )
+    if len(candidate_alignment) != batch:
+        raise KLDMismatchError(
+            f"candidate_alignment length {len(candidate_alignment)} != batch {batch}"
+        )
+    t_keys = [_alignment_key(a) for a in teacher_alignment]
+    c_keys = [_alignment_key(a) for a in candidate_alignment]
+    if t_keys != c_keys:
+        raise KLDMismatchError(
+            "teacher/candidate alignment mismatch: sample ids, positions, "
+            "or token ids differ between teacher and candidate"
+        )
 
     if mask is not None:
         mask_arr = _validate_bool_mask(mask, batch, seq_len)
@@ -342,7 +346,7 @@ def token_kld(
         sid, positions, domain = _align_sample(
             batch_index=bi,
             seq_len=seq_len,
-            alignment=teacher_alignment[bi] if teacher_alignment else None,
+            alignment=teacher_alignment[bi],
             sample_ids=sample_ids,
             domains=domains,
         )
@@ -376,11 +380,14 @@ def token_kld(
 
     sample_ids_resolved = _ordered_sample_ids(rows)
     report = build_domain_report(rows)
+    bound_evidence = evidence.model_copy(
+        update={"value": report.overall.token_weighted_mean}
+    )
     result = TokenKLDResult(
         sample_ids=sample_ids_resolved,
         rows=rows,
         report=report,
-        evidence=evidence,
+        evidence=bound_evidence,
     )
     return rows, result
 

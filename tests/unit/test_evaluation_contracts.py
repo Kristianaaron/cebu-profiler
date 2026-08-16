@@ -51,6 +51,7 @@ def _repro() -> ReproducibilityManifest:
         device="cpu",
         topology="single",
         input_hash=_SHA,
+        output_hash=_SHA,
         argv=[],
     )
 
@@ -172,6 +173,7 @@ def test_version_999_rejected() -> None:
             corpus_hash=_SHA, tokenizer_hash=_SHA, config_hash=_SHA,
             harness_revision="r", adapter_version="a", backend_version="b",
             seed=1, dtype="f", device="c", topology="t", input_hash=_SHA,
+            output_hash=_SHA,
         )
 
 
@@ -184,6 +186,7 @@ def test_required_meta_rejected_when_empty() -> None:
             corpus_hash=_SHA, tokenizer_hash=_SHA, config_hash=_SHA,
             harness_revision="", adapter_version="a", backend_version="b",
             seed=1, dtype="f", device="c", topology="t", input_hash=_SHA,
+            output_hash=_SHA,
         )
     # topology / device required (not optional) and nonempty.
     with pytest.raises(ValidationError):
@@ -192,7 +195,15 @@ def test_required_meta_rejected_when_empty() -> None:
             corpus_hash=_SHA, tokenizer_hash=_SHA, config_hash=_SHA,
             harness_revision="r", adapter_version="a", backend_version="b",
             seed=1, dtype="f", device="", topology="t", input_hash=_SHA,
+            output_hash=_SHA,
         )
+
+
+def test_reproducibility_requires_output_hash() -> None:
+    payload = _repro().model_dump()
+    payload.pop("output_hash")
+    with pytest.raises(ValidationError):
+        ReproducibilityManifest.model_validate(payload)
 
 
 def test_token_kld_result_row_identity() -> None:
@@ -205,9 +216,19 @@ def test_token_kld_result_row_identity() -> None:
                 domain="overall", n_tokens=1, token_weighted_mean=0.1,
                 p50=0.1, p95=0.1, p99=0.1, max=0.1,
             ),
-            by_domain=[],
+            by_domain=[
+                DomainKLDAggregate(
+                    domain="unknown",
+                    n_tokens=1,
+                    token_weighted_mean=0.1,
+                    p50=0.1,
+                    p95=0.1,
+                    p99=0.1,
+                    max=0.1,
+                )
+            ],
         ),
-        evidence=_measured_evidence(),
+        evidence=_measured_evidence().model_copy(update={"value": 0.1}),
     )
     assert result.rows[0].sample_id == "s"
 
@@ -217,7 +238,7 @@ def test_token_kld_result_row_identity() -> None:
             sample_ids=["s"],
             rows=[row, row.model_copy()],
             report=result.report,
-            evidence=_measured_evidence(),
+            evidence=_measured_evidence().model_copy(update={"value": 0.1}),
         )
     # Row referencing an unknown sample rejected.
     with pytest.raises(ValidationError):
@@ -225,10 +246,83 @@ def test_token_kld_result_row_identity() -> None:
             sample_ids=["s"],
             rows=[TokenKLDRow(sample_id="other", position=0, token_id=1, kld=0.1)],
             report=result.report,
-            evidence=_measured_evidence(),
+            evidence=_measured_evidence().model_copy(update={"value": 0.1}),
         )
 
 
+def test_token_kld_result_binds_rows_aggregates_and_evidence() -> None:
+    rows = [
+        TokenKLDRow(sample_id="s", position=0, token_id=1, kld=0.1, domain="d"),
+        TokenKLDRow(sample_id="s", position=1, token_id=2, kld=0.3, domain="d"),
+    ]
+    aggregate = DomainKLDAggregate(
+        domain="overall",
+        n_tokens=2,
+        token_weighted_mean=0.2,
+        p50=0.2,
+        p95=0.29,
+        p99=0.298,
+        max=0.3,
+    )
+    domain = aggregate.model_copy(update={"domain": "d"})
+    evidence = _measured_evidence().model_copy(update={"value": 0.2})
+    valid = TokenKLDResult(
+        sample_ids=["s"],
+        rows=rows,
+        report=DomainKLDReport(overall=aggregate, by_domain=[domain]),
+        evidence=evidence,
+    )
+    assert valid.report.overall.p99 == pytest.approx(0.298)
+
+    for field, bad in (
+        ("token_weighted_mean", 0.9),
+        ("p50", 0.9),
+        ("p95", 0.9),
+        ("p99", 0.9),
+        ("max", 0.9),
+    ):
+        bad_overall = aggregate.model_copy(update={field: bad})
+        with pytest.raises(ValidationError):
+            TokenKLDResult(
+                sample_ids=["s"],
+                rows=rows,
+                report=DomainKLDReport(overall=bad_overall, by_domain=[domain]),
+                evidence=evidence,
+            )
+    with pytest.raises(ValidationError):
+        TokenKLDResult(
+            sample_ids=["s"],
+            rows=rows,
+            report=DomainKLDReport(overall=aggregate, by_domain=[domain]),
+            evidence=evidence.model_copy(update={"value": 0.9}),
+        )
+
+    with pytest.raises(ValidationError, match="names must be unique"):
+        TokenKLDResult(
+            sample_ids=["s"],
+            rows=rows,
+            report=DomainKLDReport(overall=aggregate, by_domain=[domain, domain]),
+            evidence=evidence,
+        )
+
+    with pytest.raises(ValidationError, match="exactly match"):
+        TokenKLDResult(
+            sample_ids=["s", "ghost"],
+            rows=rows,
+            report=DomainKLDReport(overall=aggregate, by_domain=[domain]),
+            evidence=evidence,
+        )
+
+    with pytest.raises(ValidationError, match="must be 'overall'"):
+        TokenKLDResult(
+            sample_ids=["s"],
+            rows=rows,
+            report=DomainKLDReport(
+                overall=aggregate.model_copy(update={"domain": "not-overall"}),
+                by_domain=[domain],
+            ),
+            evidence=evidence,
+        )
 def test_router_summary_requires_evidence() -> None:
     with pytest.raises(ValidationError):
         RouterDivergenceSummary(
@@ -265,7 +359,17 @@ def test_canonical_identity_is_stable_and_excludes_metric_results() -> None:
                 domain="overall", n_tokens=1, token_weighted_mean=0.5,
                 p50=0.5, p95=0.5, p99=0.5, max=0.5,
             ),
-            by_domain=[],
+            by_domain=[
+                DomainKLDAggregate(
+                    domain="unknown",
+                    n_tokens=1,
+                    token_weighted_mean=0.5,
+                    p50=0.5,
+                    p95=0.5,
+                    p99=0.5,
+                    max=0.5,
+                )
+            ],
         ),
         evidence=_measured_evidence(),
     )

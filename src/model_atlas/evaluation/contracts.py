@@ -73,7 +73,7 @@ class MetricEvidence(_StrictModel):
     value: float
     # Immutable artifact digest + provenance. REQUIRED nonempty when
     # kind == MEASURED.
-    artifact_digest: str | None = None
+    artifact_digest: str | None = Field(default=None, pattern=_SHA256_PATTERN)
     producer: str | None = None
     producer_version: str | None = None
 
@@ -209,11 +209,49 @@ class TokenKLDResult(_StrictModel):
     report: DomainKLDReport
     evidence: MetricEvidence
 
+    @staticmethod
+    def _quantile(values: list[float], q: float) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        position = (len(ordered) - 1) * q
+        lower = math.floor(position)
+        upper = math.ceil(position)
+        if lower == upper:
+            return ordered[lower]
+        fraction = position - lower
+        return ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction
+
+    @classmethod
+    def _validate_aggregate(
+        cls,
+        aggregate: DomainKLDAggregate,
+        rows: list[TokenKLDRow],
+        *,
+        label: str,
+    ) -> None:
+        values = [row.kld for row in rows]
+        expected = {
+            "token_weighted_mean": sum(values) / len(values) if values else 0.0,
+            "p50": cls._quantile(values, 0.50),
+            "p95": cls._quantile(values, 0.95),
+            "p99": cls._quantile(values, 0.99),
+            "max": max(values, default=0.0),
+        }
+        if aggregate.n_tokens != len(rows):
+            raise ValueError(f"{label} token count does not match KLD rows")
+        for field, value in expected.items():
+            if not math.isclose(
+                getattr(aggregate, field), value, rel_tol=1e-12, abs_tol=1e-12
+            ):
+                raise ValueError(f"{label} {field} does not match KLD rows")
+
     @model_validator(mode="after")
     def _validate_identity(self) -> TokenKLDResult:
         if len(self.sample_ids) != len(set(self.sample_ids)):
             raise ValueError("sample_ids must be unique")
         seen: set[tuple[str, int]] = set()
+        row_sample_ids: list[str] = []
         for row in self.rows:
             key = (row.sample_id, row.position)
             if key in seen:
@@ -225,6 +263,38 @@ class TokenKLDResult(_StrictModel):
                 raise ValueError(
                     f"row sample_id {row.sample_id!r} not in sample_ids"
                 )
+            if row.sample_id not in row_sample_ids:
+                row_sample_ids.append(row.sample_id)
+        if row_sample_ids != self.sample_ids:
+            raise ValueError(
+                "sample_ids must exactly match row-derived sample identity and order"
+            )
+        active = [row for row in self.rows if not row.masked]
+        expected_mean = sum(row.kld for row in active) / len(active) if active else 0.0
+        if self.report.overall.domain != "overall":
+            raise ValueError("overall KLD aggregate domain must be 'overall'")
+        self._validate_aggregate(self.report.overall, active, label="overall KLD")
+        domain_rows = {
+            domain: [row for row in active if row.domain == domain]
+            for domain in {row.domain for row in active}
+        }
+        report_domains = {aggregate.domain: aggregate for aggregate in self.report.by_domain}
+        if len(report_domains) != len(self.report.by_domain):
+            raise ValueError("domain KLD aggregate names must be unique")
+        if set(report_domains) != set(domain_rows):
+            raise ValueError("domain KLD aggregates do not match KLD row domains")
+        for domain, rows in domain_rows.items():
+            aggregate = report_domains[domain]
+            self._validate_aggregate(
+                aggregate, rows, label=f"domain KLD aggregate for {domain!r}"
+            )
+        if not math.isclose(
+            self.evidence.value,
+            expected_mean,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("KLD evidence value must equal the row-derived overall mean")
         return self
 
 
@@ -286,7 +356,7 @@ class ReproducibilityManifest(_StrictModel):
     topology: str = Field(min_length=1)
     argv: list[str] = Field(default_factory=list)
     input_hash: str = Field(pattern=_SHA256_PATTERN)
-    output_hash: str | None = Field(default=None, pattern=_SHA256_PATTERN)
+    output_hash: str = Field(pattern=_SHA256_PATTERN)
 
 
 class EvaluationReport(_StrictModel):

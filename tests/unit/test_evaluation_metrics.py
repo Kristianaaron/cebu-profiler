@@ -10,7 +10,11 @@ from model_atlas.evaluation.contracts import (
     MetricEvidence,
     SampleAlignment,
 )
-from model_atlas.evaluation.kld import KLDMismatchError, build_domain_report, token_kld
+from model_atlas.evaluation.kld import (
+    KLDMismatchError,
+    build_domain_report,
+)
+from model_atlas.evaluation.kld import token_kld as _token_kld_kernel
 
 _SHA = "b" * 64
 
@@ -40,6 +44,29 @@ def _binary_logits(*, p: float) -> list[list[list[float]]]:
 
 def _binary_kl(p: float, q: float) -> float:
     return p * math.log(p / q) + (1.0 - p) * math.log((1.0 - p) / (1.0 - q))
+
+
+def token_kld(
+    teacher: object, candidate: object, **kwargs: object
+) -> tuple[object, object]:
+    """Test helper that supplies explicit identity alignment by default."""
+    if (
+        "teacher_alignment" not in kwargs
+        and "candidate_alignment" not in kwargs
+        and isinstance(teacher, (list, tuple))
+    ):
+        alignments = []
+        requested_ids = kwargs.get("sample_ids")
+        for index, sample in enumerate(teacher):
+            sequence = sample if isinstance(sample, (list, tuple)) else []
+            positions = tuple(range(len(sequence)))
+            sample_id = f"sample#{index}"
+            if isinstance(requested_ids, list) and index < len(requested_ids):
+                sample_id = str(requested_ids[index])
+            alignments.append(SampleAlignment(sample_id, positions, positions))
+        kwargs["teacher_alignment"] = alignments
+        kwargs["candidate_alignment"] = list(alignments)
+    return _token_kld_kernel(teacher, candidate, **kwargs)  # type: ignore[arg-type]
 
 
 def test_identical_logits_kld_zero() -> None:
@@ -205,6 +232,31 @@ def test_batch_and_alignment_mismatches_rejected() -> None:
     with pytest.raises(KLDMismatchError):
         token_kld(a, a, teacher_alignment=teacher_align, evidence=_evidence())
 
+    with pytest.raises(KLDMismatchError, match="are required"):
+        _token_kld_kernel(a, a, evidence=_evidence())
+
+    # The same IDs in a different batch order must not be silently realigned.
+    reversed_candidate = list(reversed(teacher_align))
+    with pytest.raises(KLDMismatchError):
+        token_kld(
+            a,
+            a,
+            teacher_alignment=teacher_align,
+            candidate_alignment=reversed_candidate,
+            evidence=_evidence(),
+        )
+
+    # Explicit sample IDs bind every alignment row to its batch position.
+    with pytest.raises(KLDMismatchError):
+        token_kld(
+            a,
+            a,
+            sample_ids=["s1", "s0"],
+            teacher_alignment=teacher_align,
+            candidate_alignment=teacher_align,
+            evidence=_evidence(),
+        )
+
 
 def test_nonfinite_logits_rejected() -> None:
     a = _logits(1, 1, 3, seed=6)
@@ -213,6 +265,13 @@ def test_nonfinite_logits_rejected() -> None:
         token_kld(bad, a, evidence=_evidence())
     with pytest.raises(KLDMismatchError):
         token_kld(a, [[[float("nan"), 0.0, 0.0]]], evidence=_evidence())
+
+
+def test_empty_sequence_and_vocab_rejected_cleanly() -> None:
+    with pytest.raises(KLDMismatchError, match="sequence dimension"):
+        token_kld([[]], [[]], evidence=_evidence())
+    with pytest.raises(KLDMismatchError, match="vocab dimension"):
+        token_kld([[[]]], [[[]]], evidence=_evidence())
 
 
 def test_evidence_required() -> None:
@@ -298,6 +357,18 @@ def test_cka_degenerate_blockers() -> None:
 
     with pytest.raises(ValueError):
         centered_linear_cka([[0.0] * 4] * 3, [[0.0] * 4] * 4)
+
+    with pytest.raises(ValueError, match="feature dimension"):
+        centered_linear_cka([[], []], [[], []])
+
+
+def test_cka_supports_different_feature_widths() -> None:
+    x = _matrix(24, 3, seed=10)
+    y = _matrix(24, 7, seed=11)
+    result = centered_linear_cka(x, y)
+    assert result.valid is True
+    assert result.score is not None
+    assert 0.0 <= result.score <= 1.0
 
 
 def test_eager_package_import_brings_no_numpy() -> None:

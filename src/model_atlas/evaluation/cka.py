@@ -41,6 +41,8 @@ def _to_matrix(name: str, x: object) -> list[list[float]]:
         if not isinstance(row, (list, tuple)):
             raise ValueError(f"{name} row {ri} must be a sequence")
         vec = list(row)
+        if not vec:
+            raise ValueError(f"{name} feature dimension must be >= 1")
         if nfeat is None:
             nfeat = len(vec)
         elif len(vec) != nfeat:
@@ -71,10 +73,11 @@ def _center_rows(x: list[list[float]]) -> list[list[float]]:
 def _linear_hsic(x: list[list[float]], y: list[list[float]]) -> float:
     """Linear HSIC = || (1/(n-1)) * Xc^T Yc ||_F^2 (unnormalised)."""
     n = len(x)
-    nfeat = len(x[0])
+    x_features = len(x[0])
+    y_features = len(y[0])
     gram = 0.0
-    for i in range(nfeat):
-        for j in range(nfeat):
+    for i in range(x_features):
+        for j in range(y_features):
             s = sum(x[k][i] * y[k][j] for k in range(n))
             gram += s * s
     return gram / ((n - 1.0) ** 2)
