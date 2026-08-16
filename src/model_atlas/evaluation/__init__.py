@@ -45,6 +45,23 @@ from model_atlas.evaluation.heldout import (
 )
 from model_atlas.evaluation.kld import KLDMismatchError, token_kld
 from model_atlas.evaluation.leakage import LeakageResult, detect_leakage, promote_allowed
+from model_atlas.evaluation.llamacpp_capture import (
+    CAPTURE_ADAPTER_VERSION,
+    LLAMA_CPP_CAPTURE_COMMIT,
+    CaptureManifest,
+    CaptureModelEvidence,
+    CapturePair,
+    CaptureRequest,
+    CaptureRole,
+    CaptureToolIdentity,
+    CaptureValidationError,
+    PrecisionEvidence,
+    build_capture_argv,
+    canonical_capture_runtime_argv,
+    capture_runtime_argv_sha256,
+    finalize_capture,
+    validate_capture_pair,
+)
 
 __all__ = [
     "HeldOutReport",
@@ -94,4 +111,20 @@ __all__ = [
     "EvalLabAdapter",
     "eval_lab_output_layout",
     "canonical_directory_sha256",
+    # forced-token llama.cpp capture
+    "CAPTURE_ADAPTER_VERSION",
+    "LLAMA_CPP_CAPTURE_COMMIT",
+    "CaptureModelEvidence",
+    "CaptureManifest",
+    "CapturePair",
+    "CaptureRequest",
+    "CaptureRole",
+    "CaptureToolIdentity",
+    "CaptureValidationError",
+    "PrecisionEvidence",
+    "build_capture_argv",
+    "canonical_capture_runtime_argv",
+    "capture_runtime_argv_sha256",
+    "finalize_capture",
+    "validate_capture_pair",
 ]
