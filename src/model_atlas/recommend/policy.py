@@ -42,8 +42,8 @@ class RecConfidence(StrEnum):
     INSUFFICIENT = "insufficient"
 
 
-RECOMMENDATION_POLICY_VERSION = "policy-v2-catalog"
-METHOD_CATALOG_VERSION = 1
+RECOMMENDATION_POLICY_VERSION = "policy-v3-recipe-templates"
+METHOD_CATALOG_VERSION = 2
 
 
 class CompressionIntent(StrEnum):
@@ -82,6 +82,7 @@ class MethodSpec:
     routing_dependent: bool = False
     planning_only: bool = False
     provenance_ids: tuple[str, ...] = ()
+    recipe_template: str = "glm52_no_pruning"
 
     def identity_dict(self) -> dict[str, Any]:
         return {
@@ -97,6 +98,7 @@ class MethodSpec:
             "routing_dependent": self.routing_dependent,
             "planning_only": self.planning_only,
             "provenance_ids": list(self.provenance_ids),
+            "recipe_template": self.recipe_template,
         }
 
 
@@ -512,6 +514,14 @@ METHOD_CATALOG: tuple[MethodSpec, ...] = (
         (StageEffectClass.QUANTIZATION,), _QUANT_INTENTS, "down",
         routing_dependent=True, provenance_ids=("NVIDIA-ModelOpt-NVFP4",),
     ),
+    MethodSpec(
+        "llamacpp-gguf-mixed", 10, MethodFamily.QUANTIZATION, "llamacpp_gguf_mixed",
+        ("nvfp4_suitability",), ("llamacpp-gguf-mixed",),
+        (StageEffectClass.QUANTIZATION,), (CompressionIntent.QUANTIZE_ONLY,), "down",
+        routing_dependent=True,
+        provenance_ids=("llama.cpp", "glm52-nvfp4-quant-risk", "glm52-gguf-tensor-plan"),
+        recipe_template="llamacpp_gguf_mixed",
+    ),
 )
 
 def validate_method_catalog(specs: tuple[MethodSpec, ...]) -> None:
@@ -531,6 +541,18 @@ def validate_method_catalog(specs: tuple[MethodSpec, ...]) -> None:
             and spec.compatible_intents
         ):
             raise ValueError(f"incomplete MethodSpec identity: {spec.method!r}")
+        if spec.recipe_template not in {"glm52_no_pruning", "llamacpp_gguf_mixed"}:
+            raise ValueError(f"unknown recipe template: {spec.method} -> {spec.recipe_template}")
+        if spec.recipe_template == "llamacpp_gguf_mixed" and (
+            spec.backend_id != "llamacpp_gguf_mixed"
+            or spec.family is not MethodFamily.QUANTIZATION
+            or spec.recipe_stage_ids != ("llamacpp-gguf-mixed",)
+            or spec.effect_classes != (StageEffectClass.QUANTIZATION,)
+            or spec.compatible_intents != (CompressionIntent.QUANTIZE_ONLY,)
+            or not spec.routing_dependent
+            or spec.planning_only
+        ):
+            raise ValueError(f"llama.cpp template contract mismatch: {spec.method}")
         effects = set(spec.effect_classes)
         is_pruning_family = spec.family == MethodFamily.PRUNING
         has_pruning_effect = StageEffectClass.PRUNING in effects
@@ -941,8 +963,10 @@ class RecommendationPolicy:
         pruning-capable backend exists. No verified backend -> never permitted."""
         if not allow_pruning:
             return False
-        for rec in self._registry.names():
-            record = self._registry.get(rec)
+        for spec in METHOD_CATALOG:
+            if spec.family is not MethodFamily.PRUNING:
+                continue
+            record = self._registry.get(spec.backend_id)
             if record is None:
                 continue
             if _PRUNE_CAP not in record.declared_capabilities:

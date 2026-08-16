@@ -187,6 +187,16 @@ function renderRec(rec) {
   const authorized = (rec.methods || []).slice();
   const blocked = (rec.blocked_methods || []).slice().map(m => ({ ...m, blocked: true }));
   const all = authorized.concat(blocked);
+  const derivative = authorized.filter(m =>
+    m.family === 'quantization' || m.family === 'pruning'
+  );
+  // A recipe template is an executable unit. Never auto-compose every
+  // analysis card with a derivative producer: select one compatible producer
+  // by default, or preserve the historical planning-only selection when no
+  // producer is authorized.
+  const defaultMethods = new Set(
+    derivative.length ? [derivative[0].method] : authorized.map(m => m.method)
+  );
   all.sort((a, b) => (a.rank || 99) - (b.rank || 99));
   all.forEach(m => {
     const card = document.createElement('div'); card.className = 'method';
@@ -195,7 +205,7 @@ function renderRec(rec) {
     cb.type = 'checkbox';
     const isBlocked = !!m.blocked || ((m.blockers || []).length > 0);
     cb.disabled = isBlocked;
-    cb.checked = !isBlocked;
+    cb.checked = !isBlocked && defaultMethods.has(m.method);
     cb.addEventListener('change', () => {
       if (cb.checked) { selection.add(m.method); invalidatePreview('selection changed'); }
       else { selection.delete(m.method); invalidatePreview('selection changed'); }
@@ -211,6 +221,11 @@ function renderRec(rec) {
     card.appendChild(top);
     const reason = document.createElement('div'); reason.className = 'reason';
     reason.textContent = esc(m.reason || ''); card.appendChild(reason);
+    if (m.method === 'llamacpp-gguf-mixed') {
+      const artifact = document.createElement('div'); artifact.className = 'evid';
+      artifact.textContent = 'artifact-only candidate; runtime validation is unclaimed';
+      card.appendChild(artifact);
+    }
     if (m.evidence_refs && m.evidence_refs.length) {
       const ev = document.createElement('div'); ev.className = 'evid';
       ev.textContent = 'evidence: ' + esc(m.evidence_refs.join(', ')); card.appendChild(ev);
@@ -232,7 +247,8 @@ function renderRec(rec) {
   // actually checked (the authorized, unblocked ones). The recipe is then the
   // exact checked subset — matching what preview/start will verify.
   selection = new Set(
-    all.filter(m => !(m.blocked || ((m.blockers || []).length > 0))).map(m => m.method)
+    all.filter(m => !(m.blocked || ((m.blockers || []).length > 0))
+      && defaultMethods.has(m.method)).map(m => m.method)
   );
 }
 

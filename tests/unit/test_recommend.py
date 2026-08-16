@@ -98,6 +98,7 @@ def test_deterministic_ranking_and_stable_ids():
     }
     assert {m.method for m in r1.blocked_methods} == {
         "exl3-primary",
+        "llamacpp-gguf-mixed",
         "llm-compressor",
         "modelopt-nvfp4",
         "nvfp4-substitute",
@@ -123,7 +124,7 @@ def test_intent_changes_identity_and_reports_missing_families() -> None:
 
 
 def test_method_catalog_is_explicit_stable_and_fail_closed() -> None:
-    assert METHOD_CATALOG_VERSION == 1
+    assert METHOD_CATALOG_VERSION == 2
     assert len(METHOD_CATALOG) == len({spec.method for spec in METHOD_CATALOG})
     assert len(method_catalog_digest()) == 64
     for spec in METHOD_CATALOG:
@@ -394,6 +395,111 @@ def test_catalog_priority_is_explicit_and_digest_bound() -> None:
     )
     assert method_catalog_digest(changed_catalog) != method_catalog_digest()
 
+    llama = method_spec("llamacpp-gguf-mixed")
+    with pytest.raises(ValueError, match="llama.cpp template contract mismatch"):
+        validate_method_catalog(
+            tuple(
+                replace(
+                    spec,
+                    family=MethodFamily.ANALYSIS,
+                    recipe_stage_ids=("not-the-built-stage",),
+                )
+                if spec.method == llama.method
+                else spec
+                for spec in METHOD_CATALOG
+            )
+        )
+
+
+def test_llamacpp_catalog_template_and_bound_recipe_are_exact(tmp_path: Path) -> None:
+    from model_atlas.recommend.api import AuthError
+
+    spec = method_spec("llamacpp-gguf-mixed")
+    assert spec.recipe_template == "llamacpp_gguf_mixed"
+    assert spec.compatible_intents == (CompressionIntent.QUANTIZE_ONLY,)
+    assert spec.effect_classes == (StageEffectClass.QUANTIZATION,)
+
+    profile = AtlasProfile(
+        **{
+            **_full_profile().__dict__,
+            "profile_id": "bound-gguf",
+            "routing_consistency_passed": True,
+            "execution": _execution_binding(str(tmp_path / "glm-source")),
+        }
+    )
+    service = RecommendationService(
+        profile_root=str(tmp_path / "profiles"), work_root=str(tmp_path / "runs")
+    )
+    auth = service.authorize(profile, RecTarget(memory_target_gib=219.0))
+    session = service.sessions[auth["token"]]
+    recipe = service._selected_recipe([spec.method], session=session)
+
+    assert [stage.id for stage in recipe.stages] == ["llamacpp-gguf-mixed"]
+    assert recipe.stages[0].effect_class is StageEffectClass.QUANTIZATION
+    assert recipe.stages[0].backend.require_available
+    assert recipe.constraints.no_pruning
+    assert recipe.constraints.derived_format == "gguf"
+    assert recipe.constraints.max_resident_gib == 219.0
+    assert recipe.hardware.runtime_backend == "none"
+    assert recipe.calibration.tokenizer_sha256 == "b" * 64
+    assert recipe.source.checkpoint_revision == "rev-1"
+
+    with pytest.raises(AuthError) as conflict:
+        service._selected_recipe(
+            ["teacher-identity", "llamacpp-gguf-mixed"], session=session
+        )
+    assert conflict.value.code == "recipe_composition_conflict"
+
+    snapshot = service._authorization_snapshot(session)
+    assert len(str(snapshot["execution_binding_sha256"])) == 64
+
+
+def test_llamacpp_authorize_preview_is_executable_with_fresh_fake_tool_pin(
+    tmp_path: Path,
+) -> None:
+    registry = build_default_registry()
+    backend = registry.get("llamacpp_gguf_mixed")
+    assert backend is not None
+    backend.availability_probe = lambda: (True, backend.version, "test filesystem probe")
+    backend.execution_identity_probe = lambda: {
+        "commit": backend.version,
+        "converter_sha256": "1" * 64,
+        "quantizer_sha256": "2" * 64,
+        "python_sha256": "3" * 64,
+    }
+    backend._availability_cached = None
+    profile = AtlasProfile(
+        **{
+            **_full_profile().__dict__,
+            "profile_id": "bound-gguf-preview",
+            "routing_consistency_passed": True,
+            "execution": _execution_binding(str(tmp_path / "glm-source")),
+        }
+    )
+    service = RecommendationService(
+        registry=registry,
+        profile_root=str(tmp_path / "profiles"),
+        work_root=str(tmp_path / "runs"),
+    )
+    service.save_profile(profile)
+    auth = service.authorize(profile, RecTarget(memory_target_gib=219.0))
+    assert "llamacpp-gguf-mixed" in auth["authorized_methods"]
+
+    preview = service.preview_selection(auth["token"], ["llamacpp-gguf-mixed"])
+
+    assert preview["readiness"] == {
+        "verified_plan": True,
+        "pins_pass": True,
+        "intent_satisfied": True,
+        "executable": True,
+    }
+    package = service.pending_previews[preview["preview_id"]]
+    assert package.artifact is not None
+    pin = package.artifact.resolved_pins["llamacpp-gguf-mixed"]
+    assert len(pin["execution_identity_sha256"]) == 64
+    assert package.recipe.hardware.runtime_backend == "none"
+    assert package.recipe.constraints.no_pruning
+
 
 def test_unknown_method_cannot_build_zero_stage_recipe(tmp_path: Path) -> None:
     from model_atlas.recommend.api import AuthError
@@ -507,9 +613,8 @@ def test_backend_unpinned_blocker():
     assert exl and any(b.code == "backend_unpinned" for b in exl[0].blockers)
 
 
-def test_pruning_requires_verified_backend():
-    """allow_pruning may never devise a pruning method unless a REAL, available,
-    version-pinned, derivative-producing pruning-capable backend is registered."""
+def test_pruning_requires_catalog_method_and_verified_backend():
+    """A backend alone never creates an implicit pruning recommendation."""
     from model_atlas.backend.contract import BackendRecord
     from model_atlas.backend.registry import BackendRegistry
     from model_atlas.recipe.schema import RecipeStatus
@@ -525,7 +630,8 @@ def test_pruning_requires_verified_backend():
     # default registry: no pruning capable+derivative+available backend
     assert rec.no_pruning is True
 
-    # now register a verified pruning backend and confirm it flips
+    # Even a verified backend cannot flip the policy without an explicit,
+    # digest-bound pruning MethodSpec/recipe template in the catalog.
     prune = BackendRecord(
         backend_id="tenp_pruning_prod",
         display_name="TENP prod",
@@ -545,8 +651,7 @@ def test_pruning_requires_verified_backend():
         allow_pruning=True,
         intent=CompressionIntent.PRUNE_ONLY,
     )
-    assert rec2.no_pruning is False
-    # still no pruning STAGE recommended unless a method maps to it
+    assert rec2.no_pruning is True
     assert not any("pruning" in m.method for m in rec2.methods)
 
 
@@ -1132,6 +1237,8 @@ def test_compress_gate_functions() -> None:
     assert "btn.disabled = !gate.ready" in _GUI_PAGE
     # blocked (non-authorized) methods are non-toggleable; only authorized ones are.
     assert "cb.disabled = isBlocked" in _GUI_PAGE
+    assert "derivative.length ? [derivative[0].method]" in _GUI_PAGE
+    assert "artifact-only candidate; runtime validation is unclaimed" in _GUI_PAGE
 
 
 def test_gui_start_fetches_token_binding_not_recipe(tmp_path: Path):

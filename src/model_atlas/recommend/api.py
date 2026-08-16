@@ -58,7 +58,7 @@ from model_atlas.recipe.schema import (
     StageEffectClass,
 )
 from model_atlas.recipes import CompiledPlanArtifact
-from model_atlas.recipes.builtin import glm52_no_pruning_recipe
+from model_atlas.recipes.builtin import glm52_no_pruning_recipe, llamacpp_gguf_mixed_recipe
 from model_atlas.recommend.policy import (
     METHOD_CATALOG,
     METHOD_CATALOG_VERSION,
@@ -618,6 +618,7 @@ class RecommendationService:
 
     @staticmethod
     def _authorization_snapshot(session: _AuthorizationSession) -> dict[str, object]:
+        binding = session.execution_binding
         return {
             "recommendation_id": session.recommendation_id,
             "policy_version": RECOMMENDATION_POLICY_VERSION,
@@ -630,6 +631,9 @@ class RecommendationService:
             "intent": session.intent.value,
             "no_pruning": session.no_pruning,
             "authorized_methods": list(session.authorized_methods),
+            "execution_binding_sha256": (
+                sha256_hex(canonical_json(binding.to_dict())) if binding is not None else ""
+            ),
         }
 
     @staticmethod
@@ -791,10 +795,10 @@ class RecommendationService:
         to THAT session's canonical target + constraints (never a hardcoded
         ceiling), so the preview reflects exactly what was authorized.
         """
-        base = glm52_no_pruning_recipe()
+        selected_specs = []
         try:
             for method in selected or ():
-                method_spec(method)
+                selected_specs.append(method_spec(method))
         except KeyError as exc:
             raise AuthError(
                 400,
@@ -812,6 +816,56 @@ class RecommendationService:
                 "profile_target_mismatch",
                 "profile model architecture differs from authorization target",
             )
+        templates = {spec.recipe_template for spec in selected_specs}
+        if "llamacpp_gguf_mixed" in templates:
+            if len(templates) != 1 or len(selected_specs) != 1:
+                raise AuthError(
+                    409,
+                    "recipe_composition_conflict",
+                    "llama.cpp mixed GGUF must be selected as the sole derivative recipe",
+                )
+            if session is None or binding is None:
+                raise AuthError(
+                    409,
+                    "profile_execution_identity_missing",
+                    "GGUF derivative requires source, calibration, and tokenizer identity",
+                )
+            if session.intent != CompressionIntent.QUANTIZE_ONLY or not session.no_pruning:
+                raise AuthError(
+                    409,
+                    "recipe_composition_conflict",
+                    "llama.cpp mixed GGUF is authorized only for quantize-only/no-pruning",
+                )
+            source = SourceIdentity(
+                source_id=binding.source_id,
+                checkpoint_path=binding.checkpoint_path,
+                checkpoint_revision=binding.checkpoint_revision,
+                sha256=dict(binding.source_sha256),
+                manifest_digest=binding.source_manifest_digest,
+            )
+            recipe = llamacpp_gguf_mixed_recipe(source)
+            recipe.calibration = CalibrationIdentity(
+                calibration_id=binding.calibration_id,
+                corpus_name=binding.corpus_name,
+                seed=binding.calibration_seed,
+                partition=binding.calibration_partition,
+                corpus_records_path=binding.corpus_records_path,
+                tokenizer_sha256=binding.tokenizer_hash,
+            )
+            recipe.hardware = recipe.hardware.model_copy(
+                update={
+                    "model_arch": session.target.hardware_model_arch,
+                    "compute_arch": session.target.compute_arch,
+                    "topology": session.target.topology,
+                    "runtime_backend": "none",
+                }
+            )
+            recipe.constraints = recipe.constraints.model_copy(
+                update={"max_resident_gib": session.target.memory_target_gib}
+            )
+            return recipe
+
+        base = glm52_no_pruning_recipe()
         if binding is not None:
             base.source = SourceIdentity(
                 source_id=binding.source_id,
