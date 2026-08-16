@@ -62,4 +62,4 @@
 ^blk\.77\.ffn_down_exps\.weight$=NVFP4
 ^blk\.77\.ffn_gate_exps\.weight$=NVFP4
 ^blk\.77\.ffn_up_exps\.weight$=NVFP4
-ffn_(gate|up|down)_exps\.weight=Q1_0
+blk\..*\.ffn_(gate|up|down)_exps\.weight=Q1_0

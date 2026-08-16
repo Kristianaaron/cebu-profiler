@@ -4801,7 +4801,7 @@
     "^blk\\.77\\.ffn_down_exps\\.weight$=NVFP4",
     "^blk\\.77\\.ffn_gate_exps\\.weight$=NVFP4",
     "^blk\\.77\\.ffn_up_exps\\.weight$=NVFP4",
-    "ffn_(gate|up|down)_exps\\.weight=Q1_0"
+    "blk\\..*\\.ffn_(gate|up|down)_exps\\.weight=Q1_0"
   ],
-  "tensor_type_sha256": "2384785ba46ddb0e1a532d8a36d50b147f2a9720a89690ad70c6f30b1690a150"
+  "tensor_type_sha256": "bca52ebd8afcedad4d1ef317eaddc5b53c91297e6bfcf7b4389337e92336024a"
 }

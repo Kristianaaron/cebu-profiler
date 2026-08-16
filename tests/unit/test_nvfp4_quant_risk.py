@@ -4,7 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from model_atlas.analysis.nvfp4_quant_risk import profile_nvfp4_quant_risk
+from model_atlas.analysis.nvfp4_quant_risk import (
+    _percentile_ranks,
+    profile_nvfp4_quant_risk,
+)
 from model_atlas.checkpoint.safetensors import write_safetensors
 
 
@@ -66,7 +69,7 @@ def test_profile_is_bounded_deterministic_and_layer_projection_granular(tmp_path
     assert all(row.layer in (0, 1) for row in first.rows)
     assert sum(row.retained_type == "NVFP4" for row in first.rows) == 3
     assert {row.layer for row in first.rows if row.retained_type == "NVFP4"} == {1}
-    assert first.tensor_type_lines[-1] == r"ffn_(gate|up|down)_exps\.weight=Q1_0"
+    assert first.tensor_type_lines[-1] == r"blk\..*\.ffn_(gate|up|down)_exps\.weight=Q1_0"
     assert first.tensor_type_sha256
     assert first.evidence_kind == "estimated"
     assert "no activation/Hessian/KLD claim" in first.note
@@ -78,3 +81,8 @@ def test_profile_rejects_unbounded_sampling(tmp_path: Path) -> None:
         profile_nvfp4_quant_risk(checkpoint, sample_experts=17)
     with pytest.raises(ValueError, match="sample_rows"):
         profile_nvfp4_quant_risk(checkpoint, sample_rows=5)
+
+
+def test_percentile_ties_receive_the_same_midrank() -> None:
+    assert _percentile_ranks([1.0, 1.0, 1.0]) == [0.5, 0.5, 0.5]
+    assert _percentile_ranks([1.0, 2.0, 2.0, 3.0]) == [0.0, 0.5, 0.5, 1.0]

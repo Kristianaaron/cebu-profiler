@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Any
 
 from model_atlas.backend.nvfp4_sample import decode_nvfp4_rows
-from model_atlas.checkpoint.safetensors import read_safetensors_header
 
 _EXPERT_WEIGHT = re.compile(
     r"^model\.layers\.(?P<layer>\d+)\.mlp\.experts\.(?P<expert>\d+)\."
@@ -29,6 +28,12 @@ _EXPERT_WEIGHT = re.compile(
 _PROJECTION_GGUF = {"gate_proj": "gate", "up_proj": "up", "down_proj": "down"}
 _MAX_ROWS = 4
 _MAX_EXPERTS = 16
+_MAX_INDEX_BYTES = 32 * 1024 * 1024
+_MAX_CONFIG_BYTES = 4 * 1024 * 1024
+_MAX_HEADER_BYTES = 64 * 1024 * 1024
+_MAX_HEADER_CACHE_BYTES = 512 * 1024 * 1024
+_MAX_SAMPLE_BYTES = 1 << 20
+_MAX_DECODED_ELEMENTS = 1 << 17
 
 
 @dataclass(frozen=True)
@@ -72,6 +77,8 @@ class _CheckpointReader:
     def __init__(self, root: Path) -> None:
         self.root = root
         self.index_path = root / "model.safetensors.index.json"
+        if self.index_path.stat().st_size > _MAX_INDEX_BYTES:
+            raise ValueError("checkpoint index exceeds metadata bound")
         index_bytes = self.index_path.read_bytes()
         index = json.loads(index_bytes)
         weight_map = index.get("weight_map")
@@ -79,9 +86,13 @@ class _CheckpointReader:
             raise ValueError("checkpoint index has no weight_map")
         self.weight_map = {str(k): str(v) for k, v in weight_map.items()}
         self.index_sha256 = hashlib.sha256(index_bytes).hexdigest()
-        config_bytes = (root / "config.json").read_bytes()
+        config_path = root / "config.json"
+        if config_path.stat().st_size > _MAX_CONFIG_BYTES:
+            raise ValueError("checkpoint config exceeds metadata bound")
+        config_bytes = config_path.read_bytes()
         self.config_sha256 = hashlib.sha256(config_bytes).hexdigest()
         self._headers: dict[str, tuple[int, dict[str, Any]]] = {}
+        self._header_cache_bytes = 0
 
     def _header(self, shard_name: str) -> tuple[int, dict[str, Any]]:
         cached = self._headers.get(shard_name)
@@ -90,10 +101,26 @@ class _CheckpointReader:
         path = self.root / shard_name
         with path.open("rb") as handle:
             raw = handle.read(8)
+            if len(raw) != 8:
+                raise ValueError(f"{shard_name}: truncated safetensors header")
+            header_size = struct.unpack("<Q", raw)[0]
+            if header_size > _MAX_HEADER_BYTES:
+                raise ValueError(f"{shard_name}: safetensors header exceeds bound")
+            if self._header_cache_bytes + header_size > _MAX_HEADER_CACHE_BYTES:
+                raise ValueError("safetensors header cache exceeds total bound")
+            header_bytes = handle.read(header_size)
         if len(raw) != 8:
             raise ValueError(f"{shard_name}: truncated safetensors header")
-        base = 8 + struct.unpack("<Q", raw)[0]
-        header = read_safetensors_header(path)
+        if len(header_bytes) != header_size:
+            raise ValueError(f"{shard_name}: truncated safetensors header JSON")
+        try:
+            header = json.loads(header_bytes)
+        except ValueError as exc:
+            raise ValueError(f"{shard_name}: invalid safetensors header JSON") from exc
+        if not isinstance(header, dict):
+            raise ValueError(f"{shard_name}: safetensors header is not an object")
+        base = 8 + header_size
+        self._header_cache_bytes += header_size
         cached = (base, header)
         self._headers[shard_name] = cached
         return cached
@@ -116,7 +143,15 @@ class _CheckpointReader:
         scale_rows, scale_columns = (int(v) for v in scale["shape"])
         if weight_rows != scale_rows or packed_columns * 2 != scale_columns * 16:
             raise ValueError(f"{name}: invalid NVFP4 geometry")
-        take = min(rows, weight_rows)
+        if weight_rows < rows:
+            raise ValueError(f"{name}: tensor has fewer than the requested {rows} rows")
+        take = rows
+        decoded_elements = take * packed_columns * 2
+        sample_bytes = take * (packed_columns + scale_columns) + 4
+        if decoded_elements > _MAX_DECODED_ELEMENTS:
+            raise ValueError(f"{name}: decoded sample exceeds absolute element bound")
+        if sample_bytes > _MAX_SAMPLE_BYTES:
+            raise ValueError(f"{name}: sample exceeds absolute byte-read bound")
         shard = self.root / shard_name
         packed = _read(shard, base, weight, take * packed_columns)
         scales = _read(shard, base, scale, take * scale_columns)
@@ -220,7 +255,14 @@ def profile_nvfp4_quant_risk(
         (int(row["layer"]), str(row["projection"]))
         for row in sorted(
             raw_rows,
-            key=lambda row: (float(row["risk_score"]), -int(row["layer"])),
+            # An exact budget can split a tied score.  The secondary key is an
+            # explicit stable policy, never an accidental insertion-order rank.
+            key=lambda row: (
+                float(row["risk_score"]),
+                float(row["rms_mean"]),
+                int(row["layer"]),
+                str(row["projection"]),
+            ),
             reverse=True,
         )[:keep_count]
     }
@@ -250,7 +292,7 @@ def profile_nvfp4_quant_risk(
     ]
     lines = tuple(
         sensitive_lines
-        + [r"ffn_(gate|up|down)_exps\.weight=Q1_0"]
+        + [r"blk\..*\.ffn_(gate|up|down)_exps\.weight=Q1_0"]
     )
     plan_bytes = ("\n".join(lines) + "\n").encode()
     return NVFP4QuantRiskReport(
@@ -284,10 +326,17 @@ def _even_sample(values: list[int], count: int) -> list[int]:
 def _percentile_ranks(values: list[float]) -> list[float]:
     if len(values) == 1:
         return [1.0]
-    order = sorted(range(len(values)), key=lambda index: (values[index], index))
     ranks = [0.0] * len(values)
-    for rank, index in enumerate(order):
-        ranks[index] = rank / (len(values) - 1)
+    order = sorted(range(len(values)), key=lambda index: values[index])
+    start = 0
+    while start < len(order):
+        end = start + 1
+        while end < len(order) and values[order[end]] == values[order[start]]:
+            end += 1
+        midrank = ((start + end - 1) / 2) / (len(values) - 1)
+        for position in range(start, end):
+            ranks[order[position]] = midrank
+        start = end
     return ranks
 
 
