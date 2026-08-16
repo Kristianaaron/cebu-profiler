@@ -17,6 +17,24 @@ from model_atlas.evaluation.contracts import (
     TokenKLDResult,
     TokenKLDRow,
 )
+from model_atlas.evaluation.eval_lab import (
+    EVAL_LAB_REVISION,
+    CandidateTaskReport,
+    DataPartition,
+    EndpointConfigIdentity,
+    EndpointTransport,
+    EvalLabAdapter,
+    EvalLabHandoff,
+    EvalLabRequest,
+    EvalLabResult,
+    EvalLabStatus,
+    EvalParameters,
+    FrozenHeldOutManifest,
+    PerformanceReport,
+    TaskScore,
+    TeacherRelativeBlocker,
+    eval_lab_output_layout,
+)
 from model_atlas.evaluation.heldout import (
     HeldOutReport,
     LabelRetention,
@@ -55,4 +73,21 @@ __all__ = [
     # cka
     "CKA",
     "centered_linear_cka",
+    # candidate-only Eval Lab handoff
+    "EVAL_LAB_REVISION",
+    "DataPartition",
+    "EndpointTransport",
+    "EndpointConfigIdentity",
+    "FrozenHeldOutManifest",
+    "EvalParameters",
+    "EvalLabRequest",
+    "TeacherRelativeBlocker",
+    "TaskScore",
+    "PerformanceReport",
+    "CandidateTaskReport",
+    "EvalLabStatus",
+    "EvalLabResult",
+    "EvalLabHandoff",
+    "EvalLabAdapter",
+    "eval_lab_output_layout",
 ]
