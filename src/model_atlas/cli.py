@@ -635,22 +635,38 @@ def recommend_cli(
     profiles_dir: str = typer.Option("profiles", "--profiles-dir"),
     out: str = typer.Option("", "--out", help="write recommendation JSON here"),
     memory_target_gib: float = typer.Option(115.0, "--memory-target-gib"),
+    strategy: str = typer.Option(
+        "quantize_only",
+        "--strategy",
+        help="compression strategy: quantize_only, prune_only, hybrid, or custom",
+    ),
 ) -> None:
     """Profile -> Recommend: deterministic versioned recommendation (no_pruning
     default) plus an opaque authorization token bound to the recommendation, so
     a later preview/start can be authorized server-side. Writes machine-readable
     JSON (recommendation + token + authorized method set + selection hash)."""
-    from model_atlas.recommend import RecommendationService, RecTarget
+    from model_atlas.recommend import CompressionIntent, RecommendationService, RecTarget
+
+    try:
+        intent = CompressionIntent(strategy)
+    except ValueError as exc:
+        allowed = ", ".join(item.value for item in CompressionIntent)
+        raise typer.BadParameter(
+            f"expected one of: {allowed}", param_hint="--strategy"
+        ) from exc
 
     svc = RecommendationService(profile_root=profiles_dir)
     result = svc.authorize(
-        profile or "default", RecTarget(memory_target_gib=memory_target_gib)
+        profile or "default",
+        RecTarget(memory_target_gib=memory_target_gib),
+        intent=intent,
     )
     payload = {
         "token": result["token"],
         "recommendation_id": result["recommendation_id"],
         "profile_id": result["profile_id"],
         "no_pruning": result["no_pruning"],
+        "intent": result["intent"],
         "authorized_methods": result["authorized_methods"],
         "selection_hash": result["selection_hash"],
         "recommendation": result["recommendation"],

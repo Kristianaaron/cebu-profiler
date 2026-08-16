@@ -69,8 +69,16 @@ _GUI_PAGE = """<!doctype html>
 <label>Memory target (GiB):
   <input type="number" id="mem" value="115" min="1" step="0.5">
 </label>
+<label>Strategy:
+  <select id="strategy">
+    <option value="quantize_only">quantize_only</option>
+    <option value="prune_only">prune_only</option>
+    <option value="hybrid">hybrid</option>
+    <option value="custom">custom</option>
+  </select>
+</label>
 <label><input type="checkbox" id="allowPrune" disabled> allow_pruning
-  <span>(locked: <span class="np">no_pruning=true</span>)</span></label>
+  <span id="pruneHint">(disabled for quantize_only; no_pruning=true)</span></label>
 </div>
 <button id="recoBtn">Recommend</button>
 <span id="recoMeta" class="evid"></span>
@@ -81,7 +89,7 @@ _GUI_PAGE = """<!doctype html>
 blocked methods are greyed with the exact reason.</p>
 <div id="methods"></div>
 </div>
-<div class="card"><h2>3. Recipe review &#8212; immutable <span class="np">no-pruning</span></h2>
+<div class="card"><h2>3. Recipe review &#8212; intent-bound effects</h2>
 <div class="row">
 <button id="previewBtn">Preview selection as recipe draft</button>
 <span id="previewStatus" class="evid"></span>
@@ -136,13 +144,16 @@ async function recommend() {
   const pid = $('profileSel').value;
   if (!pid) { setRecoBtn('no profile selected'); return; }
   const mem = parseFloat($('mem').value) || 115;
+  const intent = $('strategy').value;
+  const allowPruning = $('allowPrune').checked;
   setRecoBtn('computing…');
   let data;
   try {
     const r = await fetch('/api/recommend', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profile_id: pid, memory_target_gib: mem, constraints: { allow_pruning: false } })
+      body: JSON.stringify({ profile_id: pid, memory_target_gib: mem, intent: intent,
+        constraints: { allow_pruning: allowPruning } })
     });
     data = await r.json();
     if (!r.ok) throw new Error((data && data.error) || ('recommend ' + r.status));
@@ -161,6 +172,18 @@ async function recommend() {
 
 function renderRec(rec) {
   const host = $('methods'); host.textContent = '';
+  const intent = document.createElement('div'); intent.className = 'method';
+  const intentTitle = document.createElement('b');
+  intentTitle.textContent = 'strategy: ' + esc(rec.intent || ''); intent.appendChild(intentTitle);
+  const families = document.createElement('div'); families.className = 'reason';
+  families.textContent = 'required: ' + esc((rec.required_families || []).join(', ') || '(none)')
+    + ' | available: ' + esc((rec.available_families || []).join(', ') || '(none)')
+    + ' | missing: ' + esc((rec.missing_families || []).join(', ') || '(none)');
+  intent.appendChild(families);
+  const intentBadge = document.createElement('span');
+  intentBadge.className = rec.intent_satisfied ? 'badge ok' : 'badge blocked';
+  intentBadge.textContent = 'intent_satisfied = ' + esc(rec.intent_satisfied);
+  intent.appendChild(intentBadge); host.appendChild(intent);
   const authorized = (rec.methods || []).slice();
   const blocked = (rec.blocked_methods || []).slice().map(m => ({ ...m, blocked: true }));
   const all = authorized.concat(blocked);
@@ -194,7 +217,9 @@ function renderRec(rec) {
     }
     if (isBlocked && m.blockers) {
       const bd = document.createElement('div');
-      bd.textContent = 'blockers: ' + esc(m.blockers.map(x => x.code).join(', '));
+      bd.textContent = 'blockers: ' + esc(m.blockers.map(x =>
+        (x.message || x.code || 'blocked') + (x.stage_id ? ' [stage ' + x.stage_id + ']' : '')
+      ).join('; '));
       bd.className = 'badge blocked';
       card.appendChild(bd);
     }
@@ -238,12 +263,17 @@ function renderPreview(p) {
     plan_id: p.plan_id,
     hash: p.hash,
     readiness: p.readiness || {},
+    intent: p.intent,
+    actual_families: p.actual_families || [],
+    intent_blockers: p.intent_blockers || [],
     selected_methods: p.selected_methods || []
   }, null, 2);
-  const ok = p.readiness && p.readiness.executable && p.plan_id;
+  const ok = p.readiness && p.readiness.executable && p.readiness.intent_satisfied && p.plan_id;
+  const blockers = (p.intent_blockers || []).map(x => x.message || x.code).join('; ');
   $('previewStatus').textContent = ok
     ? 'ready: verified plan ' + ((p.plan_id) || '')
-    : 'preview stored (selected id=' + (p.preview_id || '?') + ') but no verified executable plan yet';
+    : 'preview stored (selected id=' + (p.preview_id || '?')
+      + ') but no verified executable plan yet' + (blockers ? ': ' + blockers : '');
   updateCompress();
 }
 
@@ -266,6 +296,8 @@ function computeGates() {
   if (!authToken) reasons.push('no valid recommendation token (recommend first)');
   if (!reco) reasons.push('no recommendation computed yet');
   if (reco && (!reco.methods || reco.methods.length === 0)) reasons.push('no policy-authorized methods recommended');
+  if (reco && !reco.intent_satisfied)
+    reasons.push('recommendation does not satisfy strategy; missing: ' + (reco.missing_families || []).join(', '));
   if (reco && reco.blocked_methods && reco.blocked_methods.length)
     reasons.push(reco.blocked_methods.length + ' method(s) fatally blocked');
   if (!selection || selection.size === 0) reasons.push('no methods selected for the recipe');
@@ -275,6 +307,9 @@ function computeGates() {
     reasons.push('selection changed since preview — re-preview');
   if (preview && !(preview.readiness && preview.readiness.executable))
     reasons.push('no verified executable plan produced for this selection');
+  if (preview && !(preview.readiness && preview.readiness.intent_satisfied))
+    reasons.push('preview compiled effects do not satisfy strategy: ' +
+      (preview.intent_blockers || []).map(x => x.message || x.code).join('; '));
   const ready = reasons.length === 0;
   return { ready, reasons };
 }
@@ -292,6 +327,16 @@ function clearBinding(reason) {
 }
 $('profileSel').addEventListener('change', () => clearBinding('profile changed'));
 $('mem').addEventListener('input', () => clearBinding('memory target changed'));
+$('strategy').addEventListener('change', () => {
+  const pruningCapable = $('strategy').value !== 'quantize_only';
+  $('allowPrune').disabled = !pruningCapable;
+  if (!pruningCapable) $('allowPrune').checked = false;
+  $('pruneHint').textContent = pruningCapable
+    ? '(available for this strategy)'
+    : '(disabled for quantize_only; no_pruning=true)';
+  clearBinding('strategy changed');
+});
+$('allowPrune').addEventListener('change', () => clearBinding('allow_pruning changed'));
 $('compressBtn').addEventListener('click', async () => {
   if (!authToken || !preview) return;
   const g = computeGates();

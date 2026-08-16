@@ -109,6 +109,54 @@ def test_profiles_and_recommend_round_trip(server: RecommendationServer, service
     assert rec["confidence"] in {"high", "medium", "low", "insufficient"}
 
 
+def test_recommend_accepts_and_binds_intent(server: RecommendationServer, service):
+    service.save_profile(_full_profile())
+    status, data = _post(
+        server,
+        "/api/recommend",
+        {
+            "profile_id": "k3-mini",
+            "intent": "prune_only",
+            "constraints": {"allow_pruning": True},
+        },
+    )
+    payload = _json((status, data))
+    assert status == 200
+    assert payload["intent"] == "prune_only"
+    assert payload["recommendation"]["intent"] == "prune_only"
+
+
+@pytest.mark.parametrize("intent", ["not-a-strategy", 7, False])
+def test_recommend_rejects_invalid_intent_stably(
+    server: RecommendationServer, service, intent
+):
+    service.save_profile(_full_profile())
+    status, data = _post(
+        server,
+        "/api/recommend",
+        {"profile_id": "k3-mini", "intent": intent},
+    )
+    payload = _json((status, data))
+    assert status == 400
+    assert payload["code"] == "intent_invalid"
+
+
+def test_recommend_rejects_non_boolean_allow_pruning(server, service):
+    service.save_profile(_full_profile())
+    status, data = _post(
+        server,
+        "/api/recommend",
+        {
+            "profile_id": "k3-mini",
+            "intent": "hybrid",
+            "constraints": {"allow_pruning": "false"},
+        },
+    )
+    payload = _json((status, data))
+    assert status == 400
+    assert payload["code"] == "constraint_invalid"
+
+
 def test_recommend_requires_profile_id(server):
     status, _ = _post(server, "/api/recommend", {})
     assert status == 400
