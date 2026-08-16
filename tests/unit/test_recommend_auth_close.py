@@ -80,7 +80,7 @@ def _executable_recipe(tmp_path: Path) -> CompressionRecipe:
             RecipeStage(
                 id="s1",
                 name="s1",
-                effect_class=StageEffectClass.PROFILING,
+                effect_class=StageEffectClass.QUANTIZATION,
                 backend=StageBackendPin(backend_id="atlas_quant_probe", version="1.0.0"),
                 produces_format=["manifest.json"],
                 evidence_policy=EvidenceKind.ESTIMATED,
@@ -100,6 +100,7 @@ def _seed_executable(
     """Seed a verified executable preview package (as the existing suite does)
     so the real public ``start_authorized`` path can drive execution."""
     recipe = recipe or _executable_recipe(tmp_path)
+    svc.registry.get("atlas_quant_probe").produces_derivative = True
     comp = RecipeCompiler(svc.registry).compile(recipe)
     artifact = CompiledPlanArtifact.from_compiled(comp, inputs={}, registry=svc.registry)
     artifact.verify()
@@ -127,8 +128,21 @@ def _seed_executable(
     )
     pkg.plan_id = artifact.plan_id
     pkg.recipe_sha256 = artifact.recipe_sha256
+    pkg.authorization_snapshot = svc._authorization_snapshot(session)
+    pkg.authorization_digest = svc._preview_authorization_digest(
+        token=token,
+        selected=pkg.selected,
+        selection_hash=h,
+        inputs={},
+        target_snapshot={},
+        constraints_snapshot={},
+        authorization_snapshot=pkg.authorization_snapshot,
+        recipe_sha256=pkg.recipe_sha256,
+        plan_id=pkg.plan_id,
+        artifact=artifact,
+    )
     svc.pending_previews[preview_id] = pkg
-    return h, pkg
+    return pkg.authorization_digest, pkg
 
 
 def _analysis_profile() -> AtlasProfile:
@@ -471,9 +485,12 @@ def test_restart_resumes_reserved_pending_job(tmp_path: Path):
     recipe = _executable_recipe(tmp_path)
 
     def _build() -> RecommendationService:
-        return RecommendationService(
+        service = RecommendationService(
             profile_root=str(tmp_path / "profiles"), work_root=str(tmp_path / "runs")
         )
+        service.registry.get("atlas_quant_probe").produces_derivative = True
+        service._load_persisted_previews()
+        return service
 
     def _seed(svc: RecommendationService, tok: str, pid: str) -> tuple[str, _PendingPreview]:
         from model_atlas.recommend.api import _selection_hash as _sh
@@ -483,7 +500,7 @@ def test_restart_resumes_reserved_pending_job(tmp_path: Path):
         artifact.verify()
         artifact.verify_pins_against(svc.registry)
         hh = _sh(["m1"])
-        svc.sessions[tok] = _AuthorizationSession(
+        session = _AuthorizationSession(
             token=tok,
             recommendation_id="r",
             profile_id="p",
@@ -492,6 +509,7 @@ def test_restart_resumes_reserved_pending_job(tmp_path: Path):
             constraints_snapshot={},
             authorized_methods=["m1"],
         )
+        svc.sessions[tok] = session
         pkg = _PendingPreview(
             token=tok,
             preview_id=pid,
@@ -504,9 +522,22 @@ def test_restart_resumes_reserved_pending_job(tmp_path: Path):
         )
         pkg.plan_id = artifact.plan_id
         pkg.recipe_sha256 = artifact.recipe_sha256
+        pkg.authorization_snapshot = svc._authorization_snapshot(session)
+        pkg.authorization_digest = svc._preview_authorization_digest(
+            token=tok,
+            selected=pkg.selected,
+            selection_hash=hh,
+            inputs={},
+            target_snapshot={},
+            constraints_snapshot={},
+            authorization_snapshot=pkg.authorization_snapshot,
+            recipe_sha256=pkg.recipe_sha256,
+            plan_id=pkg.plan_id,
+            artifact=artifact,
+        )
         svc.pending_previews[pid] = pkg
         svc._persist_preview(pkg)  # durable on-disk package for restart
-        return hh, pkg
+        return pkg.authorization_digest, pkg
 
     # service 1: seed + start (run completes)
     svc1 = _build()

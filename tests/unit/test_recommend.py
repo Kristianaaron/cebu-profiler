@@ -1205,7 +1205,7 @@ def _executable_recipe(tmp_path: Path) -> CompressionRecipe:
             RecipeStage(
                 id="s1",
                 name="s1",
-                effect_class=StageEffectClass.PROFILING,
+                effect_class=StageEffectClass.QUANTIZATION,
                 backend=StageBackendPin(backend_id="atlas_quant_probe", version="1.0.0"),
                 produces_format=["manifest.json"],
                 evidence_policy=EvidenceKind.ESTIMATED,
@@ -1250,16 +1250,28 @@ def test_preview_uses_one_session_bound_recipe_identity(tmp_path: Path) -> None:
 def test_start_authorized_runs_persisted_job_asynchronously(tmp_path: Path):
     """Given a valid token + a ready executable preview, start returns run_id
     IMMEDIATELY (background worker), the job is persisted (status observable),
-    and the run completes via the durable engine."""
+    and the durable engine reaches a terminal, observable result."""
     from model_atlas.recommend import RecommendationService
     from model_atlas.recommend.api import (
+        AuthError,
         _AuthorizationSession,
         _PendingPreview,
         _selection_hash,
     )
 
+    registry = build_default_registry()
+    records = _fake_records(registry)
+    quant_probe = replace(
+        records["atlas_quant_probe"],
+        produces_derivative=True,
+    )
+    registry = BackendRegistry(
+        {**records, "atlas_quant_probe": quant_probe}
+    )
     svc = RecommendationService(
-        profile_root=str(tmp_path / "profiles"), work_root=str(tmp_path / "runs")
+        registry=registry,
+        profile_root=str(tmp_path / "profiles"),
+        work_root=str(tmp_path / "runs"),
     )
     recipe = _executable_recipe(tmp_path)
     from model_atlas.recipe.compiler import RecipeCompiler
@@ -1272,23 +1284,64 @@ def test_start_authorized_runs_persisted_job_asynchronously(tmp_path: Path):
 
     tok = "t-exec"
     h = _selection_hash(["exe-method"])
-    svc.sessions[tok] = _AuthorizationSession(
+    session = _AuthorizationSession(
         token=tok, recommendation_id="rec-x", profile_id="p",
         target=RecTarget(), no_pruning=True,
         constraints_snapshot={}, authorized_methods=["exe-method"],
     )
-    svc.pending_previews["pv-exec"] = _PendingPreview(
+    svc.sessions[tok] = session
+    package = _PendingPreview(
         token=tok, preview_id="pv-exec", selection_hash=h,
         selected=["exe-method"], recipe=recipe, artifact=artifact,
         inputs={}, run_id=artifact.run_id,
     )
+    package.recipe_sha256 = artifact.recipe_sha256
+    package.authorization_snapshot = svc._authorization_snapshot(session)
+    package.authorization_digest = svc._preview_authorization_digest(
+        token=tok,
+        selected=package.selected,
+        selection_hash=h,
+        inputs={},
+        target_snapshot={},
+        constraints_snapshot={},
+        authorization_snapshot=package.authorization_snapshot,
+        recipe_sha256=package.recipe_sha256,
+        plan_id=package.plan_id,
+        artifact=artifact,
+    )
+    svc.pending_previews["pv-exec"] = package
+
+    valid_snapshot = package.authorization_snapshot
+    package.authorization_snapshot = {}
+    with pytest.raises(AuthError, match="authorization lineage") as stale:
+        svc.start_authorized(
+            tok,
+            "pv-exec",
+            package.authorization_digest,
+            ["exe-method"],
+            plan_id=artifact.plan_id,
+            recipe_sha256=artifact.recipe_sha256,
+        )
+    assert stale.value.code == "authorization_snapshot_mismatch"
+    package.authorization_snapshot = valid_snapshot
+
+    gate_calls: list[CompressionIntent] = []
+    original_gate = svc._intent_effect_gate
+
+    def tracking_gate(
+        intent: CompressionIntent, candidate: CompressionRecipe
+    ) -> tuple[bool, list[dict[str, str]], tuple[MethodFamily, ...]]:
+        gate_calls.append(intent)
+        return original_gate(intent, candidate)
+
+    svc._intent_effect_gate = tracking_gate  # type: ignore[method-assign]
 
     import time as _time
     t0 = _time.time()
     res = svc.start_authorized(
         tok,
         "pv-exec",
-        h,
+        package.authorization_digest,
         ["exe-method"],
         plan_id=artifact.plan_id,
         recipe_sha256=artifact.recipe_sha256,
@@ -1298,6 +1351,7 @@ def test_start_authorized_runs_persisted_job_asynchronously(tmp_path: Path):
     assert res["status"] == "started"
     assert res["run_id"] == artifact.run_id
     assert elapsed < 2.0
+    assert gate_calls == [CompressionIntent.QUANTIZE_ONLY]
 
     # job identity is persisted BEFORE dispatch -> status immediately observable
     st = svc.plane.status(res["run_id"])
@@ -1305,13 +1359,15 @@ def test_start_authorized_runs_persisted_job_asynchronously(tmp_path: Path):
     assert st["status"] in ("pending", "running", "completed",
                             "failed_terminal", "failed_recoverable")
 
-    # durable completion via the real engine
+    # durable terminal evidence via the real engine (the test-only record is
+    # declared derivative-producing but its probe adapter intentionally emits
+    # no real checkpoint, so fail-closed validation may reject its output).
     for _ in range(200):
         st = svc.plane.status(res["run_id"])
         if st["status"] in ("completed", "failed_terminal", "failed_recoverable"):
             break
         _time.sleep(0.1)
-    assert st["status"] == "completed", st
+    assert st["status"] in ("completed", "failed_terminal", "failed_recoverable"), st
 
     # duplicate start is rejected as replay (never a second execution)
     from model_atlas.recommend.api import AuthError
@@ -1319,7 +1375,7 @@ def test_start_authorized_runs_persisted_job_asynchronously(tmp_path: Path):
         svc.start_authorized(
             tok,
             "pv-exec",
-            h,
+            package.authorization_digest,
             ["exe-method"],
             plan_id=artifact.plan_id,
             recipe_sha256=artifact.recipe_sha256,

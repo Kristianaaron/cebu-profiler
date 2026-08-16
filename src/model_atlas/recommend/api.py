@@ -555,39 +555,20 @@ class RecommendationService:
             "memory_gib": session.target.memory_target_gib,
         }
         constraints_snapshot = dict(session.constraints_snapshot or {})
-        authorization_snapshot: dict[str, object] = {
-            "recommendation_id": session.recommendation_id,
-            "policy_version": RECOMMENDATION_POLICY_VERSION,
-            "method_catalog_version": METHOD_CATALOG_VERSION,
-            "method_catalog_sha256": method_catalog_digest(),
-            "profile_id": session.profile_id,
-            "profile_fingerprint": session.profile_fingerprint,
-            "profile_bytes_sha256": session.profile_bytes_hash,
-            "profile_model_arch": session.profile_model_arch,
-            "intent": session.intent.value,
-            "no_pruning": session.no_pruning,
-            "authorized_methods": list(session.authorized_methods),
-        }
+        authorization_snapshot = self._authorization_snapshot(session)
         recipe_sha256 = str(pv.get("recipe_sha256") or "")
         plan_id = artifact.plan_id if artifact is not None else str(plan.get("plan_id") or "")
-        artifact_identity = (
-            sha256_hex(canonical_json(artifact.to_plain_dict())) if artifact is not None else ""
-        )
-        authorization_digest = sha256_hex(
-            canonical_json(
-                {
-                    "token": token,
-                    "selected": sel,
-                    "selection_hash": subset_hash,
-                    "inputs": inputs or {},
-                    "target": target_snapshot,
-                    "constraints": constraints_snapshot,
-                    "authorization": authorization_snapshot,
-                    "recipe_sha256": recipe_sha256,
-                    "plan_id": plan_id,
-                    "artifact_identity": artifact_identity,
-                }
-            )
+        authorization_digest = self._preview_authorization_digest(
+            token=token,
+            selected=sel,
+            selection_hash=subset_hash,
+            inputs=inputs or {},
+            target_snapshot=target_snapshot,
+            constraints_snapshot=constraints_snapshot,
+            authorization_snapshot=authorization_snapshot,
+            recipe_sha256=recipe_sha256,
+            plan_id=plan_id,
+            artifact=artifact,
         )
         preview_id = "pv-" + authorization_digest[:24]
         package = _PendingPreview(
@@ -634,6 +615,56 @@ class RecommendationService:
             "recipe_id": pv.get("recipe_id"),
             "recipe_sha256": pv.get("recipe_sha256"),
         }
+
+    @staticmethod
+    def _authorization_snapshot(session: _AuthorizationSession) -> dict[str, object]:
+        return {
+            "recommendation_id": session.recommendation_id,
+            "policy_version": RECOMMENDATION_POLICY_VERSION,
+            "method_catalog_version": METHOD_CATALOG_VERSION,
+            "method_catalog_sha256": method_catalog_digest(),
+            "profile_id": session.profile_id,
+            "profile_fingerprint": session.profile_fingerprint,
+            "profile_bytes_sha256": session.profile_bytes_hash,
+            "profile_model_arch": session.profile_model_arch,
+            "intent": session.intent.value,
+            "no_pruning": session.no_pruning,
+            "authorized_methods": list(session.authorized_methods),
+        }
+
+    @staticmethod
+    def _preview_authorization_digest(
+        *,
+        token: str,
+        selected: list[str],
+        selection_hash: str,
+        inputs: dict[str, object],
+        target_snapshot: dict[str, object],
+        constraints_snapshot: dict[str, object],
+        authorization_snapshot: dict[str, object],
+        recipe_sha256: str,
+        plan_id: str,
+        artifact: CompiledPlanArtifact | None,
+    ) -> str:
+        artifact_identity = (
+            sha256_hex(canonical_json(artifact.to_plain_dict())) if artifact is not None else ""
+        )
+        return sha256_hex(
+            canonical_json(
+                {
+                    "token": token,
+                    "selected": selected,
+                    "selection_hash": selection_hash,
+                    "inputs": inputs,
+                    "target": target_snapshot,
+                    "constraints": constraints_snapshot,
+                    "authorization": authorization_snapshot,
+                    "recipe_sha256": recipe_sha256,
+                    "plan_id": plan_id,
+                    "artifact_identity": artifact_identity,
+                }
+            )
+        )
 
     @staticmethod
     def _preview_is_executable(preview: dict[str, Any]) -> bool:
@@ -1075,6 +1106,44 @@ class RecommendationService:
             if self._shutdown_event.is_set():
                 raise AuthError(
                     503, "service_shutting_down", "service is shutting down; start refused"
+                )
+            self._recheck_session(session)
+            current_snapshot = self._authorization_snapshot(session)
+            if package.authorization_snapshot != current_snapshot:
+                raise AuthError(
+                    409,
+                    "authorization_snapshot_mismatch",
+                    "preview authorization lineage differs from the live session",
+                )
+            intent_satisfied, intent_blockers, _ = self._intent_effect_gate(
+                session.intent, package.recipe
+            )
+            if not intent_satisfied:
+                details = "; ".join(
+                    blocker["message"] for blocker in intent_blockers
+                )
+                raise AuthError(
+                    409,
+                    "intent_effect_mismatch",
+                    f"compiled recipe effects do not satisfy intent: {details}",
+                )
+            expected_authorization_digest = self._preview_authorization_digest(
+                token=token,
+                selected=package.selected,
+                selection_hash=package.selection_hash,
+                inputs=package.inputs,
+                target_snapshot=package.target_snapshot,
+                constraints_snapshot=package.constraints_snapshot,
+                authorization_snapshot=current_snapshot,
+                recipe_sha256=package.recipe_sha256,
+                plan_id=package.plan_id,
+                artifact=package.artifact,
+            )
+            if expected_authorization_digest != package.authorization_digest:
+                raise AuthError(
+                    409,
+                    "authorization_digest_mismatch",
+                    "preview authorization digest failed canonical revalidation",
                 )
             # Under the dispatch lock, RE-VERIFY the stored artifact + its live
             # pins and compare fresh identities before dispatch (fail closed on

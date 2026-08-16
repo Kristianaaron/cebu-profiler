@@ -298,8 +298,6 @@ function computeGates() {
   if (reco && (!reco.methods || reco.methods.length === 0)) reasons.push('no policy-authorized methods recommended');
   if (reco && !reco.intent_satisfied)
     reasons.push('recommendation does not satisfy strategy; missing: ' + (reco.missing_families || []).join(', '));
-  if (reco && reco.blocked_methods && reco.blocked_methods.length)
-    reasons.push(reco.blocked_methods.length + ' method(s) fatally blocked');
   if (!selection || selection.size === 0) reasons.push('no methods selected for the recipe');
   if (!preview) reasons.push('no preview: build a recipe draft from a selection');
   if (preview && preview.hash && preview.selected_methods

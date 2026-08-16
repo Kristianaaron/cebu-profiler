@@ -82,3 +82,4 @@ def test_gui_strategy_changes_invalidate_authorization_and_gate_compress() -> No
     assert "preview.readiness.intent_satisfied" in page
     assert "preview compiled effects do not satisfy strategy" in page
     assert "btn.disabled = !gate.ready" in page
+    assert "method(s) fatally blocked" not in page
