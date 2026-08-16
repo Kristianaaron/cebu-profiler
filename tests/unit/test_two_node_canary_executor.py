@@ -25,6 +25,7 @@ from model_atlas.llamacpp_rpc_runtime import (
     LlamaCppRpcValidationReceipt,
     LlamaCppRpcWorkerAttestation,
 )
+from model_atlas.runtime_canary_driver import RuntimeLaunchEvidence
 from model_atlas.schemas.evidence import EvidenceKind
 from model_atlas.two_node_canary_executor import (
     JsonlEvidenceStore,
@@ -59,9 +60,14 @@ class _Runtime:
         *,
         independently_measured_worker: LlamaCppRpcWorkerAttestation | None,
     ) -> LlamaCppRpcRuntimeClaim:
+        valid = (
+            receipt is not None
+            and independently_measured_worker is not None
+            and set(receipt.observed_devices) == {"CUDA0", "RPC0"}
+        )
         return LlamaCppRpcRuntimeClaim(
-            receipt is not None and independently_measured_worker is not None,
-            ("llamacpp-rpc-two-spark",),
+            valid,
+            ("llamacpp-rpc-two-spark",) if valid else (),
             "validated",
         )
 
@@ -80,19 +86,40 @@ class _Lifecycle:
     def __init__(self) -> None:
         self.started = 0
         self.stopped = 0
+        self._pids = RuntimeProcessIds(101, 202)
+
+    @property
+    def launch_evidence(self) -> RuntimeLaunchEvidence:
+        return RuntimeLaunchEvidence(
+            head_pid=101,
+            worker_pid=202,
+            head_argv=_Runtime.config.head_argv(),
+            worker_argv=_Runtime.config.worker_argv(),
+            head_exe_path=str(_Runtime.config.llama_server_path),
+            head_exe_sha256=EXPECTED_LLAMA_SERVER_SHA256,
+            worker_exe_path=str(_Runtime.config.worker_rpc_server_path),
+            worker_exe_sha256=EXPECTED_RPC_SERVER_SHA256,
+        )
 
     def start(self) -> RuntimeProcessIds:
         self.started += 1
-        return RuntimeProcessIds(101, 202)
+        return self._pids
 
     def stop(self) -> None:
         self.stopped += 1
+
+    def measure_post_run_worker(self, pids: RuntimeProcessIds) -> RuntimeLaunchEvidence:
+        assert pids == self._pids
+        return self.launch_evidence
 
 
 class _Requests:
     def __init__(self, fail_at: str | None = None) -> None:
         self.calls: list[str] = []
         self.fail_at = fail_at
+
+    def drain_evidence(self) -> tuple[object, ...]:
+        return ()
 
     def execute(self, step: object, *, deterministic_seed: int) -> StepObservation:  # type: ignore[no-untyped-def]
         step_id = step.step_id
@@ -248,3 +275,65 @@ def test_executor_stops_immediately_on_runtime_failure_without_later_steps(tmp_p
     assert requests.calls == ["load-only-4k", "one-token-4k"]
     assert not result.receipt.runtime_claim_validated
     assert result.receipt.completed_step_ids == ("load-only-4k",)
+
+
+def test_lifecycle_start_failure_still_persists_terminal_receipt(tmp_path: Path) -> None:
+    class StartFails(_Lifecycle):
+        def start(self) -> RuntimeProcessIds:
+            raise RuntimeError("sensitive start detail")
+
+    store = JsonlEvidenceStore(tmp_path / "canary.jsonl")
+    result = TwoNodeCanaryExecutor(
+        runtime=_Runtime(),
+        worker_attestation=_Worker(),
+        lifecycle=StartFails(),
+        requests=_Requests(),
+        telemetry=_collector(),
+        evidence=store,
+    ).execute(_plan())
+    rows = [json.loads(line) for line in store.path.read_text().splitlines()]
+    assert not result.receipt.runtime_claim_validated
+    assert result.receipt.stop_reason.value == "runtime_failure"
+    assert rows[-1]["record_type"] == "canary_execution_receipt"
+    assert "sensitive start detail" not in store.path.read_text()
+
+
+def test_post_launch_identity_drift_blocks_claim_and_is_terminal(tmp_path: Path) -> None:
+    class DriftLifecycle(_Lifecycle):
+        def measure_post_run_worker(self, pids: RuntimeProcessIds) -> RuntimeLaunchEvidence:
+            return self.launch_evidence.model_copy(update={"worker_exe_sha256": "e" * 64})
+
+    store = JsonlEvidenceStore(tmp_path / "canary.jsonl")
+    result = TwoNodeCanaryExecutor(
+        runtime=_Runtime(),
+        worker_attestation=_Worker(),
+        lifecycle=DriftLifecycle(),
+        requests=_Requests(),
+        telemetry=_collector(),
+        evidence=store,
+    ).execute(_plan())
+    assert not result.receipt.runtime_claim_validated
+    assert result.receipt.stop_reason.value == "runtime_failure"
+    assert json.loads(store.path.read_text().splitlines()[-1])["record_type"] == (
+        "canary_execution_receipt"
+    )
+
+
+def test_device_union_cannot_forge_per_step_runtime_claim(tmp_path: Path) -> None:
+    class SplitDevices(_Requests):
+        def execute(self, step: object, *, deterministic_seed: int) -> StepObservation:  # type: ignore[no-untyped-def]
+            result = super().execute(step, deterministic_seed=deterministic_seed)
+            if result.step_id == "load-only-4k":
+                return result.model_copy(update={"observed_devices": ("RPC0",)})
+            return result
+
+    result = TwoNodeCanaryExecutor(
+        runtime=_Runtime(),
+        worker_attestation=_Worker(),
+        lifecycle=_Lifecycle(),
+        requests=SplitDevices(),
+        telemetry=_collector(),
+        evidence=JsonlEvidenceStore(tmp_path / "canary.jsonl"),
+    ).execute(_plan())
+    assert result.summary.fitted
+    assert not result.receipt.runtime_claim_validated

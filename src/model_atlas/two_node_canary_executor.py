@@ -12,7 +12,7 @@ import json
 import os
 import subprocess
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol
@@ -193,9 +193,43 @@ class RuntimeLifecycle(Protocol):
 
     def stop(self) -> None: ...
 
+    @property
+    def launch_evidence(self) -> BaseModel | None: ...
+
+    def measure_post_run_worker(self, pids: RuntimeProcessIds) -> BaseModel: ...
+
 
 class CanaryRequestClient(Protocol):
     def execute(self, step: CanaryStep, *, deterministic_seed: int) -> StepObservation: ...
+
+    def drain_evidence(self) -> tuple[BaseModel, ...]: ...
+
+
+class RuntimeLaunchSnapshot(BaseModel):
+    """Canonical launched-process identity copied from the concrete lifecycle."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[1] = 1
+    head_pid: int = Field(gt=0)
+    worker_pid: int = Field(gt=0)
+    head_argv: tuple[str, ...]
+    worker_argv: tuple[str, ...]
+    head_exe_path: str = Field(pattern=r"^/")
+    head_exe_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    worker_exe_path: str = Field(pattern=r"^/")
+    worker_exe_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    evidence_kind: Literal["measured"] = "measured"
+
+
+class WorkerMeasurementRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    host: str
+    rpc_server_path: str
+    rpc_server_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    evidence_kind: Literal["measured"] = "measured"
 
 
 class JsonlEvidenceStore:
@@ -207,11 +241,14 @@ class JsonlEvidenceStore:
         self.path = path
 
     def append(self, record_type: str, payload: BaseModel) -> None:
+        self.append_dict(record_type, payload.model_dump(mode="json"))
+
+    def append_dict(self, record_type: str, payload: dict[str, object]) -> None:
         record = {
             "schema_version": 1,
             "record_type": record_type,
             "recorded_at": _utc_now().isoformat(),
-            "payload": payload.model_dump(mode="json"),
+            "payload": payload,
         }
         encoded = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
         if len(encoded) > _PIPE_BUF:
@@ -295,6 +332,39 @@ class TwoNodeCanaryExecutor:
         self._telemetry = telemetry
         self._evidence = evidence
 
+    @staticmethod
+    def _snapshot_launch(value: BaseModel | None) -> RuntimeLaunchSnapshot:
+        if value is None:
+            raise CanaryExecutionError("runtime launch evidence is missing")
+        try:
+            return RuntimeLaunchSnapshot.model_validate(value.model_dump(mode="python"))
+        except Exception as exc:  # noqa: BLE001 - sanitize validation boundary
+            raise CanaryExecutionError("runtime launch evidence is invalid") from exc
+
+    def _verify_launch(
+        self,
+        plan: CanaryPlan,
+        pids: RuntimeProcessIds,
+        evidence: RuntimeLaunchSnapshot,
+    ) -> None:
+        config = self._runtime.config
+        candidate = plan.candidate
+        if (
+            evidence.head_pid != pids.head_server_pid
+            or evidence.worker_pid != pids.worker_rpc_pid
+            or evidence.head_argv != candidate.head_argv
+            or evidence.worker_argv != candidate.worker_argv
+            or evidence.head_exe_path != str(config.llama_server_path)
+            or evidence.worker_exe_path != str(config.worker_rpc_server_path)
+            or evidence.head_exe_sha256 != candidate.llama_server_sha256
+            or evidence.worker_exe_sha256 != candidate.worker_rpc_server_sha256
+        ):
+            raise CanaryExecutionError("launched runtime identity mismatch")
+
+    def _persist_http_evidence(self) -> None:
+        for item in self._requests.drain_evidence():
+            self._evidence.append("http_evidence", item)
+
     def _check_candidate(self, plan: CanaryPlan) -> None:
         config = self._runtime.config
         candidate = plan.candidate
@@ -321,9 +391,16 @@ class TwoNodeCanaryExecutor:
     ) -> LlamaCppRpcValidationReceipt:
         config = self._runtime.config
         has_load = any(
-            item.step_id == "load-only-4k" and item.runtime_succeeded for item in observations
+            item.step_id == "load-only-4k"
+            and item.runtime_succeeded
+            and set(item.observed_devices) == {"CUDA0", "RPC0"}
+            for item in observations
         )
-        has_generation = any(item.runtime_succeeded for item in observations[1:])
+        has_generation = bool(observations[1:]) and all(
+            item.runtime_succeeded
+            and set(item.observed_devices) == {"CUDA0", "RPC0"}
+            for item in observations[1:]
+        )
         return LlamaCppRpcValidationReceipt(
             runtime_id="llamacpp-rpc-two-spark",
             config_sha256=config.canonical_sha256(),
@@ -334,9 +411,7 @@ class TwoNodeCanaryExecutor:
             worker_rpc_server_path=attestation.rpc_server_path,
             worker_hash_attested=True,
             worker_host=attestation.host,
-            observed_devices=tuple(
-                sorted({device for item in observations for device in item.observed_devices})
-            ),
+            observed_devices=("CUDA0", "RPC0") if has_load and has_generation else (),
             load_succeeded=has_load,
             generation_succeeded=has_generation,
             evidence_kind="measured",
@@ -344,25 +419,57 @@ class TwoNodeCanaryExecutor:
 
     def execute(self, plan: CanaryPlan) -> CanaryExecutionResult:
         """Run strictly in plan order.  Always stop a started runtime in ``finally``."""
+        self._evidence.append("canary_plan", plan)
         self._check_candidate(plan)
-        attestation = self._worker_attestation.measure()
+        pre_attestation = self._worker_attestation.measure()
+        self._evidence.append(
+            "worker_measurement_pre",
+            WorkerMeasurementRecord(**asdict(pre_attestation)),
+        )
         # This fresh local hash/artifact existence check precedes any runtime claim.
-        if not self._runtime.probe(attestation).available:
+        tool_probe = self._runtime.probe(pre_attestation)
+        if not tool_probe.available:
             raise CanaryExecutionError(
                 "runtime artifact or independently measured worker is unverified"
             )
+        self._evidence.append_dict("runtime_tool_probe", asdict(tool_probe))
 
         samples: list[TelemetrySample] = []
         observations: list[StepObservation] = []
         completed: list[str] = []
         stop = StopReason.COMPLETED
         pids: RuntimeProcessIds | None = None
+        launch: RuntimeLaunchSnapshot | None = None
+        lifecycle_failed = False
         try:
             for step in plan.steps:
                 if pids is None or step.restart_runtime:
                     if pids is not None:
-                        self._lifecycle.stop()
-                    pids = self._lifecycle.start()
+                        try:
+                            post_launch = self._snapshot_launch(
+                                self._lifecycle.measure_post_run_worker(pids)
+                            )
+                            self._verify_launch(plan, pids, post_launch)
+                            if launch is None or post_launch != launch:
+                                raise CanaryExecutionError(
+                                    "runtime identity changed during canary"
+                                )
+                            self._evidence.append("runtime_launch_post", post_launch)
+                            self._lifecycle.stop()
+                        except Exception:  # noqa: BLE001 - terminal evidence below
+                            lifecycle_failed = True
+                            stop = StopReason.RUNTIME_FAILURE
+                            break
+                        pids = None
+                    try:
+                        pids = self._lifecycle.start()
+                        launch = self._snapshot_launch(self._lifecycle.launch_evidence)
+                        self._verify_launch(plan, pids, launch)
+                        self._evidence.append("runtime_launch_pre", launch)
+                    except Exception:  # noqa: BLE001 - terminal evidence below
+                        lifecycle_failed = True
+                        stop = StopReason.RUNTIME_FAILURE
+                        break
                 try:
                     before = self._telemetry.collect(
                         sample_set_id=_sample_set_id(plan, step, "before"),
@@ -398,6 +505,8 @@ class TwoNodeCanaryExecutor:
                             observed_devices=(),
                             runtime_succeeded=False,
                         )
+                    finally:
+                        self._persist_http_evidence()
                     self._evidence.append("step_observation", observation)
                     after = self._telemetry.collect(
                         sample_set_id=_sample_set_id(plan, step, "after"),
@@ -425,18 +534,56 @@ class TwoNodeCanaryExecutor:
                 completed.append(step.step_id)
         finally:
             if pids is not None:
-                self._lifecycle.stop()
+                try:
+                    post_launch = self._snapshot_launch(
+                        self._lifecycle.measure_post_run_worker(pids)
+                    )
+                    self._verify_launch(plan, pids, post_launch)
+                    if launch is None or post_launch != launch:
+                        raise CanaryExecutionError("runtime identity changed during canary")
+                    self._evidence.append("runtime_launch_post", post_launch)
+                except Exception:  # noqa: BLE001 - terminal evidence below
+                    lifecycle_failed = True
+                    stop = StopReason.RUNTIME_FAILURE
+                try:
+                    self._lifecycle.stop()
+                except Exception:  # noqa: BLE001 - terminal evidence below
+                    lifecycle_failed = True
+                    stop = StopReason.RUNTIME_FAILURE
 
         summary = derive_fit_summary(plan, samples, observations)
-        runtime_receipt = self._runtime_receipt(observations, attestation)
-        claim: LlamaCppRpcRuntimeClaim = self._runtime.validate_receipt(
-            runtime_receipt if summary.fitted else None,
-            independently_measured_worker=attestation,
+        self._evidence.append("fit_summary", summary)
+        post_attestation: LlamaCppRpcWorkerAttestation | None = None
+        try:
+            measured = self._worker_attestation.measure()
+            self._evidence.append(
+                "worker_measurement_post",
+                WorkerMeasurementRecord(**asdict(measured)),
+            )
+            if measured != pre_attestation:
+                raise CanaryExecutionError("worker toolchain changed during canary")
+            post_attestation = measured
+        except Exception:  # noqa: BLE001 - terminal evidence below
+            lifecycle_failed = True
+            stop = StopReason.RUNTIME_FAILURE
+        runtime_receipt = self._runtime_receipt(
+            observations,
+            post_attestation or pre_attestation,
         )
+        self._evidence.append_dict("runtime_validation_receipt", asdict(runtime_receipt))
+        claim: LlamaCppRpcRuntimeClaim = self._runtime.validate_receipt(
+            runtime_receipt if summary.fitted and not lifecycle_failed else None,
+            independently_measured_worker=post_attestation,
+        )
+        self._evidence.append_dict("runtime_validation_claim", asdict(claim))
         receipt = CanaryExecutionReceipt(
             plan_sha256=plan.canonical_sha256(),
             completed_step_ids=tuple(completed),
-            stop_reason=stop if stop is not StopReason.COMPLETED else summary.stop_reason,
+            stop_reason=(
+                StopReason.RUNTIME_FAILURE
+                if lifecycle_failed
+                else stop if stop is not StopReason.COMPLETED else summary.stop_reason
+            ),
             runtime_claim_validated=claim.validated,
             runtime_claim_reason=claim.reason,
             evidence_kind=(
