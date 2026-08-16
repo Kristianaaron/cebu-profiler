@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 ROOT = Path(__file__).parents[1]
 SOURCE = ROOT / "tools" / "llama-atlas-capture" / "atlas_capture.cpp"
 CMAKE = ROOT / "tools" / "llama-atlas-capture" / "CMakeLists.txt"
@@ -50,6 +49,30 @@ def test_capture_input_and_source_paths_fail_closed() -> None:
     assert "is_ancestor_or_equal(model_source, candidate)" in source
     assert "split GGUF model names are not supported" in source
     assert "layer >= n_layer" in source
+    assert '"/proc/self/fd/"' in source
+    assert "gguf_init_from_callback" in source
+    assert '"split.count"' in source
+    assert "verify_pinned_model_unchanged" in source
+
+
+def test_native_receipt_measures_bound_inputs() -> None:
+    source = SOURCE.read_text()
+    assert '::open("/proc/self/exe", O_RDONLY | O_CLOEXEC)' in source
+    assert "sha256_descriptor" in source
+    assert "sha256_bytes(contents.data(), contents.size())" in source
+    assert '"measured_model_sha256"' in source
+    assert '"measured_tool_binary_sha256"' in source
+    assert '"measured_forced_tokens_sha256"' in source
+
+
+def test_native_capture_has_prewrite_size_caps() -> None:
+    source = SOURCE.read_text()
+    assert "MAX_CAPTURE_LAYERS = 64" in source
+    assert "MAX_ARTIFACT_BYTES = 32ULL" in source
+    assert "MAX_AGGREGATE_BYTES = 64ULL" in source
+    assert source.index("validate_capture_size_budget(") < source.index(
+        'open_binary(temp / "logits.f32")'
+    )
 
 
 def test_capture_schema_has_alignment_and_raw_tensor_files() -> None:

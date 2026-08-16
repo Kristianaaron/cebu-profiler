@@ -1,10 +1,12 @@
 #include "arg.h"
 #include "common.h"
+#include "gguf.h"
 #include "llama-ext.h"
 #include "llama.h"
 #include "nlohmann/json.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
@@ -12,6 +14,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <regex>
@@ -38,6 +41,10 @@ constexpr std::uint64_t MAX_INPUT_BYTES = 64ULL * 1024ULL * 1024ULL;
 constexpr std::size_t MAX_LINE_BYTES = 1024ULL * 1024ULL;
 constexpr std::size_t MAX_SAMPLES = 4096;
 constexpr std::size_t MAX_TOKENS_PER_SAMPLE = 131072;
+constexpr std::size_t MAX_CAPTURE_LAYERS = 64;
+constexpr std::uint64_t MAX_GGUF_METADATA_BYTES = 512ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t MAX_ARTIFACT_BYTES = 32ULL * 1024ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t MAX_AGGREGATE_BYTES = 64ULL * 1024ULL * 1024ULL * 1024ULL;
 
 struct custom_args {
     fs::path tokens_jsonl;
@@ -61,6 +68,19 @@ struct sample {
     std::string sample_id;
     std::string domain;
     std::vector<llama_token> token_ids;
+};
+
+struct loaded_samples {
+    std::vector<sample> records;
+    std::string measured_sha256;
+};
+
+struct file_identity {
+    dev_t device;
+    ino_t inode;
+    off_t size;
+    timespec modified;
+    timespec changed;
 };
 
 class temp_dir_guard {
@@ -94,6 +114,17 @@ public:
     explicit file_descriptor(int value) : value_(value) {}
     file_descriptor(const file_descriptor &) = delete;
     file_descriptor & operator=(const file_descriptor &) = delete;
+    file_descriptor(file_descriptor && other) noexcept : value_(other.value_) { other.value_ = -1; }
+    file_descriptor & operator=(file_descriptor && other) noexcept {
+        if (this != &other) {
+            if (value_ >= 0) {
+                ::close(value_);
+            }
+            value_ = other.value_;
+            other.value_ = -1;
+        }
+        return *this;
+    }
     ~file_descriptor() {
         if (value_ >= 0) {
             ::close(value_);
@@ -105,8 +136,350 @@ private:
     int value_;
 };
 
+struct pinned_model {
+    file_descriptor descriptor;
+    file_identity identity;
+    fs::path canonical_path;
+    std::string proc_path;
+    std::string measured_sha256;
+};
+
 [[noreturn]] void fail(const std::string & message) {
     throw std::runtime_error(message);
+}
+
+fs::path normalized_path(const fs::path & path, const std::string & label);
+
+// FIPS 180-4 SHA-256, adapted from llama.cpp's public-domain OpenCL cache helper.
+struct sha256_context {
+    std::uint32_t state[8];
+    std::uint64_t bit_length;
+    std::uint8_t buffer[64];
+    std::size_t buffer_length;
+};
+
+constexpr std::uint32_t SHA256_CONSTANTS[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+        0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+};
+
+std::uint32_t rotate_right(std::uint32_t value, unsigned amount) {
+    return (value >> amount) | (value << (32 - amount));
+}
+
+void sha256_compress(std::uint32_t state[8], const std::uint8_t block[64]) {
+    std::uint32_t words[64];
+    for (int index = 0; index < 16; ++index) {
+        words[index] = (static_cast<std::uint32_t>(block[index * 4]) << 24) |
+                       (static_cast<std::uint32_t>(block[index * 4 + 1]) << 16) |
+                       (static_cast<std::uint32_t>(block[index * 4 + 2]) << 8) |
+                       static_cast<std::uint32_t>(block[index * 4 + 3]);
+    }
+    for (int index = 16; index < 64; ++index) {
+        const std::uint32_t first = rotate_right(words[index - 15], 7) ^
+                                    rotate_right(words[index - 15], 18) ^
+                                    (words[index - 15] >> 3);
+        const std::uint32_t second = rotate_right(words[index - 2], 17) ^
+                                     rotate_right(words[index - 2], 19) ^
+                                     (words[index - 2] >> 10);
+        words[index] = words[index - 16] + first + words[index - 7] + second;
+    }
+
+    std::uint32_t a = state[0];
+    std::uint32_t b = state[1];
+    std::uint32_t c = state[2];
+    std::uint32_t d = state[3];
+    std::uint32_t e = state[4];
+    std::uint32_t f = state[5];
+    std::uint32_t g = state[6];
+    std::uint32_t h = state[7];
+    for (int index = 0; index < 64; ++index) {
+        const std::uint32_t sum1 =
+                rotate_right(e, 6) ^ rotate_right(e, 11) ^ rotate_right(e, 25);
+        const std::uint32_t choice = (e & f) ^ ((~e) & g);
+        const std::uint32_t temp1 = h + sum1 + choice + SHA256_CONSTANTS[index] + words[index];
+        const std::uint32_t sum0 =
+                rotate_right(a, 2) ^ rotate_right(a, 13) ^ rotate_right(a, 22);
+        const std::uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
+        const std::uint32_t temp2 = sum0 + majority;
+        h = g;
+        g = f;
+        f = e;
+        e = d + temp1;
+        d = c;
+        c = b;
+        b = a;
+        a = temp1 + temp2;
+    }
+    state[0] += a;
+    state[1] += b;
+    state[2] += c;
+    state[3] += d;
+    state[4] += e;
+    state[5] += f;
+    state[6] += g;
+    state[7] += h;
+}
+
+void sha256_initialize(sha256_context & context) {
+    const std::uint32_t initial[8] = {
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+            0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    };
+    std::copy(std::begin(initial), std::end(initial), context.state);
+    context.bit_length = 0;
+    context.buffer_length = 0;
+}
+
+void sha256_update(sha256_context & context, const void * data, std::size_t length) {
+    const auto * bytes = static_cast<const std::uint8_t *>(data);
+    context.bit_length += static_cast<std::uint64_t>(length) * 8;
+    if (context.buffer_length > 0) {
+        const std::size_t copied = std::min(64 - context.buffer_length, length);
+        std::memcpy(context.buffer + context.buffer_length, bytes, copied);
+        context.buffer_length += copied;
+        bytes += copied;
+        length -= copied;
+        if (context.buffer_length == 64) {
+            sha256_compress(context.state, context.buffer);
+            context.buffer_length = 0;
+        }
+    }
+    while (length >= 64) {
+        sha256_compress(context.state, bytes);
+        bytes += 64;
+        length -= 64;
+    }
+    if (length > 0) {
+        std::memcpy(context.buffer, bytes, length);
+        context.buffer_length = length;
+    }
+}
+
+std::string sha256_finish(sha256_context & context) {
+    const std::uint64_t bit_length = context.bit_length;
+    context.buffer[context.buffer_length++] = 0x80;
+    if (context.buffer_length > 56) {
+        while (context.buffer_length < 64) {
+            context.buffer[context.buffer_length++] = 0;
+        }
+        sha256_compress(context.state, context.buffer);
+        context.buffer_length = 0;
+    }
+    while (context.buffer_length < 56) {
+        context.buffer[context.buffer_length++] = 0;
+    }
+    for (int index = 7; index >= 0; --index) {
+        context.buffer[context.buffer_length++] =
+                static_cast<std::uint8_t>(bit_length >> (index * 8));
+    }
+    sha256_compress(context.state, context.buffer);
+
+    static constexpr char HEX[] = "0123456789abcdef";
+    std::string result(64, '0');
+    for (int word = 0; word < 8; ++word) {
+        for (int byte = 0; byte < 4; ++byte) {
+            const std::uint8_t value =
+                    static_cast<std::uint8_t>(context.state[word] >> (24 - byte * 8));
+            result[(word * 4 + byte) * 2] = HEX[value >> 4];
+            result[(word * 4 + byte) * 2 + 1] = HEX[value & 0x0f];
+        }
+    }
+    return result;
+}
+
+std::string sha256_bytes(const void * data, std::size_t length) {
+    sha256_context context;
+    sha256_initialize(context);
+    sha256_update(context, data, length);
+    return sha256_finish(context);
+}
+
+file_identity identity_from_stat(const struct stat & value) {
+    return {
+            value.st_dev,
+            value.st_ino,
+            value.st_size,
+            value.st_mtim,
+            value.st_ctim,
+    };
+}
+
+bool same_identity(const file_identity & left, const file_identity & right) {
+    return left.device == right.device && left.inode == right.inode && left.size == right.size &&
+           left.modified.tv_sec == right.modified.tv_sec &&
+           left.modified.tv_nsec == right.modified.tv_nsec &&
+           left.changed.tv_sec == right.changed.tv_sec && left.changed.tv_nsec == right.changed.tv_nsec;
+}
+
+file_identity descriptor_identity(int descriptor, const std::string & label) {
+    struct stat value {};
+    if (::fstat(descriptor, &value) != 0) {
+        fail("cannot fstat " + label + ": " + std::string(std::strerror(errno)));
+    }
+    if (!S_ISREG(value.st_mode) || value.st_size <= 0) {
+        fail(label + " must be a non-empty regular file");
+    }
+    return identity_from_stat(value);
+}
+
+std::string sha256_descriptor(
+        int descriptor, const file_identity & expected, const std::string & label) {
+    sha256_context context;
+    sha256_initialize(context);
+    std::vector<std::uint8_t> buffer(4 * 1024 * 1024);
+    off_t offset = 0;
+    while (offset < expected.size) {
+        const std::size_t wanted = static_cast<std::size_t>(
+                std::min<off_t>(static_cast<off_t>(buffer.size()), expected.size - offset));
+        const ssize_t count = ::pread(descriptor, buffer.data(), wanted, offset);
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count <= 0) {
+            fail(label + " changed or became unreadable while hashing");
+        }
+        sha256_update(context, buffer.data(), static_cast<std::size_t>(count));
+        offset += count;
+    }
+    const file_identity after = descriptor_identity(descriptor, label);
+    if (!same_identity(expected, after)) {
+        fail(label + " identity changed while hashing");
+    }
+    return sha256_finish(context);
+}
+
+struct bounded_gguf_reader {
+    int descriptor;
+    std::uint64_t file_size;
+};
+
+std::size_t bounded_gguf_read(
+        void * userdata, void * output, std::uint64_t offset, std::size_t length) {
+    auto & reader = *static_cast<bounded_gguf_reader *>(userdata);
+    if (length == 0 || offset > reader.file_size || length > reader.file_size - offset ||
+            offset > MAX_GGUF_METADATA_BYTES || length > MAX_GGUF_METADATA_BYTES - offset) {
+        return 0;
+    }
+    std::size_t completed = 0;
+    while (completed < length) {
+        const ssize_t count = ::pread(
+                reader.descriptor,
+                static_cast<std::uint8_t *>(output) + completed,
+                length - completed,
+                static_cast<off_t>(offset + completed));
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count <= 0) {
+            break;
+        }
+        completed += static_cast<std::size_t>(count);
+    }
+    return completed;
+}
+
+void validate_single_file_gguf(int descriptor, const file_identity & identity) {
+    bounded_gguf_reader reader{
+            descriptor,
+            static_cast<std::uint64_t>(identity.size),
+    };
+    const gguf_init_params parameters{
+            true,
+            nullptr,
+    };
+    std::unique_ptr<gguf_context, decltype(&gguf_free)> metadata(
+            gguf_init_from_callback(
+                    bounded_gguf_read,
+                    &reader,
+                    16 * 1024 * 1024,
+                    reader.file_size,
+                    parameters),
+            gguf_free);
+    if (!metadata) {
+        fail("model is not valid GGUF metadata within the 512 MiB preflight bound");
+    }
+    if (gguf_get_version(metadata.get()) != GGUF_VERSION ||
+            gguf_get_data_offset(metadata.get()) > MAX_GGUF_METADATA_BYTES ||
+            gguf_get_n_kv(metadata.get()) < 1 || gguf_get_n_kv(metadata.get()) > 1'000'000 ||
+            gguf_get_n_tensors(metadata.get()) < 1 ||
+            gguf_get_n_tensors(metadata.get()) > 1'000'000) {
+        fail("GGUF metadata exceeds the reviewed v3 bounds");
+    }
+    for (const char * key : {"split.no", "split.count", "split.tensors.count"}) {
+        if (gguf_find_key(metadata.get(), key) >= 0) {
+            fail("capture schema v1 requires a GGUF with no split metadata keys");
+        }
+    }
+    if (!same_identity(identity, descriptor_identity(descriptor, "model GGUF"))) {
+        fail("model GGUF identity changed during metadata preflight");
+    }
+}
+
+pinned_model open_pinned_model(const fs::path & original_path, const std::string & asserted_sha256) {
+    const fs::path canonical = normalized_path(original_path, "model path");
+    const int raw_descriptor = ::open(canonical.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (raw_descriptor < 0) {
+        fail("cannot pin model GGUF without following symlinks: " +
+             std::string(std::strerror(errno)));
+    }
+    file_descriptor descriptor(raw_descriptor);
+    const file_identity identity = descriptor_identity(descriptor.get(), "model GGUF");
+    validate_single_file_gguf(descriptor.get(), identity);
+    const std::string measured = sha256_descriptor(descriptor.get(), identity, "model GGUF");
+    if (measured != asserted_sha256) {
+        fail("measured model SHA-256 does not match --model-sha256");
+    }
+    const std::string proc_path = "/proc/self/fd/" + std::to_string(descriptor.get());
+    struct stat proc_stat {};
+    if (::stat(proc_path.c_str(), &proc_stat) != 0 ||
+            !same_identity(identity, identity_from_stat(proc_stat))) {
+        fail("pinned model descriptor is not loadable through its verified procfs path");
+    }
+    return {
+            std::move(descriptor),
+            identity,
+            canonical,
+            proc_path,
+            measured,
+    };
+}
+
+std::string measured_tool_sha256(const std::string & asserted_sha256) {
+    const int raw_descriptor = ::open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
+    if (raw_descriptor < 0) {
+        fail("cannot open /proc/self/exe for native tool measurement");
+    }
+    file_descriptor descriptor(raw_descriptor);
+    const file_identity identity = descriptor_identity(descriptor.get(), "capture executable");
+    const std::string measured =
+            sha256_descriptor(descriptor.get(), identity, "capture executable");
+    if (measured != asserted_sha256) {
+        fail("measured capture executable SHA-256 does not match --tool-binary-sha256");
+    }
+    return measured;
+}
+
+void verify_pinned_model_unchanged(const pinned_model & model) {
+    const std::string measured =
+            sha256_descriptor(model.descriptor.get(), model.identity, "model GGUF after capture");
+    if (measured != model.measured_sha256) {
+        fail("model GGUF bytes changed during capture");
+    }
+    struct stat path_stat {};
+    if (::lstat(model.canonical_path.c_str(), &path_stat) != 0 || S_ISLNK(path_stat.st_mode) ||
+            !same_identity(model.identity, identity_from_stat(path_stat))) {
+        fail("model GGUF path identity changed during capture");
+    }
 }
 
 std::string require_custom_value(
@@ -145,6 +518,9 @@ std::vector<std::uint32_t> parse_layers(const std::string & value) {
     }
     if (result.empty()) {
         fail("--layers must contain at least one layer");
+    }
+    if (result.size() > MAX_CAPTURE_LAYERS) {
+        fail("--layers exceeds the native 64-layer capture bound");
     }
     if (!std::is_sorted(result.begin(), result.end())) {
         fail("--layers must be sorted in ascending order");
@@ -320,7 +696,7 @@ void reject_symlink(const fs::path & path, const std::string & label) {
     }
 }
 
-std::vector<sample> load_samples(const fs::path & path) {
+loaded_samples load_samples(const fs::path & path) {
     const int raw_fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (raw_fd < 0) {
         fail("cannot open tokens JSONL without following symlinks: " +
@@ -369,6 +745,12 @@ std::vector<sample> load_samples(const fs::path & path) {
             break;
         }
         contents.append(buffer, static_cast<std::size_t>(count));
+    }
+    const file_identity input_identity = identity_from_stat(input_stat);
+    const file_identity input_after = descriptor_identity(input_fd.get(), "tokens JSONL");
+    if (!same_identity(input_identity, input_after) ||
+            contents.size() != static_cast<std::size_t>(input_identity.size)) {
+        fail("tokens JSONL changed while reading from its pinned descriptor");
     }
 
     std::istringstream input(contents);
@@ -434,7 +816,10 @@ std::vector<sample> load_samples(const fs::path & path) {
     if (samples.empty()) {
         fail("tokens JSONL must contain at least one sample");
     }
-    return samples;
+    return {
+            std::move(samples),
+            sha256_bytes(contents.data(), contents.size()),
+    };
 }
 
 fs::path normalized_path(const fs::path & path, const std::string & label) {
@@ -723,13 +1108,55 @@ void validate_model_bounds(
     }
 }
 
+std::uint64_t checked_product(
+        std::uint64_t left, std::uint64_t right, const std::string & label) {
+    if (left != 0 && right > std::numeric_limits<std::uint64_t>::max() / left) {
+        fail(label + " byte estimate overflowed");
+    }
+    return left * right;
+}
+
+void validate_capture_size_budget(
+        const std::vector<sample> & samples,
+        std::size_t layer_count,
+        std::uint32_t n_vocab,
+        std::uint32_t n_embd) {
+    std::uint64_t rows = 0;
+    for (const sample & item : samples) {
+        const std::uint64_t item_rows = item.token_ids.size() - 1;
+        if (item_rows > std::numeric_limits<std::uint64_t>::max() - rows) {
+            fail("capture row estimate overflowed");
+        }
+        rows += item_rows;
+    }
+    const std::uint64_t logits = checked_product(
+            checked_product(rows, n_vocab, "logits"), sizeof(float), "logits");
+    const std::uint64_t layer = checked_product(
+            checked_product(rows, n_embd, "layer input"), sizeof(float), "layer input");
+    if (logits > MAX_ARTIFACT_BYTES || layer > MAX_ARTIFACT_BYTES) {
+        fail("native capture estimate exceeds the 32 GiB per-artifact bound");
+    }
+    const std::uint64_t all_layers =
+            checked_product(layer, layer_count, "aggregate layer inputs");
+    if (logits > MAX_AGGREGATE_BYTES || all_layers > MAX_AGGREGATE_BYTES - logits) {
+        fail("native capture estimate exceeds the 64 GiB aggregate FP32 bound");
+    }
+}
+
 int capture(
         const custom_args & custom,
         common_params & params,
         const std::vector<std::string> & common_args) {
-    const std::vector<sample> samples = load_samples(custom.tokens_jsonl);
+    const loaded_samples token_input = load_samples(custom.tokens_jsonl);
+    if (token_input.measured_sha256 != custom.forced_tokens_sha256) {
+        fail("measured forced-token SHA-256 does not match --forced-tokens-sha256");
+    }
+    const std::vector<sample> & samples = token_input.records;
     validate_capture_paths(custom.tokens_jsonl, custom.out_dir, params.model.path);
     const std::vector<std::string> runtime_argv = normalized_runtime_argv(common_args, custom);
+    const std::string tool_measured_sha256 = measured_tool_sha256(custom.tool_binary_sha256);
+    pinned_model model_pin = open_pinned_model(params.model.path, custom.model_sha256);
+    params.model.path = model_pin.proc_path;
     const fs::path temp = prepare_temp_dir(custom.out_dir);
     temp_dir_guard cleanup(temp);
 
@@ -753,6 +1180,7 @@ int capture(
         fail("loaded model reported invalid capture dimensions");
     }
     validate_model_bounds(samples, custom.layers, n_vocab, n_ctx, n_layer);
+    validate_capture_size_budget(samples, custom.layers.size(), n_vocab, n_embd);
 
     for (const std::uint32_t layer : custom.layers) {
         llama_set_embeddings_layer_inp(context, layer, true);
@@ -835,6 +1263,7 @@ int capture(
             offset += chunk_size;
         }
     }
+    verify_pinned_model_unchanged(model_pin);
 
     close_checked(logits, "logits.f32");
     for (std::size_t i = 0; i < layer_outputs.size(); ++i) {
@@ -864,7 +1293,7 @@ int capture(
         device_names.emplace_back(ggml_backend_dev_name(device));
     }
     const json runtime_params = {
-            {"model_path", normalized_path(params.model.path, "model path").string()},
+            {"model_path", model_pin.canonical_path.string()},
             {"tokens_jsonl", normalized_path(custom.tokens_jsonl, "tokens JSONL").string()},
             {"output_dir", normalized_path(custom.out_dir, "output directory").string()},
             {"layers", custom.layers},
@@ -883,10 +1312,13 @@ int capture(
     const json receipt = {
             {"request_id", custom.request_id},
             {"model_sha256", custom.model_sha256},
+            {"measured_model_sha256", model_pin.measured_sha256},
             {"model_artifact_manifest_sha256", custom.model_artifact_manifest_sha256},
             {"tool_binary_sha256", custom.tool_binary_sha256},
+            {"measured_tool_binary_sha256", tool_measured_sha256},
             {"tool_build_contract_sha256", custom.tool_build_contract_sha256},
             {"forced_tokens_sha256", custom.forced_tokens_sha256},
+            {"measured_forced_tokens_sha256", token_input.measured_sha256},
             {"held_out_manifest_sha256", custom.held_out_manifest_sha256},
             {"ordered_sample_ids_sha256", custom.ordered_sample_ids_sha256},
             {"profile_tokenizer_sha256", custom.profile_tokenizer_sha256},
