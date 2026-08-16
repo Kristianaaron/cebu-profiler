@@ -317,6 +317,9 @@ class LlamaCppGgufMixedAdapter(BackendAdapter):
         params = {str(key): str(value) for key, value in raw.items()}
         if any("prun" in key.lower() for key in params):
             raise BackendUnavailable("pruning parameters are forbidden for GGUF quantization")
+        risk_sha256 = params.get("risk_artifact_sha256", "")
+        if risk_sha256 and re.fullmatch(r"[0-9a-f]{64}", risk_sha256) is None:
+            raise BackendUnavailable("risk artifact sha256 must be lowercase hexadecimal")
         return params
 
     def _materialize_plan(self, params: dict[str, str], scratch: Path) -> tuple[Path, str]:
@@ -560,6 +563,11 @@ def build_llamacpp_gguf_record(
             ParameterSpec("tensor_plan_content", "string", "recipe-bound tensor override plan"),
             ParameterSpec("tensor_plan_path", "string", "path to tensor override plan"),
             ParameterSpec("tensor_plan_sha256", "string", "required digest for path mode"),
+            ParameterSpec(
+                "risk_artifact_sha256",
+                "string",
+                "immutable risk artifact lineage digest",
+            ),
             ParameterSpec(
                 "threads",
                 "int",

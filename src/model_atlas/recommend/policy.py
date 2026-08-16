@@ -32,6 +32,7 @@ from typing import Any
 from model_atlas.backend.registry import BackendRegistry
 from model_atlas.recipe.compiler import canonical_json
 from model_atlas.recipe.schema import RecipeStatus, StageEffectClass
+from model_atlas.recipes.builtin import GLM52_GGUF_TENSOR_PLAN_SHA256
 from model_atlas.schemas.evidence import EvidenceKind
 
 
@@ -202,6 +203,14 @@ _GLM52_RISK_DETAIL_RE = re.compile(
     r"^risk_artifact_sha256=([0-9a-f]{64});"
     r"tensor_plan_sha256=([0-9a-f]{64})$"
 )
+
+
+def glm52_risk_lineage(detail: str) -> tuple[str, str] | None:
+    """Parse risk lineage only when it targets the exact executable plan."""
+    match = _GLM52_RISK_DETAIL_RE.fullmatch(detail)
+    if match is None or match.group(2) != GLM52_GGUF_TENSOR_PLAN_SHA256:
+        return None
+    return match.group(1), match.group(2)
 
 
 @dataclass(frozen=True)
@@ -895,7 +904,7 @@ class RecommendationPolicy:
             )
         if method == "llamacpp-gguf-mixed":
             risk = self._evidence_for(profile, "nvfp4_suitability")
-            if risk is None or _GLM52_RISK_DETAIL_RE.fullmatch(risk.detail) is None:
+            if risk is None or glm52_risk_lineage(risk.detail) is None:
                 blockers.append(
                     RecBlock(
                         "risk_lineage_missing",

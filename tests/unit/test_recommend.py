@@ -19,6 +19,7 @@ from model_atlas.recipe.schema import (
     StageBackendPin,
     StageEffectClass,
 )
+from model_atlas.recipes.builtin import GLM52_GGUF_TENSOR_PLAN_SHA256
 from model_atlas.recommend import (
     AtlasProfile,
     RecommendationService,
@@ -453,10 +454,22 @@ def test_llamacpp_catalog_template_and_bound_recipe_are_exact(tmp_path: Path) ->
 
     profile = AtlasProfile(
         **{
-            **_full_profile().__dict__,
-            "profile_id": "bound-gguf",
-            "routing_consistency_passed": True,
-            "execution": _execution_binding(str(tmp_path / "glm-source")),
+                **_full_profile().__dict__,
+                "profile_id": "bound-gguf",
+                "routing_consistency_passed": True,
+                "evidence": {
+                    **_full_profile().evidence,
+                    "nvfp4_suitability": StageEvidence(
+                        "nvfp4_suitability",
+                        "estimated",
+                        detail=(
+                            "risk_artifact_sha256=" + "c" * 64
+                            + ";tensor_plan_sha256="
+                            + GLM52_GGUF_TENSOR_PLAN_SHA256
+                        ),
+                    ),
+                },
+                "execution": _execution_binding(str(tmp_path / "glm-source")),
         }
     )
     service = RecommendationService(
@@ -498,7 +511,7 @@ def test_llamacpp_uses_source_only_binding_without_fabricated_calibration(
                 "estimated",
                 detail=(
                     "risk_artifact_sha256=" + "c" * 64
-                    + ";tensor_plan_sha256=" + "d" * 64
+                    + ";tensor_plan_sha256=" + GLM52_GGUF_TENSOR_PLAN_SHA256
                 ),
             )
         },
@@ -519,7 +532,7 @@ def test_llamacpp_uses_source_only_binding_without_fabricated_calibration(
     imported = service.import_profile(saved)
     assert imported.evidence["nvfp4_suitability"].detail == (
         "risk_artifact_sha256=" + "c" * 64
-        + ";tensor_plan_sha256=" + "d" * 64
+        + ";tensor_plan_sha256=" + GLM52_GGUF_TENSOR_PLAN_SHA256
     )
     auth = service.authorize(profile, RecTarget(memory_target_gib=219.0))
     assert "llamacpp-gguf-mixed" in auth["authorized_methods"]
@@ -536,6 +549,32 @@ def test_llamacpp_uses_source_only_binding_without_fabricated_calibration(
     assert recipe.calibration.corpus_name == "none"
     assert recipe.calibration.corpus_records_path is None
     assert recipe.calibration.tokenizer_sha256 == "b" * 64
+    assert recipe.stages[0].parameters["risk_artifact_sha256"] == "c" * 64
+    assert (
+        recipe.stages[0].parameters["tensor_plan_sha256"]
+        == GLM52_GGUF_TENSOR_PLAN_SHA256
+    )
+    wrong_plan = replace(
+        profile,
+        evidence={
+            "nvfp4_suitability": StageEvidence(
+                "nvfp4_suitability",
+                "estimated",
+                detail=(
+                    "risk_artifact_sha256=" + "c" * 64
+                    + ";tensor_plan_sha256=" + "d" * 64
+                ),
+            )
+        },
+    )
+    wrong_auth = service.authorize(wrong_plan, RecTarget(memory_target_gib=219.0))
+    assert "llamacpp-gguf-mixed" not in wrong_auth["authorized_methods"]
+    blocker = next(
+        item
+        for item in wrong_auth["recommendation"]["blocked_methods"]
+        if item["method"] == "llamacpp-gguf-mixed"
+    )
+    assert any(item["code"] == "risk_lineage_missing" for item in blocker["blockers"])
 
 
 def test_llamacpp_authorize_preview_is_executable_with_fresh_fake_tool_pin(
@@ -564,7 +603,7 @@ def test_llamacpp_authorize_preview_is_executable_with_fresh_fake_tool_pin(
                     "estimated",
                     detail=(
                         "risk_artifact_sha256=" + "c" * 64
-                        + ";tensor_plan_sha256=" + "d" * 64
+                        + ";tensor_plan_sha256=" + GLM52_GGUF_TENSOR_PLAN_SHA256
                     ),
                 ),
             },

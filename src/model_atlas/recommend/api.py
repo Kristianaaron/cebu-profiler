@@ -70,6 +70,7 @@ from model_atlas.recommend.policy import (
     Recommendation,
     RecommendationPolicy,
     RecTarget,
+    glm52_risk_lineage,
     method_catalog_digest,
     method_spec,
     required_families,
@@ -162,6 +163,7 @@ class _AuthorizationSession:
         "profile_bytes_hash",
         "profile_model_arch",
         "execution_binding",
+        "risk_evidence_detail",
         "revoked",
     )
 
@@ -192,6 +194,7 @@ class _AuthorizationSession:
         self.profile_bytes_hash: str = ""
         self.profile_model_arch: str = ""
         self.execution_binding: ProfileExecutionBinding | None = None
+        self.risk_evidence_detail: str = ""
         self.revoked = False
 
     def selected_hash(self) -> str:
@@ -371,6 +374,8 @@ class RecommendationService:
         session.profile_fingerprint = prof.profile_id_of()
         session.profile_model_arch = prof.hardware_model_arch
         session.execution_binding = prof.execution
+        risk = prof.evidence.get("nvfp4_suitability")
+        session.risk_evidence_detail = risk.detail if risk is not None else ""
         src: Path | None = None
         for f in sorted(self.profile_root.rglob("*.json")):
             try:
@@ -843,7 +848,19 @@ class RecommendationService:
                 sha256=dict(binding.source_sha256),
                 manifest_digest=binding.source_manifest_digest,
             )
-            recipe = llamacpp_gguf_mixed_recipe(source)
+            lineage = glm52_risk_lineage(session.risk_evidence_detail)
+            if lineage is None:
+                raise AuthError(
+                    409,
+                    "risk_lineage_missing",
+                    "mixed GGUF risk evidence does not bind the executable tensor plan",
+                )
+            risk_sha256, tensor_plan_sha256 = lineage
+            recipe = llamacpp_gguf_mixed_recipe(
+                source,
+                tensor_plan_sha256=tensor_plan_sha256,
+                risk_artifact_sha256=risk_sha256,
+            )
             recipe.calibration = recipe.calibration.model_copy(
                 update={"tokenizer_sha256": binding.tokenizer_hash}
             )

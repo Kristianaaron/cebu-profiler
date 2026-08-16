@@ -486,6 +486,7 @@ def llamacpp_gguf_mixed_recipe(
     tensor_plan_content: str = "",
     tensor_plan_path: str | None = None,
     tensor_plan_sha256: str = "",
+    risk_artifact_sha256: str = "",
     threads: int = 16,
 ) -> CompressionRecipe:
     """Artifact-only, no-pruning mixed GGUF requantization recipe."""
@@ -497,6 +498,8 @@ def llamacpp_gguf_mixed_recipe(
     if tensor_plan_path and not tensor_plan_sha256:
         raise ValueError("tensor plan path mode requires sha256")
     parameters = {"threads": str(threads)}
+    if risk_artifact_sha256:
+        parameters["risk_artifact_sha256"] = risk_artifact_sha256
     if tensor_plan_content:
         parameters["tensor_plan_content"] = tensor_plan_content
     else:
