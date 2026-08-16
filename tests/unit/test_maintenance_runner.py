@@ -118,18 +118,18 @@ def test_exact_stop_and_rollback_order(tmp_path: Path) -> None:
     )
 
     ids = action_ids(receipt)
-    assert ids[:5] == [
+    assert ids[:9] == [
         "stop_gateway",
         "stop_vision_adapter",
         "stop_qwen",
         "stop_dsv4",
-        "operator_payload",
-    ]
-    assert ids[5:] == [
         "preserve_head_runtime_journal",
         "stop_head_runtime",
         "preserve_worker_rpc_journal",
         "stop_worker_rpc",
+        "operator_payload",
+    ]
+    assert ids[9:] == [
         "restore_worker_rpc",
         "restore_head_runtime",
         "restore_dsv4",
@@ -295,6 +295,31 @@ def test_payload_scope_is_never_entered_when_acquisition_fails(tmp_path: Path) -
     assert entered == []
 
 
+def test_stop_success_but_autorestart_blocks_scope_and_payload(tmp_path: Path) -> None:
+    entered: list[str] = []
+
+    @contextmanager
+    def scope():  # type: ignore[no-untyped-def]
+        entered.append("entered")
+        yield
+
+    class AutoRestartRunner(FakeRunner):
+        def run(self, argv: Sequence[str]) -> CommandResult:
+            result = super().run(argv)
+            command = tuple(argv)
+            if command == ("systemctl", "--user", "stop", "hermes-gateway.service"):
+                self.active.add("hermes-gateway.service")
+            return result
+
+    runner = AutoRestartRunner(active=ALL_PRODUCTION)
+    receipt = MaintenanceCoordinator(config(tmp_path), runner, execute=True).run(
+        ["operator-command"], payload_scope=scope
+    )
+    assert entered == []
+    assert "operator_payload" not in action_ids(receipt)
+    assert receipt.failure == "MaintenanceFailure"
+
+
 def test_payload_scope_wraps_only_payload_and_exits_before_restore(tmp_path: Path) -> None:
     events: list[str] = []
 
@@ -310,7 +335,7 @@ def test_payload_scope_wraps_only_payload_and_exits_before_restore(tmp_path: Pat
         def run(self, argv: Sequence[str]) -> CommandResult:
             if tuple(argv) == ("operator-command",):
                 events.append("payload")
-            if tuple(argv)[-2:] == ("stop", HEAD_TRANSIENT_UNIT):
+            if str(tuple(argv)[0]).endswith("start-deepseek-v4-flash-dspark.sh"):
                 events.append("restore-begins")
             return super().run(argv)
 
@@ -343,8 +368,15 @@ def test_subprocess_runner_terminates_and_reaps_group_before_interrupt_propagate
         assert kwargs["start_new_session"] is True
         return Child()
 
-    def killpg(pid: int, sig: signal.Signals) -> None:
-        events.append(f"kill-{pid}-{sig.name}")
+    alive = True
+
+    def killpg(pid: int, sig: int) -> None:
+        nonlocal alive
+        events.append(f"kill-{pid}-{sig.name if isinstance(sig, signal.Signals) else sig}")
+        if sig == signal.SIGKILL:
+            alive = False
+        if sig == 0 and not alive:
+            raise ProcessLookupError
 
     runner = SubprocessCommandRunner(process_factory=factory, killpg=killpg, wait_timeout_seconds=1)
     with pytest.raises(MaintenanceInterrupted):
@@ -353,6 +385,32 @@ def test_subprocess_runner_terminates_and_reaps_group_before_interrupt_propagate
         "communicate",
         "kill-444-SIGTERM",
         "wait-1",
+        "kill-444-0",
         "kill-444-SIGKILL",
         "wait-2",
+        "kill-444-0",
     ]
+
+
+def test_subprocess_runner_waits_leader_even_when_group_is_already_gone() -> None:
+    events: list[str] = []
+
+    class Child:
+        pid = 777
+
+        def communicate(self) -> tuple[str, str | None]:
+            raise MaintenanceInterrupted(2)
+
+        def wait(self, timeout: float | None = None) -> int:
+            events.append("wait")
+            return 0
+
+    def gone(_pid: int, _sig: int) -> None:
+        raise ProcessLookupError
+
+    runner = SubprocessCommandRunner(
+        process_factory=lambda *_args, **_kwargs: Child(), killpg=gone, wait_timeout_seconds=1
+    )
+    with pytest.raises(MaintenanceInterrupted):
+        runner.run(["payload"])
+    assert events == ["wait"]

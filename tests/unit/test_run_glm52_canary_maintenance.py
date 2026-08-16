@@ -9,7 +9,11 @@ from types import ModuleType
 
 import pytest
 
-from model_atlas.ops.maintenance import MaintenanceInterrupted, MaintenanceReceipt
+from model_atlas.ops.maintenance import (
+    MaintenanceFailure,
+    MaintenanceInterrupted,
+    MaintenanceReceipt,
+)
 
 
 def _module() -> ModuleType:
@@ -123,3 +127,46 @@ def test_canary_cli_default_uses_installed_vllm_python(
 
 def test_deleted_direct_lease_wrapper_cannot_be_invoked() -> None:
     assert not (Path(__file__).parents[2] / "scripts" / "run_bound_canary_payload.py").exists()
+
+
+def test_direct_canary_rejects_minted_lease_when_live_drain_probe_finds_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _canary_module()
+    args = Namespace(
+        execute=True,
+        artifact=Path("/artifacts/glm52.gguf"),
+        artifact_sha256="a" * 64,
+        evidence=tmp_path / "evidence.jsonl",
+        telemetry_probe=Path("/scripts/probe.py"),
+        rdma_interface="ib0",
+        disk_device="nvme0n1",
+        telemetry_python=Path("/venv/bin/python"),
+        telemetry_python_sha256="b" * 64,
+        maintenance_lease=tmp_path / "minted.json",
+        worker_ssh_target="10.77.0.2",
+        worker_host="169.254.200.197",
+        toolchain_root=Path("/toolchain"),
+        llama_server=Path("/toolchain/llama-server"),
+        worker_rpc_server=Path("/toolchain/ggml-rpc-server"),
+    )
+    monkeypatch.setattr(module, "parse_args", lambda: args)
+    events: list[str] = []
+
+    class _Coordinator:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            events.append("init")
+
+        def verify_drained(self) -> None:
+            events.append("verify")
+            raise MaintenanceFailure("drain verification failed")
+
+    monkeypatch.setattr(module, "MaintenanceCoordinator", _Coordinator)
+    monkeypatch.setattr(
+        module,
+        "require_active_lease",
+        lambda *_args, **_kwargs: pytest.fail("lease must not be accepted before drain"),
+    )
+    with pytest.raises(MaintenanceFailure):
+        module.main()
+    assert events == ["init", "verify"]

@@ -22,6 +22,11 @@ from model_atlas.fit_telemetry import (
     build_base_canary_plan,
 )
 from model_atlas.llamacpp_rpc_runtime import LlamaCppRpcRuntimeAdapter, LlamaCppRpcRuntimeConfig
+from model_atlas.ops.maintenance import (
+    MaintenanceConfig,
+    MaintenanceCoordinator,
+    SubprocessCommandRunner,
+)
 from model_atlas.runtime_canary_driver import (
     CanaryRequestClient,
     LoopbackHttpTransport,
@@ -134,6 +139,19 @@ def main() -> int:
             "--rdma-interface, --disk-device, --telemetry-python-sha256, and "
             "--maintenance-lease are required with --execute"
         )
+    # Re-probe live production/transient state at the execution boundary.  A
+    # valid lease alone never permits a canary while a consumer is still active.
+    MaintenanceCoordinator(
+        MaintenanceConfig(
+            journal_dir=args.evidence.parent,
+            receipt_path=args.evidence.with_suffix(".maintenance.json"),
+            head_runtime_unit=HEAD_TRANSIENT_UNIT,
+            worker_rpc_unit=WORKER_TRANSIENT_UNIT,
+            worker_ssh_target=args.worker_ssh_target,
+        ),
+        SubprocessCommandRunner(),
+        execute=True,
+    ).verify_drained()
     require_active_lease(
         args.maintenance_lease,
         CanaryLeaseBinding(

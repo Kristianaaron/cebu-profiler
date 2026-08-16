@@ -13,8 +13,9 @@ import json
 import os
 import signal
 import subprocess
+import time
 from collections.abc import Callable, Sequence
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, nullcontext, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from types import FrameType
@@ -69,14 +70,18 @@ class SubprocessCommandRunner:
         self,
         *,
         process_factory: _ProcessFactory | None = None,
-        killpg: Callable[[int, signal.Signals], None] = os.killpg,
+        killpg: Callable[[int, int], None] = os.killpg,
         wait_timeout_seconds: float = 10.0,
+        group_poll_attempts: int = 10,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        if wait_timeout_seconds <= 0:
-            raise ValueError("wait timeout must be positive")
+        if wait_timeout_seconds <= 0 or group_poll_attempts < 1:
+            raise ValueError("wait timeout and group poll attempts must be positive")
         self._process_factory = process_factory or self._popen
         self._killpg = killpg
         self._wait_timeout = wait_timeout_seconds
+        self._group_poll_attempts = group_poll_attempts
+        self._sleep = sleep
 
     @staticmethod
     def _popen(
@@ -95,22 +100,43 @@ class SubprocessCommandRunner:
             start_new_session=start_new_session,
         )
 
-    def _reap_group(self, process: _ChildProcess) -> None:
-        try:
-            self._killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
+    def _wait_leader(self, process: _ChildProcess) -> bool:
         try:
             process.wait(timeout=self._wait_timeout)
+            return True
         except subprocess.TimeoutExpired:
-            try:
-                self._killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                return
-            try:
-                process.wait(timeout=self._wait_timeout)
-            except subprocess.TimeoutExpired as exc:
-                raise RuntimeError("payload process group could not be reaped") from exc
+            return False
+
+    def _group_exists(self, process_group: int) -> bool:
+        try:
+            self._killpg(process_group, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def _wait_for_group_exit(self, process_group: int) -> bool:
+        for attempt in range(self._group_poll_attempts):
+            if not self._group_exists(process_group):
+                return True
+            if attempt + 1 < self._group_poll_attempts:
+                self._sleep(self._wait_timeout / self._group_poll_attempts)
+        return False
+
+    def _reap_group(self, process: _ChildProcess) -> None:
+        group = process.pid
+        with suppress(ProcessLookupError):
+            self._killpg(group, signal.SIGTERM)
+        leader_reaped = self._wait_leader(process)
+        if self._group_exists(group):
+            with suppress(ProcessLookupError):
+                self._killpg(group, signal.SIGKILL)
+            if not leader_reaped:
+                leader_reaped = self._wait_leader(process)
+            if not self._wait_for_group_exit(group):
+                raise RuntimeError("payload process group could not be quiesced")
+        # The group may already be gone, but the direct child still must be reaped.
+        if not leader_reaped and not self._wait_leader(process):
+            raise RuntimeError("payload process leader could not be reaped")
 
     def run(self, argv: Sequence[str]) -> CommandResult:
         process = self._process_factory(
@@ -356,6 +382,31 @@ class MaintenanceCoordinator:
             [str(self.config.dsv4_stop_script)],
             active=self._states["dsv4"].active,
         )
+        self._preserve_and_stop_runtime(
+            key="head_runtime",
+            unit=self.config.head_runtime_unit,
+            remote=False,
+            unit_file=self.config.head_runtime_unit_file,
+        )
+        self._preserve_and_stop_runtime(
+            key="worker_rpc",
+            unit=self.config.worker_rpc_unit,
+            remote=True,
+            unit_file=self.config.worker_rpc_unit_file,
+        )
+
+    def verify_drained(self) -> None:
+        """Authoritatively re-probe all consumers; no caller-supplied state."""
+        active = (
+            self._unit_active(self.config.gateway_unit),
+            self._unit_active(self.config.vision_adapter_unit),
+            self._unit_active(self.config.qwen_unit),
+            self._container_active(self.config.dsv4_container),
+            self._unit_active(self.config.head_runtime_unit),
+            self._unit_active(self.config.worker_rpc_unit, remote=True),
+        )
+        if any(active):
+            raise MaintenanceFailure("drain verification failed")
 
     def _preserve_and_stop_runtime(
         self,
@@ -491,6 +542,7 @@ class MaintenanceCoordinator:
         hashes = [self._hash_binary(path) for path in self.config.all_binary_paths()]
         try:
             self._acquire()
+            self.verify_drained()
             if payload:
                 scope = payload_scope() if payload_scope is not None else nullcontext()
                 with scope:
