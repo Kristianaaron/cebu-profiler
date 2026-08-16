@@ -29,6 +29,7 @@ import struct
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import BinaryIO
 
 _MAX_HEADER = 64 * 1024 * 1024  # bounded header read (corrupt length fails, never allocates)
 _HASH_CHUNK = 4 * 1024 * 1024
@@ -268,6 +269,147 @@ def _whole_checkpoint_digest(files: list[Path]) -> str:
 
 
 # --------------------------------------------------------------------------
+# bounded GGUF structural validator
+# --------------------------------------------------------------------------
+
+_GGUF_MAX_HEADER = 64 * 1024 * 1024
+_GGUF_MAX_COUNT = 10_000_000
+_GGUF_SCALAR_BYTES = {
+    0: 1,  # UINT8
+    1: 1,  # INT8
+    2: 2,  # UINT16
+    3: 2,  # INT16
+    4: 4,  # UINT32
+    5: 4,  # INT32
+    6: 4,  # FLOAT32
+    7: 1,  # BOOL
+    10: 8,  # UINT64
+    11: 8,  # INT64
+    12: 8,  # FLOAT64
+}
+
+
+def _gguf_read(stream: BinaryIO, size: int) -> bytes:
+    if size < 0 or stream.tell() + size > _GGUF_MAX_HEADER:
+        raise ValueError("GGUF header exceeds bounded read limit")
+    data = stream.read(size)
+    if len(data) != size:
+        raise ValueError("truncated GGUF header")
+    return data
+
+
+def _gguf_u32(stream: BinaryIO) -> int:
+    return int(struct.unpack("<I", _gguf_read(stream, 4))[0])
+
+
+def _gguf_u64(stream: BinaryIO) -> int:
+    return int(struct.unpack("<Q", _gguf_read(stream, 8))[0])
+
+
+def _gguf_string(stream: BinaryIO, *, decode: bool = False) -> str:
+    length = _gguf_u64(stream)
+    if length > _GGUF_MAX_HEADER:
+        raise ValueError("GGUF string exceeds bounded header limit")
+    data = _gguf_read(stream, length)
+    if not decode:
+        return ""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("GGUF metadata key is not UTF-8") from exc
+
+
+def _gguf_skip_value(stream: BinaryIO, value_type: int, *, depth: int = 0) -> None:
+    if depth > 4:
+        raise ValueError("GGUF metadata nesting exceeds bound")
+    scalar = _GGUF_SCALAR_BYTES.get(value_type)
+    if scalar is not None:
+        _gguf_read(stream, scalar)
+        return
+    if value_type == 8:  # STRING
+        _gguf_string(stream)
+        return
+    if value_type != 9:  # ARRAY
+        raise ValueError(f"unsupported GGUF metadata value type {value_type}")
+    element_type = _gguf_u32(stream)
+    count = _gguf_u64(stream)
+    if count > _GGUF_MAX_COUNT:
+        raise ValueError("GGUF metadata array count exceeds bound")
+    element_size = _GGUF_SCALAR_BYTES.get(element_type)
+    if element_size is not None:
+        _gguf_read(stream, count * element_size)
+        return
+    for _ in range(count):
+        _gguf_skip_value(stream, element_type, depth=depth + 1)
+
+
+def _gguf_structure(
+    backend_id: str, staged_dir: Path, _fmt: str
+) -> CheckpointValidationResult:
+    del backend_id
+    files = [path for path in sorted(staged_dir.iterdir()) if path.is_file()]
+    models = [path for path in files if path.suffix == ".gguf"]
+    if len(models) != 1:
+        return CheckpointValidationResult(False, "expected exactly one GGUF model")
+    model = models[0]
+    file_size = model.stat().st_size
+    try:
+        with model.open("rb") as stream:
+            if _gguf_read(stream, 4) != b"GGUF":
+                raise ValueError("invalid GGUF magic")
+            version = _gguf_u32(stream)
+            if version not in {2, 3}:
+                raise ValueError(f"unsupported GGUF version {version}")
+            tensor_count = _gguf_u64(stream)
+            metadata_count = _gguf_u64(stream)
+            if tensor_count == 0 or tensor_count > _GGUF_MAX_COUNT:
+                raise ValueError("GGUF tensor count is empty or exceeds bound")
+            if metadata_count > _GGUF_MAX_COUNT:
+                raise ValueError("GGUF metadata count exceeds bound")
+            alignment = 32
+            for _ in range(metadata_count):
+                key = _gguf_string(stream, decode=True)
+                value_type = _gguf_u32(stream)
+                if key == "general.alignment" and value_type == 4:
+                    alignment = _gguf_u32(stream)
+                    if alignment <= 0 or alignment > 4096 or alignment & (alignment - 1):
+                        raise ValueError("invalid GGUF alignment")
+                else:
+                    _gguf_skip_value(stream, value_type)
+            offsets: list[int] = []
+            for _ in range(tensor_count):
+                _gguf_string(stream)
+                dimensions = _gguf_u32(stream)
+                if dimensions > 8:
+                    raise ValueError("GGUF tensor dimension count exceeds bound")
+                for _ in range(dimensions):
+                    if _gguf_u64(stream) == 0:
+                        raise ValueError("GGUF tensor dimension is zero")
+                tensor_type = _gguf_u32(stream)
+                if tensor_type > 1024:
+                    raise ValueError("GGUF tensor type exceeds bound")
+                offsets.append(_gguf_u64(stream))
+            header_end = stream.tell()
+            data_start = (header_end + alignment - 1) // alignment * alignment
+            if data_start > file_size:
+                raise ValueError("GGUF aligned header exceeds file size")
+            data_size = file_size - data_start
+            if any(offset >= data_size for offset in offsets):
+                raise ValueError("GGUF tensor offset lies outside data section")
+    except (OSError, ValueError, struct.error) as exc:
+        return CheckpointValidationResult(False, str(exc))
+    digest = _sha256_file(model)
+    return CheckpointValidationResult(
+        True,
+        detail=f"bounded GGUF v{version} header + file hash valid",
+        tensor_count=tensor_count,
+        shard_count=1,
+        shard_hashes={model.name: digest},
+        checkpoint_digest=digest,
+    )
+
+
+# --------------------------------------------------------------------------
 # registered validators (derivative backends only)
 # --------------------------------------------------------------------------
 
@@ -281,3 +423,6 @@ for _backend in (
     register_checkpoint_validator(_backend, "integrity", _safetensors_structure)
     register_checkpoint_validator(_backend, "format", _safetensors_structure)
     register_checkpoint_validator(_backend, "checkpoint", _safetensors_structure)
+
+for _kind in ("integrity", "format", "checkpoint"):
+    register_checkpoint_validator("llamacpp_gguf_mixed", _kind, _gguf_structure)

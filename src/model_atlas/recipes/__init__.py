@@ -8,6 +8,7 @@ from model_atlas.recipes.builtin import (
     GLM52_HARDWARE,
     GLM52_SOURCE_PATH,
     glm52_no_pruning_recipe,
+    llamacpp_gguf_mixed_recipe,
     nvfp4_width_slice_optin_recipe,
     tenp_pruning_optin_recipe,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "GLM52_SOURCE_PATH",
     "PLAN_ARTIFACT_SCHEMA",
     "glm52_no_pruning_recipe",
+    "llamacpp_gguf_mixed_recipe",
     "nvfp4_width_slice_optin_recipe",
     "tenp_pruning_optin_recipe",
 ]

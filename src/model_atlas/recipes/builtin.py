@@ -40,6 +40,13 @@ from model_atlas.recipe.schema import (
 from model_atlas.schemas.evidence import EvidenceKind
 
 GLM52_SOURCE_PATH = "/media/glm52/models/nvidia/GLM-5.2-NVFP4"
+LLAMACPP_GGUF_PIN = "4df29be4f4c3673f428170fda944a5b19f743bb8"
+GLM52_GGUF_TENSOR_PLAN_PATH = (
+    "/home/kristianaaron/tmp/model-atlas/artifacts/glm52-gguf-tensor-types.txt"
+)
+GLM52_GGUF_TENSOR_PLAN_SHA256 = (
+    "bca52ebd8afcedad4d1ef317eaddc5b53c91297e6bfcf7b4389337e92336024a"
+)
 GLM52_CENSUS = "232385 tensors / 47 shards / ~464.8 GiB (measured census 2026-08-14)"
 GLM52_HARDWARE = HardwareEnvelope(
     node_count=2,
@@ -470,4 +477,90 @@ def nvfp4_width_slice_optin_recipe(
             require_repair_or_validated=False,
         ),
         backend_pins={"atlas_nvfp4_width_slice": "1.0.0"},
+    )
+
+
+def llamacpp_gguf_mixed_recipe(
+    source: SourceIdentity,
+    *,
+    tensor_plan_content: str = "",
+    tensor_plan_path: str | None = None,
+    tensor_plan_sha256: str = "",
+    threads: int = 16,
+) -> CompressionRecipe:
+    """Artifact-only, no-pruning mixed GGUF requantization recipe."""
+    if tensor_plan_content and tensor_plan_path is not None:
+        raise ValueError("provide exactly one tensor plan mode: content or path")
+    if not tensor_plan_content and tensor_plan_path is None:
+        tensor_plan_path = GLM52_GGUF_TENSOR_PLAN_PATH
+        tensor_plan_sha256 = tensor_plan_sha256 or GLM52_GGUF_TENSOR_PLAN_SHA256
+    if tensor_plan_path and not tensor_plan_sha256:
+        raise ValueError("tensor plan path mode requires sha256")
+    parameters = {"threads": str(threads)}
+    if tensor_plan_content:
+        parameters["tensor_plan_content"] = tensor_plan_content
+    else:
+        assert tensor_plan_path is not None
+        parameters["tensor_plan_path"] = tensor_plan_path
+        parameters["tensor_plan_sha256"] = tensor_plan_sha256
+    stage = RecipeStage(
+        id="llamacpp-gguf-mixed",
+        name="llama.cpp mixed GGUF requantization",
+        effect_class=StageEffectClass.QUANTIZATION,
+        backend=StageBackendPin(
+            backend_id="llamacpp_gguf_mixed",
+            version=LLAMACPP_GGUF_PIN,
+            minimum_status=RecipeStatus.DISCOVERED,
+        ),
+        parameters=parameters,
+        produces_format=["gguf"],
+        expected_outputs=["model.gguf"],
+        seed=0,
+        validation_gates=[
+            ValidationGate(gate_id="llamacpp-gguf-checkpoint", kind="checkpoint", required=True)
+        ],
+        resources=ResourceBounds(
+            max_host_gb=64.0,
+            max_scratch_gb=1200.0,
+            max_workers=1,
+            note="bounded conversion scratch, final GGUF staging, and CAS copy",
+        ),
+        evidence_policy=EvidenceKind.PREDICTED,
+        notes=(
+            "No pruning. Q4_K base with recipe-bound mixed expert overrides. "
+            "Artifact-only; no serving-runtime claim."
+        ),
+    )
+    return CompressionRecipe(
+        name="llamacpp-gguf-mixed-artifact",
+        description=(
+            "Pinned llama.cpp mixed GGUF artifact production from immutable source; "
+            "runtime loadability is deliberately unclaimed."
+        ),
+        source=source,
+        calibration=CalibrationIdentity(
+            calibration_id="not-used-llamacpp-gguf",
+            corpus_name="none",
+            seed=0,
+            note="recipe consumes an explicit tensor plan, not calibration data",
+        ),
+        hardware=GLM52_HARDWARE.model_copy(update={"runtime_backend": "none"}),
+        constraints=RecipeConstraints(
+            no_pruning=True,
+            allow_pruning_capability=False,
+            preserve_non_expert_backbone=True,
+            immutable_source=True,
+            allow_hybrid_precision=False,
+            max_resident_gib=0.0,
+            derived_format="gguf",
+        ),
+        stages=[stage],
+        publish=PublishRule(
+            require_all_stages_validated=True,
+            require_no_pruning=True,
+            evidence_kind_min=EvidenceKind.PREDICTED,
+            require_runtime_benchmarked=False,
+            require_repair_or_validated=False,
+        ),
+        backend_pins={"llamacpp_gguf_mixed": LLAMACPP_GGUF_PIN},
     )

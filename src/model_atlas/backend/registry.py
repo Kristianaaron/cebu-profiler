@@ -31,6 +31,7 @@ from model_atlas.backend.contract import (
     command_exists,
     module_present,
 )
+from model_atlas.backend.llamacpp_gguf import build_llamacpp_gguf_record
 from model_atlas.backend.nvfp4_width_slice import AtlasNvfp4WidthSliceAdapter
 from model_atlas.recipe.schema import RecipeStage, RecipeStatus
 
@@ -494,6 +495,8 @@ def _builtin_records() -> dict[str, BackendRecord]:
         adapter=AtlasNvfp4WidthSliceAdapter(),
     )
 
+    llamacpp_gguf = build_llamacpp_gguf_record()
+
     # A separately-registered OPT-IN pruning capability (TENP/FlexMoE). It is
     # NOT part of any canonical recipe; it declares the pruning capability for
     # the compiler's capability gate, and stays UNAVAILABLE until wired.
@@ -525,6 +528,7 @@ def _builtin_records() -> dict[str, BackendRecord]:
             llm_compressor,
             eval_lab,
             nvfp4_width_slice,
+            llamacpp_gguf,
             tenp_pruning,
         )
     }
