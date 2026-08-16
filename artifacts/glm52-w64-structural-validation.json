@@ -1,0 +1,19 @@
+{
+  "artifact": "/home/kristianaaron/tmp/model-atlas/derivatives/glm-uniform-w64-canary",
+  "backend_id": "atlas_nvfp4_width_slice",
+  "checkpoint_digest": "02ccfb702c93479bf421b92eefca9928a582110b1cab6573cfb2e3402ec8b561",
+  "classification": "uniform-aligned-expert-channel-pruning-structural-canary",
+  "model_atlas_commit": "1a8c6250877c59227e2052fbb4df2db2760acd06",
+  "runtime_validated": false,
+  "schema_version": 1,
+  "shard_count": 47,
+  "source": "/media/glm52/models/nvidia/GLM-5.2-NVFP4",
+  "structural_validation": {
+    "detail": "safetensors structure + index coverage + hashes valid",
+    "ok": true,
+    "validator": "model_atlas.checkpoint.validators._safetensors_structure"
+  },
+  "tensor_count": 232385,
+  "validated_at": "2026-08-16T20:16:08+01:00",
+  "width": 64
+}
