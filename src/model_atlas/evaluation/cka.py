@@ -70,17 +70,38 @@ def _center_rows(x: list[list[float]]) -> list[list[float]]:
     return [[v - m for v, m in zip(row, means, strict=True)] for row in x]
 
 
-def _linear_hsic(x: list[list[float]], y: list[list[float]]) -> float:
-    """Linear HSIC = || (1/(n-1)) * Xc^T Yc ||_F^2 (unnormalised)."""
+def _observation_gram(x: list[list[float]]) -> list[list[float]]:
+    """Return ``X X^T`` using symmetry.
+
+    Linear CKA is commonly written with the feature covariance
+    ``X^T Y``.  For LLM activations that formulation costs
+    ``O(observations * x_features * y_features)`` and becomes unusable at
+    hidden widths such as 6,144.  The equivalent observation-Gram identity
+
+        ``||X^T Y||_F^2 = <X X^T, Y Y^T>_F``
+
+    costs ``O(observations^2 * features)``.  Held-out capture rows are much
+    fewer than model features, so this is the exact—not projected—formulation
+    needed by the GLM canary.
+    """
+
     n = len(x)
-    x_features = len(x[0])
-    y_features = len(y[0])
-    gram = 0.0
-    for i in range(x_features):
-        for j in range(y_features):
-            s = sum(x[k][i] * y[k][j] for k in range(n))
-            gram += s * s
-    return gram / ((n - 1.0) ** 2)
+    gram = [[0.0] * n for _ in range(n)]
+    for i, left in enumerate(x):
+        for j in range(i, n):
+            value = sum(a * b for a, b in zip(left, x[j], strict=True))
+            gram[i][j] = value
+            gram[j][i] = value
+    return gram
+
+
+def _gram_hsic(x_gram: list[list[float]], y_gram: list[list[float]], n: int) -> float:
+    value = sum(
+        x_value * y_value
+        for x_row, y_row in zip(x_gram, y_gram, strict=True)
+        for x_value, y_value in zip(x_row, y_row, strict=True)
+    )
+    return value / ((n - 1.0) ** 2)
 
 
 def centered_linear_cka(x: object, y: object) -> CKA:
@@ -98,9 +119,7 @@ def centered_linear_cka(x: object, y: object) -> CKA:
     xa = _to_matrix("x", x)
     ya = _to_matrix("y", y)
     if len(xa) != len(ya):
-        raise ValueError(
-            f"observation mismatch: x has {len(xa)}, y has {len(ya)}"
-        )
+        raise ValueError(f"observation mismatch: x has {len(xa)}, y has {len(ya)}")
     n = len(xa)
     if n < 2:
         return CKA(valid=False, score=None, reason="fewer than two observations")
@@ -113,9 +132,11 @@ def centered_linear_cka(x: object, y: object) -> CKA:
         which = "x" if var_x <= var_y else "y"
         return CKA(valid=False, score=None, reason=f"zero variance in {which}")
 
-    hsic_xy = _linear_hsic(xc, yc)
-    hsic_xx = _linear_hsic(xc, xc)
-    hsic_yy = _linear_hsic(yc, yc)
+    x_gram = _observation_gram(xc)
+    y_gram = _observation_gram(yc)
+    hsic_xy = _gram_hsic(x_gram, y_gram, n)
+    hsic_xx = _gram_hsic(x_gram, x_gram, n)
+    hsic_yy = _gram_hsic(y_gram, y_gram, n)
     denom = math.sqrt(hsic_xx * hsic_yy)
     if not (math.isfinite(denom) and denom > 0.0):
         return CKA(valid=False, score=None, reason="degenerate HSIC denominator")

@@ -31,10 +31,7 @@ def _evidence(value: float = 0.5) -> MetricEvidence:
 
 def _logits(batch: int, seq: int, vocab: int, *, seed: int = 0) -> list[list[list[float]]]:
     rng = random.Random(seed)
-    return [
-        [[rng.gauss(0.0, 1.0) for _ in range(vocab)] for _ in range(seq)]
-        for _ in range(batch)
-    ]
+    return [[[rng.gauss(0.0, 1.0) for _ in range(vocab)] for _ in range(seq)] for _ in range(batch)]
 
 
 def _binary_logits(*, p: float) -> list[list[list[float]]]:
@@ -46,9 +43,7 @@ def _binary_kl(p: float, q: float) -> float:
     return p * math.log(p / q) + (1.0 - p) * math.log((1.0 - p) / (1.0 - q))
 
 
-def token_kld(
-    teacher: object, candidate: object, **kwargs: object
-) -> tuple[object, object]:
+def token_kld(teacher: object, candidate: object, **kwargs: object) -> tuple[object, object]:
     """Test helper that supplies explicit identity alignment by default."""
     if (
         "teacher_alignment" not in kwargs
@@ -80,15 +75,11 @@ def test_identical_logits_kld_zero() -> None:
 
 def test_analytic_binary_kld() -> None:
     p, q = 0.3, 0.6
-    rows, result = token_kld(
-        _binary_logits(p=p), _binary_logits(p=q), evidence=_evidence()
-    )
+    rows, result = token_kld(_binary_logits(p=p), _binary_logits(p=q), evidence=_evidence())
     assert len(rows) == 1
     assert rows[0].kld == pytest.approx(_binary_kl(p, q), abs=1e-9)
     assert result.report.overall.n_tokens == 1
-    assert result.report.overall.token_weighted_mean == pytest.approx(
-        _binary_kl(p, q), abs=1e-9
-    )
+    assert result.report.overall.token_weighted_mean == pytest.approx(_binary_kl(p, q), abs=1e-9)
 
 
 def test_batch_bound_domains_and_token_position_reset() -> None:
@@ -122,10 +113,17 @@ def test_batch_bound_domains_and_token_position_reset() -> None:
     assert [r.masked for r in rows] == [False, True, False, False, False, False]
     # Positions reset per sample: s0 positions 0,1,2 then s1 positions 0,1,2.
     assert [(r.sample_id, r.position) for r in rows] == [
-        ("s0", 0), ("s0", 1), ("s0", 2), ("s1", 0), ("s1", 1), ("s1", 2),
+        ("s0", 0),
+        ("s0", 1),
+        ("s0", 2),
+        ("s1", 0),
+        ("s1", 1),
+        ("s1", 2),
     ]
     assert [(r.sample_id, r.token_id) for r in rows[:3]] == [
-        ("s0", 7), ("s0", 8), ("s0", 9),
+        ("s0", 7),
+        ("s0", 8),
+        ("s0", 9),
     ]
     # Masked token (s0,pos1) excluded from overall.
     assert result.report.overall.n_tokens == 5
@@ -178,9 +176,11 @@ def test_domain_perturbation_is_nonzero_and_nonuniform() -> None:
     expected = (rows[0].kld + rows[1].kld) / 2.0
     assert result.report.overall.token_weighted_mean == pytest.approx(expected)
     # Overall sits strictly between the domain means (weighted average).
-    assert min(by["code"].token_weighted_mean, by["math"].token_weighted_mean) \
-        <= result.report.overall.token_weighted_mean <= \
-        max(by["code"].token_weighted_mean, by["math"].token_weighted_mean)
+    assert (
+        min(by["code"].token_weighted_mean, by["math"].token_weighted_mean)
+        <= result.report.overall.token_weighted_mean
+        <= max(by["code"].token_weighted_mean, by["math"].token_weighted_mean)
+    )
 
 
 def test_shape_and_order_errors() -> None:
@@ -223,7 +223,8 @@ def test_batch_and_alignment_mismatches_rejected() -> None:
     ]
     with pytest.raises(KLDMismatchError):
         token_kld(
-            a, a,
+            a,
+            a,
             teacher_alignment=teacher_align,
             candidate_alignment=cand_align_mismatched,
             evidence=_evidence(),
@@ -285,7 +286,11 @@ def test_build_domain_report_handles_mask_and_quantiles() -> None:
 
     def _mk(seq: int, kld: float, masked: bool) -> TokenKLDRow:
         return TokenKLDRow(
-            sample_id="s", position=seq, token_id=0, kld=kld, masked=masked,
+            sample_id="s",
+            position=seq,
+            token_id=0,
+            kld=kld,
+            masked=masked,
             domain="d",
         )
 
@@ -298,6 +303,7 @@ def test_build_domain_report_handles_mask_and_quantiles() -> None:
 
 
 # ---- CKA ----
+
 
 def _matrix(n: int, f: int, *, seed: int) -> list[list[float]]:
     rng = random.Random(seed)
@@ -369,6 +375,16 @@ def test_cka_supports_different_feature_widths() -> None:
     assert result.valid is True
     assert result.score is not None
     assert 0.0 <= result.score <= 1.0
+
+
+def test_cka_wide_hidden_states_use_exact_observation_gram() -> None:
+    # Regression for the GLM capture shape: features greatly exceed rows.
+    # The former feature-covariance loop scaled as 4096^2 * rows; the exact
+    # observation-Gram identity scales as rows^2 * 4096.
+    x = _matrix(8, 4096, seed=101)
+    result = centered_linear_cka(x, x)
+    assert result.valid is True
+    assert result.score == pytest.approx(1.0, abs=1e-9)
 
 
 def test_eager_package_import_brings_no_numpy() -> None:
