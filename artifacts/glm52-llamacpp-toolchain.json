@@ -1,0 +1,45 @@
+{
+  "schema_version": "atlas.llamacpp-toolchain.v1",
+  "upstream": {
+    "repository": "https://github.com/ggml-org/llama.cpp.git",
+    "commit": "4df29be4f4c3673f428170fda944a5b19f743bb8"
+  },
+  "build_contract": {
+    "CMAKE_CUDA_ARCHITECTURES": "121",
+    "GGML_CUDA": true,
+    "GGML_CUDA_FA_ALL_QUANTS": true,
+    "GGML_CUDA_GRAPHS": true,
+    "GGML_RPC": true
+  },
+  "head": {
+    "host": "spark-head",
+    "private_link": "10.77.0.1/30",
+    "converter": {
+      "path": "/home/kristianaaron/tmp/atlas-toolchains/llama.cpp/convert_hf_to_gguf.py",
+      "sha256": "e38975e1c68d98ac1664dfd530616eb35c72294382a4dd873d4746b23f27779f"
+    },
+    "llama_quantize": {
+      "path": "/home/kristianaaron/tmp/atlas-toolchains/llama.cpp/build-atlas/bin/llama-quantize",
+      "sha256": "6098de078672bdad5353dea83566aa79f1f107d9f2871e5e18a802faf9226dc6"
+    },
+    "llama_server": {
+      "path": "/home/kristianaaron/tmp/atlas-toolchains/llama.cpp/build-atlas/bin/llama-server",
+      "sha256": "86d791cf2ba2332b75b1589eece04a29488cf37d7fce871584c929fc85f644bb"
+    },
+    "rpc_server": {
+      "path": "/home/kristianaaron/tmp/atlas-toolchains/llama.cpp/build-atlas/bin/ggml-rpc-server",
+      "sha256": "6b448f515e4f674c99c37ce20fd82bde9cbb28c0b2bd1fd9b0e16db3ee81ce76"
+    }
+  },
+  "worker": {
+    "host": "gx10-ac63",
+    "private_link": "10.77.0.2/30",
+    "rdma_link": "169.254.200.197/16",
+    "rpc_server": {
+      "path": "/home/kristianaaron/tmp/atlas-toolchains/llama.cpp/build-atlas/bin/ggml-rpc-server",
+      "sha256": "6b448f515e4f674c99c37ce20fd82bde9cbb28c0b2bd1fd9b0e16db3ee81ce76"
+    }
+  },
+  "execution_state": "built_not_runtime_validated",
+  "safety_note": "CUDA binaries were not executed because production GPU services occupy both Sparks; runtime validation requires an approved maintenance window."
+}
