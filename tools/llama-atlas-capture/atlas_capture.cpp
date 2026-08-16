@@ -1008,11 +1008,71 @@ fs::path prepare_temp_dir(const fs::path & output) {
     return temp;
 }
 
+void fsync_regular_file(const fs::path & path) {
+    const int raw_descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (raw_descriptor < 0) {
+        fail("cannot open capture artifact for fsync: " + path.string() + ": " +
+             std::string(std::strerror(errno)));
+    }
+    file_descriptor descriptor(raw_descriptor);
+    const file_identity identity = descriptor_identity(descriptor.get(), path.filename().string());
+    if (::fsync(descriptor.get()) != 0) {
+        fail("cannot fsync capture artifact " + path.string() + ": " +
+             std::string(std::strerror(errno)));
+    }
+    if (!same_identity(
+                identity, descriptor_identity(descriptor.get(), path.filename().string()))) {
+        fail("capture artifact changed while it was being fsynced: " + path.string());
+    }
+}
+
+file_descriptor open_directory_descriptor(const fs::path & path, const std::string & label) {
+    const int raw_descriptor =
+            ::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (raw_descriptor < 0) {
+        fail("cannot open " + label + " directory: " + std::string(std::strerror(errno)));
+    }
+    struct stat value {};
+    if (::fstat(raw_descriptor, &value) != 0) {
+        const int saved_errno = errno;
+        ::close(raw_descriptor);
+        fail("cannot fstat " + label + " directory: " + std::string(std::strerror(saved_errno)));
+    }
+    if (!S_ISDIR(value.st_mode)) {
+        ::close(raw_descriptor);
+        fail(label + " is not a directory");
+    }
+    return file_descriptor(raw_descriptor);
+}
+
+void fsync_directory(const fs::path & path, const std::string & label) {
+    file_descriptor descriptor = open_directory_descriptor(path, label);
+    if (::fsync(descriptor.get()) != 0) {
+        fail("cannot fsync " + label + " directory: " + std::string(std::strerror(errno)));
+    }
+}
+
 void atomic_publish(const fs::path & temp, const fs::path & output) {
+    const fs::path parent = output.has_parent_path() ? output.parent_path() : fs::path(".");
+    if (temp.parent_path() != parent) {
+        fail("temporary and final capture directories do not share a parent");
+    }
+    file_descriptor parent_descriptor = open_directory_descriptor(parent, "capture parent");
     const long rc = ::syscall(
-            SYS_renameat2, AT_FDCWD, temp.c_str(), AT_FDCWD, output.c_str(), RENAME_NOREPLACE);
+            SYS_renameat2,
+            parent_descriptor.get(),
+            temp.filename().c_str(),
+            parent_descriptor.get(),
+            output.filename().c_str(),
+            RENAME_NOREPLACE);
     if (rc != 0) {
         fail("cannot atomically publish capture directory: " + std::string(std::strerror(errno)));
+    }
+    if (::fsync(parent_descriptor.get()) != 0) {
+        const int saved_errno = errno;
+        fail("capture was atomically published but parent directory fsync failed; durability is "
+             "ambiguous and the output was left in place for manual handling: " +
+             std::string(std::strerror(saved_errno)));
     }
 }
 
@@ -1263,8 +1323,6 @@ int capture(
             offset += chunk_size;
         }
     }
-    verify_pinned_model_unchanged(model_pin);
-
     close_checked(logits, "logits.f32");
     for (std::size_t i = 0; i < layer_outputs.size(); ++i) {
         close_checked(layer_outputs[i], layer_file_name(custom.layers[i]));
@@ -1278,6 +1336,7 @@ int capture(
         fail("failed to close alignment.jsonl");
     }
     write_tokenizer(temp / "tokenizer.tsv", vocab, n_vocab);
+    verify_pinned_model_unchanged(model_pin);
 
     std::vector<std::string> layer_files;
     layer_files.reserve(custom.layers.size());
@@ -1360,6 +1419,15 @@ int capture(
     if (!manifest_output) {
         fail("failed to close raw-capture.json");
     }
+
+    fsync_regular_file(temp / "logits.f32");
+    for (const std::string & layer_file : layer_files) {
+        fsync_regular_file(temp / layer_file);
+    }
+    fsync_regular_file(temp / "alignment.jsonl");
+    fsync_regular_file(temp / "tokenizer.tsv");
+    fsync_regular_file(temp / "raw-capture.json");
+    fsync_directory(temp, "temporary capture");
 
     initialized.reset();
     atomic_publish(temp, custom.out_dir);

@@ -75,6 +75,29 @@ def test_native_capture_has_prewrite_size_caps() -> None:
     )
 
 
+def test_native_capture_durably_publishes_after_final_model_check() -> None:
+    source = SOURCE.read_text()
+    capture_body = source[source.index("int capture(") :]
+    assert capture_body.index('write_tokenizer(temp / "tokenizer.tsv"') < capture_body.index(
+        "verify_pinned_model_unchanged(model_pin)"
+    )
+    for artifact in (
+        'temp / "logits.f32"',
+        'temp / "alignment.jsonl"',
+        'temp / "tokenizer.tsv"',
+        'temp / "raw-capture.json"',
+    ):
+        assert f"fsync_regular_file({artifact})" in capture_body
+    assert "for (const std::string & layer_file : layer_files)" in capture_body
+    assert "fsync_regular_file(temp / layer_file)" in capture_body
+    assert capture_body.index('fsync_directory(temp, "temporary capture")') < capture_body.index(
+        "atomic_publish(temp, custom.out_dir)"
+    )
+    assert "RENAME_NOREPLACE" in source
+    assert "fsync(parent_descriptor.get())" in source
+    assert "durability is" in source and "ambiguous" in source
+
+
 def test_capture_schema_has_alignment_and_raw_tensor_files() -> None:
     source = SOURCE.read_text()
     for field in (
