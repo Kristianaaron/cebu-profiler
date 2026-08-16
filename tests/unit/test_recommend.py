@@ -3,6 +3,7 @@ missing evidence, incompatible backend, no pruning, blocked methods, recipe
 composition, API/UI smoke, XSS-safe rendering."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,7 @@ from model_atlas.recommend.policy import (
     canonical_stage,
     method_catalog_digest,
     method_spec,
+    validate_method_catalog,
 )
 from model_atlas.schemas.evidence import EvidenceKind
 
@@ -108,11 +110,40 @@ def test_method_catalog_is_explicit_stable_and_fail_closed() -> None:
 def test_catalog_has_no_implicit_pruning_classification() -> None:
     pruning = [spec for spec in METHOD_CATALOG if spec.family is MethodFamily.PRUNING]
     assert pruning == []
-    assert all(
-        spec.family is not MethodFamily.PRUNING
-        or StageEffectClass.PRUNING in spec.effect_classes
-        for spec in METHOD_CATALOG
+    forged = replace(
+        method_spec("exl3-primary"),
+        method="future-ultra-pruning",
+        priority=100,
+        family=MethodFamily.PRUNING,
+        effect_classes=(StageEffectClass.QUANTIZATION,),
     )
+    with pytest.raises(ValueError, match="lacks pruning effect"):
+        validate_method_catalog((*METHOD_CATALOG, forged))
+
+
+def test_catalog_priority_is_explicit_and_digest_bound() -> None:
+    priorities = [spec.priority for spec in METHOD_CATALOG]
+    assert len(priorities) == len(set(priorities))
+    original = method_spec("teacher-identity")
+    changed = replace(original, priority=100)
+    assert changed.identity_dict() != original.identity_dict()
+    assert method_catalog_digest(tuple(reversed(METHOD_CATALOG))) == method_catalog_digest()
+    changed_catalog = tuple(
+        changed if spec.method == original.method else spec for spec in METHOD_CATALOG
+    )
+    assert method_catalog_digest(changed_catalog) != method_catalog_digest()
+
+
+def test_unknown_method_cannot_build_zero_stage_recipe(tmp_path: Path) -> None:
+    from model_atlas.recommend.api import AuthError
+
+    service = RecommendationService(
+        profile_root=str(tmp_path / "profiles"),
+        work_root=str(tmp_path / "runs"),
+    )
+    with pytest.raises(AuthError) as exc:
+        service._selected_recipe(["future-ultra-pruning"])
+    assert exc.value.code == "method_unknown"
 
 
 def test_v3_string_and_object_evidence_parsing():

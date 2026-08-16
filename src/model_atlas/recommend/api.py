@@ -58,10 +58,12 @@ from model_atlas.recipe.schema import (
 from model_atlas.recipes import CompiledPlanArtifact
 from model_atlas.recipes.builtin import glm52_no_pruning_recipe
 from model_atlas.recommend.policy import (
+    METHOD_CATALOG,
     AtlasProfile,
     Recommendation,
     RecommendationPolicy,
     RecTarget,
+    method_spec,
 )
 
 # Lifetime of an opaque authorization token. After this the token is EXPIRED
@@ -84,21 +86,6 @@ class AuthError(Exception):
         self.code = code
         self.message = message
 
-
-# Policy-versioned method -> canonical no-pruning recipe stage ids. A selected
-# recommendation method contributes exactly these stages to the draft recipe;
-# dependent stages are pulled in transitively by format closure.
-_SELECTION_STAGES = {
-    "teacher-identity": ["t1-identity"],
-    "calibration": ["t2-calibration"],
-    "sensitivity": ["t3-sensitivity"],
-    "bit-allocation": ["t6-bit-allocation"],
-    "kv-optimization": ["t12-kv"],
-    "exl3-primary": ["t7-exl3"],
-    "nvfp4-substitute": ["t10-nvfp4"],
-    "modelopt-nvfp4": ["t10-nvfp4"],
-    "llm-compressor": ["t11-tail"],
-}
 
 _STAGE_ORDER = [
     "t1-identity",
@@ -670,7 +657,14 @@ class RecommendationService:
         else:
             wanted: set[str] = set()
             for method in selected:
-                wanted.update(_SELECTION_STAGES.get(method, ()))
+                try:
+                    wanted.update(method_spec(method).recipe_stage_ids)
+                except KeyError as exc:
+                    raise AuthError(
+                        400,
+                        "method_unknown",
+                        f"unknown or unclassified compression method: {method}",
+                    ) from exc
             wanted = self._format_closure(stages_by_id, wanted)
             stages = [stages_by_id[sid] for sid in _STAGE_ORDER if sid in wanted]
         recipe = base.model_copy(deep=True)
@@ -736,7 +730,9 @@ class RecommendationService:
         if compiles:
             plan = self._verified_plan_dict(recipe)
         return {
-            "selected_methods": list(selected or _SELECTION_STAGES.keys()),
+            "selected_methods": list(
+                selected or [spec.method for spec in METHOD_CATALOG]
+            ),
             "recipe_id": rid,
             "recipe_sha256": sha,
             "compiles": compiles,

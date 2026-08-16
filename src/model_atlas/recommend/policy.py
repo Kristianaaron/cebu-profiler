@@ -70,6 +70,7 @@ class MethodSpec:
     """Single fail-closed authority for a selectable Atlas method."""
 
     method: str
+    priority: int
     family: MethodFamily
     backend_id: str
     evidence_stages: tuple[str, ...]
@@ -84,6 +85,7 @@ class MethodSpec:
     def identity_dict(self) -> dict[str, Any]:
         return {
             "method": self.method,
+            "priority": self.priority,
             "family": self.family.value,
             "backend_id": self.backend_id,
             "evidence_stages": list(self.evidence_stages),
@@ -343,61 +345,92 @@ _QUANT_INTENTS = (
 
 METHOD_CATALOG: tuple[MethodSpec, ...] = (
     MethodSpec(
-        "teacher-identity", MethodFamily.ANALYSIS, "atlas_analysis_v3",
+        "teacher-identity", 1, MethodFamily.ANALYSIS, "atlas_analysis_v3",
         ("identity",), ("t1-identity",), (StageEffectClass.IDENTITY,),
         _ALL_INTENTS, "same", planning_only=True,
     ),
     MethodSpec(
-        "calibration", MethodFamily.ANALYSIS, "atlas_analysis_v3",
+        "calibration", 2, MethodFamily.ANALYSIS, "atlas_analysis_v3",
         ("corpus_semantic",), ("t2-calibration",), (StageEffectClass.PROFILING,),
         _ALL_INTENTS, "same", planning_only=True,
     ),
     MethodSpec(
-        "sensitivity", MethodFamily.ANALYSIS, "atlas_analysis_v3",
+        "sensitivity", 3, MethodFamily.ANALYSIS, "atlas_analysis_v3",
         ("spectral", "shared_structure", "routing_consistency"),
         ("t3-sensitivity",), (StageEffectClass.SENSITIVITY,), _ALL_INTENTS,
         "down", planning_only=True,
     ),
     MethodSpec(
-        "bit-allocation", MethodFamily.ALLOCATION, "atlas_analysis_v3",
+        "bit-allocation", 4, MethodFamily.ALLOCATION, "atlas_analysis_v3",
         ("global_bit_budget",), ("t6-bit-allocation",),
         (StageEffectClass.ALLOCATION,), _ALL_INTENTS, "down", planning_only=True,
         provenance_ids=("GEMQ", "MixQuant"),
     ),
     MethodSpec(
-        "nvfp4-substitute", MethodFamily.QUANTIZATION, "modelopt_nvfp4",
+        "nvfp4-substitute", 5, MethodFamily.QUANTIZATION, "modelopt_nvfp4",
         ("nvfp4_suitability",), ("t10-nvfp4",),
         (StageEffectClass.QUANTIZATION,), _QUANT_INTENTS, "down",
         routing_dependent=True, provenance_ids=("NVIDIA-ModelOpt-NVFP4",),
     ),
     MethodSpec(
-        "kv-optimization", MethodFamily.KV, "atlas_analysis_v3",
+        "kv-optimization", 6, MethodFamily.KV, "atlas_analysis_v3",
         ("kv_budget",), ("t12-kv",), (StageEffectClass.KV,), _ALL_INTENTS,
         "down", planning_only=True,
     ),
     MethodSpec(
-        "exl3-primary", MethodFamily.QUANTIZATION, "exl3",
+        "exl3-primary", 7, MethodFamily.QUANTIZATION, "exl3",
         ("global_bit_budget",), ("t7-exl3",),
         (StageEffectClass.QUANTIZATION,), _QUANT_INTENTS, "down",
         routing_dependent=True, provenance_ids=("EXL3",),
     ),
     MethodSpec(
-        "llm-compressor", MethodFamily.QUANTIZATION, "llm_compressor",
+        "llm-compressor", 8, MethodFamily.QUANTIZATION, "llm_compressor",
         ("global_bit_budget",), ("t11-tail",),
         (StageEffectClass.QUANTIZATION,), _QUANT_INTENTS, "down",
         routing_dependent=True, provenance_ids=("LLM-Compressor",),
     ),
     MethodSpec(
-        "modelopt-nvfp4", MethodFamily.QUANTIZATION, "modelopt_nvfp4",
+        "modelopt-nvfp4", 9, MethodFamily.QUANTIZATION, "modelopt_nvfp4",
         ("nvfp4_suitability",), ("t10-nvfp4",),
         (StageEffectClass.QUANTIZATION,), _QUANT_INTENTS, "down",
         routing_dependent=True, provenance_ids=("NVIDIA-ModelOpt-NVFP4",),
     ),
 )
 
+def validate_method_catalog(specs: tuple[MethodSpec, ...]) -> None:
+    ids = [spec.method for spec in specs]
+    priorities = [spec.priority for spec in specs]
+    if len(ids) != len(set(ids)):
+        raise ValueError("duplicate method IDs in METHOD_CATALOG")
+    if len(priorities) != len(set(priorities)) or any(value < 1 for value in priorities):
+        raise ValueError("method priorities must be unique positive integers")
+    for spec in specs:
+        if not (
+            spec.method
+            and spec.backend_id
+            and spec.evidence_stages
+            and spec.recipe_stage_ids
+            and spec.effect_classes
+            and spec.compatible_intents
+        ):
+            raise ValueError(f"incomplete MethodSpec identity: {spec.method!r}")
+        effects = set(spec.effect_classes)
+        if spec.family == MethodFamily.PRUNING and StageEffectClass.PRUNING not in effects:
+            raise ValueError(f"pruning MethodSpec lacks pruning effect: {spec.method}")
+        if (
+            spec.family == MethodFamily.QUANTIZATION
+            and StageEffectClass.QUANTIZATION not in effects
+        ):
+            raise ValueError(f"quantization MethodSpec lacks quantization effect: {spec.method}")
+        if spec.planning_only and effects & {
+            StageEffectClass.PRUNING,
+            StageEffectClass.QUANTIZATION,
+        }:
+            raise ValueError(f"planning-only MethodSpec claims derivative effect: {spec.method}")
+
+
+validate_method_catalog(METHOD_CATALOG)
 _METHOD_SPECS = {spec.method: spec for spec in METHOD_CATALOG}
-if len(_METHOD_SPECS) != len(METHOD_CATALOG):
-    raise RuntimeError("duplicate method IDs in METHOD_CATALOG")
 
 
 def method_spec(method: str) -> MethodSpec:
@@ -408,13 +441,14 @@ def method_spec(method: str) -> MethodSpec:
         raise KeyError(f"unknown or unclassified compression method: {method}") from exc
 
 
-def method_catalog_digest() -> str:
+def method_catalog_digest(specs: tuple[MethodSpec, ...] = METHOD_CATALOG) -> str:
+    validate_method_catalog(specs)
     payload = canonical_json(
         {
             "catalog_version": METHOD_CATALOG_VERSION,
             "methods": [
                 spec.identity_dict()
-                for spec in sorted(METHOD_CATALOG, key=lambda item: item.method)
+                for spec in sorted(specs, key=lambda item: item.method)
             ],
         }
     )
@@ -751,8 +785,7 @@ class RecommendationPolicy:
         return False
 
     def _rank_for(self, method: str) -> int:
-        method_spec(method)
-        return list(_METHOD_SPECS).index(method) + 1
+        return method_spec(method).priority
 
     def _mem_dir(self, method: str) -> str:
         return method_spec(method).memory_direction
