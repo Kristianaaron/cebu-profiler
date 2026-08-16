@@ -42,8 +42,8 @@ class RecConfidence(StrEnum):
     INSUFFICIENT = "insufficient"
 
 
-RECOMMENDATION_POLICY_VERSION = "policy-v3-recipe-templates"
-METHOD_CATALOG_VERSION = 2
+RECOMMENDATION_POLICY_VERSION = "policy-v4-calibration-aware"
+METHOD_CATALOG_VERSION = 3
 
 
 class CompressionIntent(StrEnum):
@@ -174,7 +174,21 @@ class StageEvidence:
                 return cls(
                     stage_id=key, kind="unknown", present=False, coverage=None, detail=detail
                 )
-            return cls(stage_id=key, kind=kind, present=bool(present), coverage=coverage)
+            raw_detail = v.get("detail", "")
+            if not isinstance(raw_detail, str):
+                return cls(
+                    stage_id=key,
+                    kind="unknown",
+                    present=False,
+                    detail="evidence detail must be a string",
+                )
+            return cls(
+                stage_id=key,
+                kind=kind,
+                present=bool(present),
+                coverage=coverage,
+                detail=raw_detail,
+            )
         # non-string/non-dict evidence value: refuse to guess — treat as
         # absent rather than invent a claim (unknown stays unknown).
         return cls(
@@ -184,6 +198,10 @@ class StageEvidence:
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_GLM52_RISK_DETAIL_RE = re.compile(
+    r"^risk_artifact_sha256=([0-9a-f]{64});"
+    r"tensor_plan_sha256=([0-9a-f]{64})$"
+)
 
 
 @dataclass(frozen=True)
@@ -195,26 +213,34 @@ class ProfileExecutionBinding:
     checkpoint_revision: str
     source_manifest_digest: str
     source_sha256: tuple[tuple[str, str], ...]
-    calibration_id: str
-    corpus_name: str
-    calibration_seed: int
-    calibration_partition: str
-    corpus_records_path: str
     tokenizer_hash: str
+    calibration_id: str = ""
+    corpus_name: str = ""
+    calibration_seed: int = 0
+    calibration_partition: str = ""
+    corpus_records_path: str = ""
 
     def __post_init__(self) -> None:
         required = {
             "source_id": self.source_id,
             "checkpoint_path": self.checkpoint_path,
             "checkpoint_revision": self.checkpoint_revision,
-            "calibration_id": self.calibration_id,
-            "corpus_name": self.corpus_name,
-            "calibration_partition": self.calibration_partition,
-            "corpus_records_path": self.corpus_records_path,
             "tokenizer_hash": self.tokenizer_hash,
         }
         if any(not isinstance(value, str) or not value.strip() for value in required.values()):
             raise ValueError("profile execution identity fields must be nonempty")
+        calibration = (
+            self.calibration_id,
+            self.corpus_name,
+            self.calibration_partition,
+            self.corpus_records_path,
+        )
+        if any(not isinstance(value, str) for value in calibration):
+            raise ValueError("calibration identity fields must be strings")
+        if (any(calibration) or self.calibration_seed != 0) and not all(
+            value.strip() for value in calibration
+        ):
+            raise ValueError("calibration identity must be complete when provided")
         if not self.source_manifest_digest and not self.source_sha256:
             raise ValueError("profile execution identity requires source hashes")
         digests = [self.tokenizer_hash]
@@ -235,6 +261,12 @@ class ProfileExecutionBinding:
                 raise ValueError(f"{name} must be a nonempty string")
             return raw
 
+        def optional_string(name: str) -> str:
+            raw = data.get(name, "")
+            if not isinstance(raw, str):
+                raise ValueError(f"{name} must be a string when provided")
+            return raw
+
         hashes = data.get("source_sha256") or {}
         if not isinstance(hashes, dict):
             raise ValueError("source_sha256 must be a path-to-digest object")
@@ -252,30 +284,43 @@ class ProfileExecutionBinding:
             checkpoint_revision=required_string("checkpoint_revision"),
             source_manifest_digest=manifest,
             source_sha256=tuple(sorted(normalized_hashes)),
-            calibration_id=required_string("calibration_id"),
-            corpus_name=required_string("corpus_name"),
-            calibration_seed=int(data.get("calibration_seed", 0)),
-            calibration_partition=required_string(
-                "calibration_partition", default="atlas_calibration"
-            ),
-            corpus_records_path=required_string("corpus_records_path"),
             tokenizer_hash=required_string("tokenizer_hash"),
+            calibration_id=optional_string("calibration_id"),
+            corpus_name=optional_string("corpus_name"),
+            calibration_seed=int(data.get("calibration_seed", 0)),
+            calibration_partition=optional_string("calibration_partition"),
+            corpus_records_path=optional_string("corpus_records_path"),
+        )
+
+    @property
+    def has_calibration(self) -> bool:
+        return bool(
+            self.calibration_id
+            and self.corpus_name
+            and self.calibration_partition
+            and self.corpus_records_path
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "source_id": self.source_id,
             "checkpoint_path": self.checkpoint_path,
             "checkpoint_revision": self.checkpoint_revision,
             "source_manifest_digest": self.source_manifest_digest,
             "source_sha256": dict(self.source_sha256),
-            "calibration_id": self.calibration_id,
-            "corpus_name": self.corpus_name,
-            "calibration_seed": self.calibration_seed,
-            "calibration_partition": self.calibration_partition,
-            "corpus_records_path": self.corpus_records_path,
             "tokenizer_hash": self.tokenizer_hash,
         }
+        if self.has_calibration:
+            payload.update(
+                {
+                    "calibration_id": self.calibration_id,
+                    "corpus_name": self.corpus_name,
+                    "calibration_seed": self.calibration_seed,
+                    "calibration_partition": self.calibration_partition,
+                    "corpus_records_path": self.corpus_records_path,
+                }
+            )
+        return payload
 
 
 @dataclass(frozen=True)
@@ -518,7 +563,7 @@ METHOD_CATALOG: tuple[MethodSpec, ...] = (
         "llamacpp-gguf-mixed", 10, MethodFamily.QUANTIZATION, "llamacpp_gguf_mixed",
         ("nvfp4_suitability",), ("llamacpp-gguf-mixed",),
         (StageEffectClass.QUANTIZATION,), (CompressionIntent.QUANTIZE_ONLY,), "down",
-        routing_dependent=True,
+        routing_dependent=False,
         provenance_ids=("llama.cpp", "glm52-nvfp4-quant-risk", "glm52-gguf-tensor-plan"),
         recipe_template="llamacpp_gguf_mixed",
     ),
@@ -549,7 +594,7 @@ def validate_method_catalog(specs: tuple[MethodSpec, ...]) -> None:
             or spec.recipe_stage_ids != ("llamacpp-gguf-mixed",)
             or spec.effect_classes != (StageEffectClass.QUANTIZATION,)
             or spec.compatible_intents != (CompressionIntent.QUANTIZE_ONLY,)
-            or not spec.routing_dependent
+            or spec.routing_dependent
             or spec.planning_only
         ):
             raise ValueError(f"llama.cpp template contract mismatch: {spec.method}")
@@ -848,6 +893,16 @@ class RecommendationPolicy:
                     "evidence cannot be trusted",
                 )
             )
+        if method == "llamacpp-gguf-mixed":
+            risk = self._evidence_for(profile, "nvfp4_suitability")
+            if risk is None or _GLM52_RISK_DETAIL_RE.fullmatch(risk.detail) is None:
+                blockers.append(
+                    RecBlock(
+                        "risk_lineage_missing",
+                        "mixed GGUF requires immutable risk-artifact and "
+                        "tensor-plan SHA-256 lineage",
+                    )
+                )
         # evidence: missing evidence for any required stage -> LOW/INSUFFICIENT
         # confidence, and if the default policy requires it, BLOCKED.
         missing: list[str] = []

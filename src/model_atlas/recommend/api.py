@@ -828,7 +828,7 @@ class RecommendationService:
                 raise AuthError(
                     409,
                     "profile_execution_identity_missing",
-                    "GGUF derivative requires source, calibration, and tokenizer identity",
+                    "GGUF derivative requires source and tokenizer identity",
                 )
             if session.intent != CompressionIntent.QUANTIZE_ONLY or not session.no_pruning:
                 raise AuthError(
@@ -844,13 +844,8 @@ class RecommendationService:
                 manifest_digest=binding.source_manifest_digest,
             )
             recipe = llamacpp_gguf_mixed_recipe(source)
-            recipe.calibration = CalibrationIdentity(
-                calibration_id=binding.calibration_id,
-                corpus_name=binding.corpus_name,
-                seed=binding.calibration_seed,
-                partition=binding.calibration_partition,
-                corpus_records_path=binding.corpus_records_path,
-                tokenizer_sha256=binding.tokenizer_hash,
+            recipe.calibration = recipe.calibration.model_copy(
+                update={"tokenizer_sha256": binding.tokenizer_hash}
             )
             recipe.hardware = recipe.hardware.model_copy(
                 update={
@@ -874,14 +869,15 @@ class RecommendationService:
                 sha256=dict(binding.source_sha256),
                 manifest_digest=binding.source_manifest_digest,
             )
-            base.calibration = CalibrationIdentity(
-                calibration_id=binding.calibration_id,
-                corpus_name=binding.corpus_name,
-                seed=binding.calibration_seed,
-                partition=binding.calibration_partition,
-                corpus_records_path=binding.corpus_records_path,
-                tokenizer_sha256=binding.tokenizer_hash,
-            )
+            if binding.has_calibration:
+                base.calibration = CalibrationIdentity(
+                    calibration_id=binding.calibration_id,
+                    corpus_name=binding.corpus_name,
+                    seed=binding.calibration_seed,
+                    partition=binding.calibration_partition,
+                    corpus_records_path=binding.corpus_records_path,
+                    tokenizer_sha256=binding.tokenizer_hash,
+                )
         if session is not None:
             base.hardware = base.hardware.model_copy(
                 update={
@@ -915,13 +911,15 @@ class RecommendationService:
             StageEffectClass.REPAIR,
             StageEffectClass.PRUNING,
         }
-        if session is not None and binding is None and any(
-            stage.effect_class in derivative_effects for stage in stages
+        if (
+            session is not None
+            and (binding is None or not binding.has_calibration)
+            and any(stage.effect_class in derivative_effects for stage in stages)
         ):
             raise AuthError(
                 409,
                 "profile_execution_identity_missing",
-                "derivative recipe requires source, calibration, and tokenizer identity",
+                "this derivative recipe requires source, calibration, and tokenizer identity",
             )
         recipe = base.model_copy(deep=True)
         recipe.stages = stages
@@ -1787,7 +1785,12 @@ def _profile_to_dict(profile: AtlasProfile) -> dict[str, Any]:
         "hardware_model_arch": profile.hardware_model_arch,
         "routing_consistency_passed": profile.routing_consistency_passed,
         "evidence": {
-            k: {"kind": v.kind, "present": v.present, "coverage": v.coverage}
+            k: {
+                "kind": v.kind,
+                "present": v.present,
+                "coverage": v.coverage,
+                "detail": v.detail,
+            }
             for k, v in profile.evidence.items()
         },
         "notes": profile.notes,

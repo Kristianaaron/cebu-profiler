@@ -80,6 +80,31 @@ def _execution_binding(checkpoint_path: str = "/models/glm") -> ProfileExecution
     )
 
 
+def _source_only_binding(checkpoint_path: str = "/models/glm") -> ProfileExecutionBinding:
+    return replace(
+        _execution_binding(checkpoint_path),
+        calibration_id="",
+        corpus_name="",
+        calibration_seed=0,
+        calibration_partition="",
+        corpus_records_path="",
+    )
+
+
+def test_execution_binding_allows_explicit_calibration_free_identity_but_not_partial() -> None:
+    binding = _source_only_binding()
+    assert not binding.has_calibration
+    payload = binding.to_dict()
+    assert "calibration_id" not in payload
+    assert ProfileExecutionBinding.from_dict(payload) == binding
+    with pytest.raises(ValueError, match="complete"):
+        replace(binding, calibration_id="partial")
+    malformed = dict(payload)
+    malformed["calibration_id"] = None
+    with pytest.raises(ValueError, match="string"):
+        ProfileExecutionBinding.from_dict(malformed)
+
+
 def test_deterministic_ranking_and_stable_ids():
     reg = build_default_registry()
     pol = RecommendationPolicy(reg)
@@ -124,7 +149,7 @@ def test_intent_changes_identity_and_reports_missing_families() -> None:
 
 
 def test_method_catalog_is_explicit_stable_and_fail_closed() -> None:
-    assert METHOD_CATALOG_VERSION == 2
+    assert METHOD_CATALOG_VERSION == 3
     assert len(METHOD_CATALOG) == len({spec.method for spec in METHOD_CATALOG})
     assert len(method_catalog_digest()) == 64
     for spec in METHOD_CATALOG:
@@ -159,7 +184,8 @@ def test_profile_execution_binding_is_strict_and_identity_bound(tmp_path: Path) 
             }
         )
     for field in ("checkpoint_revision", "corpus_records_path"):
-        with pytest.raises(ValueError, match="must be nonempty"):
+        expected = "must be nonempty" if field == "checkpoint_revision" else "complete"
+        with pytest.raises(ValueError, match=expected):
             ProfileExecutionBinding(
                 **{
                     **_execution_binding().__dict__,
@@ -169,7 +195,12 @@ def test_profile_execution_binding_is_strict_and_identity_bound(tmp_path: Path) 
         for malformed in (None, 7, "   "):
             serialized = _execution_binding().to_dict()
             serialized[field] = malformed
-            with pytest.raises(ValueError, match=f"{field} must be a nonempty string"):
+            expected_serialized = (
+                f"{field} must be a nonempty string"
+                if field == "checkpoint_revision"
+                else f"{field} must be a string when provided|complete"
+            )
+            with pytest.raises(ValueError, match=expected_serialized):
                 ProfileExecutionBinding.from_dict(serialized)
     whitespace_path = _execution_binding().to_dict()
     whitespace_path["source_manifest_digest"] = ""
@@ -418,6 +449,7 @@ def test_llamacpp_catalog_template_and_bound_recipe_are_exact(tmp_path: Path) ->
     assert spec.recipe_template == "llamacpp_gguf_mixed"
     assert spec.compatible_intents == (CompressionIntent.QUANTIZE_ONLY,)
     assert spec.effect_classes == (StageEffectClass.QUANTIZATION,)
+    assert not spec.routing_dependent
 
     profile = AtlasProfile(
         **{
@@ -454,6 +486,58 @@ def test_llamacpp_catalog_template_and_bound_recipe_are_exact(tmp_path: Path) ->
     assert len(str(snapshot["execution_binding_sha256"])) == 64
 
 
+def test_llamacpp_uses_source_only_binding_without_fabricated_calibration(
+    tmp_path: Path,
+) -> None:
+    profile = AtlasProfile(
+        profile_id="weight-only-gguf",
+        model="glm-5.2-nvfp4",
+        evidence={
+            "nvfp4_suitability": StageEvidence(
+                "nvfp4_suitability",
+                "estimated",
+                detail=(
+                    "risk_artifact_sha256=" + "c" * 64
+                    + ";tensor_plan_sha256=" + "d" * 64
+                ),
+            )
+        },
+        routing_consistency_passed=None,
+        execution=_source_only_binding(str(tmp_path / "glm-source")),
+    )
+    registry = build_default_registry()
+    backend = registry.get("llamacpp_gguf_mixed")
+    assert backend is not None
+    backend.availability_probe = lambda: (True, backend.version, "test probe")
+    backend._availability_cached = None
+    service = RecommendationService(
+        registry=registry,
+        profile_root=str(tmp_path / "profiles"),
+        work_root=str(tmp_path / "runs"),
+    )
+    saved = service.save_profile(profile)
+    imported = service.import_profile(saved)
+    assert imported.evidence["nvfp4_suitability"].detail == (
+        "risk_artifact_sha256=" + "c" * 64
+        + ";tensor_plan_sha256=" + "d" * 64
+    )
+    auth = service.authorize(profile, RecTarget(memory_target_gib=219.0))
+    assert "llamacpp-gguf-mixed" in auth["authorized_methods"]
+    method = next(
+        item
+        for item in auth["recommendation"]["methods"]
+        if item["method"] == "llamacpp-gguf-mixed"
+    )
+    assert not any(block["code"] == "routing_consistency_failed" for block in method["blockers"])
+    recipe = service._selected_recipe(
+        ["llamacpp-gguf-mixed"], session=service.sessions[auth["token"]]
+    )
+    assert recipe.calibration.calibration_id == "not-used-llamacpp-gguf"
+    assert recipe.calibration.corpus_name == "none"
+    assert recipe.calibration.corpus_records_path is None
+    assert recipe.calibration.tokenizer_sha256 == "b" * 64
+
+
 def test_llamacpp_authorize_preview_is_executable_with_fresh_fake_tool_pin(
     tmp_path: Path,
 ) -> None:
@@ -473,6 +557,17 @@ def test_llamacpp_authorize_preview_is_executable_with_fresh_fake_tool_pin(
             **_full_profile().__dict__,
             "profile_id": "bound-gguf-preview",
             "routing_consistency_passed": True,
+            "evidence": {
+                **_full_profile().evidence,
+                "nvfp4_suitability": StageEvidence(
+                    "nvfp4_suitability",
+                    "estimated",
+                    detail=(
+                        "risk_artifact_sha256=" + "c" * 64
+                        + ";tensor_plan_sha256=" + "d" * 64
+                    ),
+                ),
+            },
             "execution": _execution_binding(str(tmp_path / "glm-source")),
         }
     )

@@ -103,9 +103,9 @@ def _profiled_profile() -> AtlasProfile:
 
 def test_version_constants_are_frozen() -> None:
     """The policy version is the catalog-bearing release and the catalog version
-    is pinned at 1 (contract item 10)."""
-    assert RECOMMENDATION_POLICY_VERSION == "policy-v2-catalog"
-    assert METHOD_CATALOG_VERSION == 1
+    is pinned for the calibration-aware recipe contract."""
+    assert RECOMMENDATION_POLICY_VERSION == "policy-v4-calibration-aware"
+    assert METHOD_CATALOG_VERSION == 3
 
 
 def test_every_method_id_is_unique_and_resolvable() -> None:
