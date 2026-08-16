@@ -984,7 +984,7 @@ def test_preview_uses_one_session_bound_recipe_identity(tmp_path: Path) -> None:
         profile_root=str(tmp_path / "profiles"), work_root=str(tmp_path / "runs")
     )
     svc.save_profile(_full_profile())
-    auth = svc.authorize("k3-mini", RecTarget(memory_target_gib=73.5))
+    auth = svc.authorize("k3-mini", memory_target_gib=73.5)
     preview = svc.preview_selection(auth["token"], auth["authorized_methods"])
     package = svc.pending_previews[preview["preview_id"]]
     _, _, actual_sha = svc.plane.compiler.validate(package.recipe)

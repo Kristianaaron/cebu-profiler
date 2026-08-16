@@ -413,6 +413,9 @@ class RecommendationService:
             memory_target_gib=memory_target_gib,
             allow_pruning=allow_pruning,
         )
+        # Bind the session to the policy's canonical target, including an
+        # explicit memory_target_gib override.
+        effective_target = rec.target
         authorized = sorted(m.method for m in rec.methods)
         token = secrets.token_urlsafe(24)
         constraints_snapshot: dict[str, object] = {
