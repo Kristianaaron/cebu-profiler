@@ -13,6 +13,7 @@ from model_atlas.glm52_source_profile import (
     build_resumable_source_manifest,
 )
 from model_atlas.jobs.artifacts import source_manifest_digest
+from model_atlas.recommend.policy import AtlasProfile
 
 
 def _write(path: Path, text: str) -> None:
@@ -49,7 +50,9 @@ def test_manifest_is_job_engine_compatible_resumable_and_prunes_stale(tmp_path: 
     )
     assert resumed.hashed_files == 1
     assert resumed.reused_files == 1
-    assert set(resumed.manifest["files"]) == {"a.txt", "new.txt"}
+    resumed_files = resumed.manifest["files"]
+    assert isinstance(resumed_files, dict)
+    assert set(resumed_files) == {"a.txt", "new.txt"}
 
 
 def test_manifest_rehashes_only_when_stat_changes(tmp_path: Path) -> None:
@@ -63,7 +66,9 @@ def test_manifest_rehashes_only_when_stat_changes(tmp_path: Path) -> None:
     result = build_resumable_source_manifest(source, checkpoint_path=checkpoint, output_path=output)
     assert result.hashed_files == 1
     assert result.reused_files == 1
-    assert result.manifest["files"]["b.txt"] == _sha(source / "b.txt")
+    result_files = result.manifest["files"]
+    assert isinstance(result_files, dict)
+    assert result_files["b.txt"] == _sha(source / "b.txt")
 
 
 def test_manifest_rejects_symlink_and_never_follows_it(tmp_path: Path) -> None:
@@ -118,15 +123,33 @@ def test_profile_binds_completed_manifest_and_never_fabricates_calibration(tmp_p
         tensor_plan_path=plan,
         output_path=output,
     )
-    assert profile["calibration"] is None
-    assert profile["evidence"] == {
-        "nvfp4_suitability": profile["evidence"]["nvfp4_suitability"],
+    evidence = profile["evidence"]
+    assert isinstance(evidence, dict)
+    nvfp4 = evidence["nvfp4_suitability"]
+    assert isinstance(nvfp4, dict)
+    assert evidence == {
+        "nvfp4_suitability": nvfp4,
         "routing": None,
     }
-    assert profile["quality_metrics"] == {"kld": None, "cka": None}
-    assert profile["execution"]["source"]["manifest_digest"] == source_manifest_digest(
-        json.loads(manifest.read_text())
+    assert "calibration" not in profile
+    assert "quality_metrics" not in profile
+    assert nvfp4["detail"] == (
+        f"risk_artifact_sha256={_sha(risk)};tensor_plan_sha256={_sha(plan)}"
     )
+    assert profile["execution"] == {
+        "source_id": "nvidia/GLM-5.2-NVFP4",
+        "checkpoint_path": str(source.resolve()),
+        "checkpoint_revision": "revision",
+        "source_manifest_digest": source_manifest_digest(json.loads(manifest.read_text())),
+        "source_sha256": {},
+        "tokenizer_hash": _sha(tokenizer),
+    }
+    imported = AtlasProfile.from_dict(json.loads(output.read_text()))
+    assert imported.execution is not None
+    assert imported.execution.source_manifest_digest == profile["execution"][
+        "source_manifest_digest"
+    ]
+    assert imported.execution.has_calibration is False
     assert output.exists()
 
 

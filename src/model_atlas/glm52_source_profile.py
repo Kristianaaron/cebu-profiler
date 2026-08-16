@@ -22,6 +22,7 @@ from model_atlas.jobs.artifacts import source_manifest_digest
 
 _HASH_CHUNK_BYTES = 4 * 1024 * 1024
 _SHA256_HEX_LENGTH = 64
+_GLM52_SOURCE_ID = "nvidia/GLM-5.2-NVFP4"
 
 
 class SourceProfileError(RuntimeError):
@@ -317,30 +318,26 @@ def build_glm52_mixed_gguf_profile(
     profile: dict[str, object] = {
         "schema_version": 1,
         "profile_kind": "glm52_mixed_gguf_quantize_only",
+        "model": _GLM52_SOURCE_ID,
         "execution": {
-            "source": {
-                "path": expected_source,
-                "revision": source_revision,
-                "manifest_digest": manifest_digest,
-            },
-            "tokenizer": {"path": str(tokenizer.resolve()), "sha256": tokenizer_sha256},
+            "source_id": _GLM52_SOURCE_ID,
+            "checkpoint_path": expected_source,
+            "checkpoint_revision": source_revision,
+            "source_manifest_digest": manifest_digest,
+            "source_sha256": {},
+            "tokenizer_hash": tokenizer_sha256,
         },
         "evidence": {
             "nvfp4_suitability": {
                 "kind": "estimated",
                 "present": True,
-                "detail": {
-                    "risk_sha256": risk_sha256,
-                    "tensor_plan_sha256": tensor_plan_sha256,
-                    "config_sha256": config_sha256,
-                    "index_sha256": index_sha256,
-                    "note": risk.get("note"),
-                },
+                "detail": (
+                    f"risk_artifact_sha256={risk_sha256};"
+                    f"tensor_plan_sha256={tensor_plan_sha256}"
+                ),
             },
             "routing": None,
         },
-        "calibration": None,
-        "quality_metrics": {"kld": None, "cka": None},
     }
     _atomic_json(Path(output_path), profile)
     return profile
