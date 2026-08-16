@@ -12,7 +12,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
+import stat
 import statistics
 import struct
 from dataclasses import asdict, dataclass
@@ -34,6 +36,26 @@ _MAX_HEADER_BYTES = 64 * 1024 * 1024
 _MAX_HEADER_CACHE_BYTES = 512 * 1024 * 1024
 _MAX_SAMPLE_BYTES = 1 << 20
 _MAX_DECODED_ELEMENTS = 1 << 17
+
+
+def _read_bounded_regular(path: Path, limit: int, label: str) -> bytes:
+    """Read one immutable metadata snapshot without a stat/reopen race."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(f"{label} cannot be opened safely") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(f"{label} must be a regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            payload = handle.read(limit + 1)
+    finally:
+        os.close(descriptor)
+    if len(payload) > limit:
+        raise ValueError(f"{label} exceeds metadata bound")
+    return payload
 
 
 @dataclass(frozen=True)
@@ -77,9 +99,9 @@ class _CheckpointReader:
     def __init__(self, root: Path) -> None:
         self.root = root
         self.index_path = root / "model.safetensors.index.json"
-        if self.index_path.stat().st_size > _MAX_INDEX_BYTES:
-            raise ValueError("checkpoint index exceeds metadata bound")
-        index_bytes = self.index_path.read_bytes()
+        index_bytes = _read_bounded_regular(
+            self.index_path, _MAX_INDEX_BYTES, "checkpoint index"
+        )
         index = json.loads(index_bytes)
         weight_map = index.get("weight_map")
         if not isinstance(weight_map, dict) or not weight_map:
@@ -87,9 +109,9 @@ class _CheckpointReader:
         self.weight_map = {str(k): str(v) for k, v in weight_map.items()}
         self.index_sha256 = hashlib.sha256(index_bytes).hexdigest()
         config_path = root / "config.json"
-        if config_path.stat().st_size > _MAX_CONFIG_BYTES:
-            raise ValueError("checkpoint config exceeds metadata bound")
-        config_bytes = config_path.read_bytes()
+        config_bytes = _read_bounded_regular(
+            config_path, _MAX_CONFIG_BYTES, "checkpoint config"
+        )
         self.config_sha256 = hashlib.sha256(config_bytes).hexdigest()
         self._headers: dict[str, tuple[int, dict[str, Any]]] = {}
         self._header_cache_bytes = 0

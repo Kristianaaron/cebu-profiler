@@ -1,4 +1,5 @@
 import json
+import os
 import struct
 from pathlib import Path
 
@@ -81,6 +82,28 @@ def test_profile_rejects_unbounded_sampling(tmp_path: Path) -> None:
         profile_nvfp4_quant_risk(checkpoint, sample_experts=17)
     with pytest.raises(ValueError, match="sample_rows"):
         profile_nvfp4_quant_risk(checkpoint, sample_rows=5)
+
+
+def test_profile_metadata_reads_are_single_handle_bounded_regular_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkpoint = _checkpoint(tmp_path / "checkpoint")
+
+    def reject_read_bytes(_path: Path) -> bytes:
+        raise AssertionError("metadata must not use unbounded Path.read_bytes")
+
+    monkeypatch.setattr(Path, "read_bytes", reject_read_bytes)
+    profile_nvfp4_quant_risk(
+        checkpoint, sample_experts=1, sample_rows=1, sensitive_fraction=0.34
+    )
+
+    config = checkpoint / "config.json"
+    config.unlink()
+    os.mkfifo(config)
+    with pytest.raises(ValueError, match="regular file"):
+        profile_nvfp4_quant_risk(
+            checkpoint, sample_experts=1, sample_rows=1, sensitive_fraction=0.34
+        )
 
 
 def test_percentile_ties_receive_the_same_midrank() -> None:
