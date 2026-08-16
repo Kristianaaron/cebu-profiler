@@ -48,6 +48,7 @@ def _sha256_file(path: Path) -> str:
             digest.update(chunk)
     return digest.hexdigest()
 
+
 # dtype -> bytes-per-element in safetensors naming = numpy dtypes
 _DTYPE_BYTES = {
     "F64": 8,
@@ -343,9 +344,7 @@ def _gguf_skip_value(stream: BinaryIO, value_type: int, *, depth: int = 0) -> No
         _gguf_skip_value(stream, element_type, depth=depth + 1)
 
 
-def _gguf_structure(
-    backend_id: str, staged_dir: Path, _fmt: str
-) -> CheckpointValidationResult:
+def _gguf_structure(backend_id: str, staged_dir: Path, _fmt: str) -> CheckpointValidationResult:
     del backend_id
     files = [path for path in sorted(staged_dir.iterdir()) if path.is_file()]
     models = [path for path in files if path.suffix == ".gguf"]
@@ -376,26 +375,92 @@ def _gguf_structure(
                         raise ValueError("invalid GGUF alignment")
                 else:
                     _gguf_skip_value(stream, value_type)
-            offsets: list[int] = []
+            # Pinned ggml type traits: type id -> (elements per block, bytes per block).
+            # Removed/deprecated ids are deliberately absent and therefore fail closed.
+            type_traits = {
+                0: (1, 4),
+                1: (1, 2),
+                2: (32, 18),
+                3: (32, 20),
+                6: (32, 22),
+                7: (32, 24),
+                8: (32, 34),
+                9: (32, 36),
+                10: (256, 84),
+                11: (256, 110),
+                12: (256, 144),
+                13: (256, 176),
+                14: (256, 210),
+                15: (256, 292),
+                16: (256, 66),
+                17: (256, 74),
+                18: (256, 98),
+                19: (256, 50),
+                20: (32, 18),
+                21: (256, 110),
+                22: (256, 82),
+                23: (256, 136),
+                24: (1, 1),
+                25: (1, 2),
+                26: (1, 4),
+                27: (1, 8),
+                28: (1, 8),
+                29: (256, 56),
+                30: (1, 2),
+                34: (256, 54),
+                35: (256, 66),
+                39: (32, 17),
+                40: (64, 36),
+                41: (128, 18),
+                42: (64, 18),
+            }
+            tensors: list[tuple[str, int, int]] = []
+            names: set[str] = set()
             for _ in range(tensor_count):
-                _gguf_string(stream)
+                name = _gguf_string(stream, decode=True)
+                if not name or name in names:
+                    raise ValueError("GGUF tensor names must be nonempty and unique")
+                names.add(name)
                 dimensions = _gguf_u32(stream)
-                if dimensions > 8:
+                if dimensions == 0 or dimensions > 8:
                     raise ValueError("GGUF tensor dimension count exceeds bound")
+                shape = []
                 for _ in range(dimensions):
-                    if _gguf_u64(stream) == 0:
+                    dimension = _gguf_u64(stream)
+                    if dimension == 0:
                         raise ValueError("GGUF tensor dimension is zero")
+                    shape.append(dimension)
                 tensor_type = _gguf_u32(stream)
-                if tensor_type > 1024:
-                    raise ValueError("GGUF tensor type exceeds bound")
-                offsets.append(_gguf_u64(stream))
+                trait = type_traits.get(tensor_type)
+                if trait is None:
+                    raise ValueError(f"unsupported GGUF tensor type {tensor_type}")
+                block_size, type_size = trait
+                if shape[0] % block_size:
+                    raise ValueError("GGUF tensor row is not block aligned")
+                blocks = shape[0] // block_size
+                for dimension in shape[1:]:
+                    blocks *= dimension
+                payload_size = blocks * type_size
+                if payload_size <= 0 or payload_size > file_size:
+                    raise ValueError("GGUF tensor payload size exceeds file bound")
+                tensors.append((name, _gguf_u64(stream), payload_size))
             header_end = stream.tell()
             data_start = (header_end + alignment - 1) // alignment * alignment
             if data_start > file_size:
                 raise ValueError("GGUF aligned header exceeds file size")
             data_size = file_size - data_start
-            if any(offset >= data_size for offset in offsets):
-                raise ValueError("GGUF tensor offset lies outside data section")
+            spans: list[tuple[int, int, str]] = []
+            for name, offset, payload_size in tensors:
+                end = offset + payload_size
+                if offset % alignment or offset >= data_size or end > data_size:
+                    raise ValueError("GGUF tensor payload lies outside data section")
+                spans.append((offset, end, name))
+            spans.sort()
+            for previous, current in zip(spans, spans[1:], strict=False):
+                if current[0] < previous[1]:
+                    raise ValueError(
+                        f"GGUF tensor payloads overlap: {previous[2]} and {current[2]}"
+                    )
     except (OSError, ValueError, struct.error) as exc:
         return CheckpointValidationResult(False, str(exc))
     digest = _sha256_file(model)

@@ -6,7 +6,9 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -21,6 +23,8 @@ from model_atlas.recipe.schema import RecipeStatus
 
 BACKEND_ID = "llamacpp_gguf_mixed"
 PINNED_COMMIT = "4df29be4f4c3673f428170fda944a5b19f743bb8"
+EXPECTED_CONVERTER_SHA256 = "e38975e1c68d98ac1664dfd530616eb35c72294382a4dd873d4746b23f27779f"
+EXPECTED_CPU_QUANTIZER_SHA256 = "536a0cd9cafe3172d638ca6eb29402661d05c2d8954631ef2f6f0fac6fb78e48"
 DEFAULT_TOOLCHAIN_ROOT = Path("/home/kristianaaron/tmp/atlas-toolchains/llama.cpp")
 DEFAULT_PYTHON = Path("/home/kristianaaron/ai-lab/venvs/vllm/bin/python")
 CPU_QUANTIZER_RELATIVE_PATH = Path("build-atlas-cpu/bin/llama-quantize")
@@ -31,6 +35,25 @@ _SENSITIVE_RULES = (
 )
 _MAX_PLAN_BYTES = 1 << 20
 _IO_CHUNK = 1 << 20
+
+
+def _read_bounded_regular(path: Path, limit: int, label: str) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise BackendUnavailable(f"{label} cannot be opened safely") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise BackendUnavailable(f"{label} must be a regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            payload = handle.read(limit + 1)
+    finally:
+        os.close(descriptor)
+    if len(payload) > limit:
+        raise BackendUnavailable(f"{label} exceeds size bound")
+    return payload
 
 
 def _sha256_file(path: Path) -> str:
@@ -83,6 +106,9 @@ class LlamaCppProbeResult:
 def probe_llamacpp_gguf(
     toolchain_root: str | Path = DEFAULT_TOOLCHAIN_ROOT,
     python_executable: str | Path = DEFAULT_PYTHON,
+    *,
+    expected_converter_sha256: str = EXPECTED_CONVERTER_SHA256,
+    expected_quantizer_sha256: str = EXPECTED_CPU_QUANTIZER_SHA256,
 ) -> LlamaCppProbeResult:
     """Filesystem-only probe; deliberately never executes the CUDA-linked binary."""
     root = Path(toolchain_root).resolve()
@@ -96,6 +122,8 @@ def probe_llamacpp_gguf(
         commit == PINNED_COMMIT
         and converter.is_file()
         and quantizer.is_file()
+        and converter_sha == expected_converter_sha256
+        and quantizer_sha == expected_quantizer_sha256
         and os.access(quantizer, os.X_OK)
         and python.is_file()
         and os.access(python, os.X_OK)
@@ -105,8 +133,10 @@ def probe_llamacpp_gguf(
         "expected_commit": PINNED_COMMIT,
         "converter": str(converter),
         "converter_sha256": converter_sha,
+        "expected_converter_sha256": expected_converter_sha256,
         "quantizer": str(quantizer),
         "quantizer_sha256": quantizer_sha,
+        "expected_quantizer_sha256": expected_quantizer_sha256,
         "quantizer_build_contract": {
             "GGML_CUDA": False,
             "GGML_RPC": False,
@@ -151,10 +181,7 @@ def _validate_plan(text: str) -> list[str]:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if len(lines) < 2 or lines[-1] != GENERIC_EXPERT_RULE:
         raise BackendUnavailable("tensor plan must end with the generic Q1_0 expert rule")
-    if not all(
-        any(pattern.fullmatch(line) for pattern in _SENSITIVE_RULES)
-        for line in lines[:-1]
-    ):
+    if not all(any(pattern.fullmatch(line) for pattern in _SENSITIVE_RULES) for line in lines[:-1]):
         raise BackendUnavailable(
             "tensor plan must place exact per-layer NVFP4 expert rules before generic Q1_0"
         )
@@ -170,12 +197,16 @@ class LlamaCppGgufMixedAdapter(BackendAdapter):
         *,
         toolchain_root: str | Path = DEFAULT_TOOLCHAIN_ROOT,
         python_executable: str | Path = DEFAULT_PYTHON,
+        expected_converter_sha256: str = EXPECTED_CONVERTER_SHA256,
+        expected_quantizer_sha256: str = EXPECTED_CPU_QUANTIZER_SHA256,
         runner: CommandRunner | None = None,
     ) -> None:
         self.toolchain_root = Path(toolchain_root).resolve()
         # Preserve the pinned venv path in provenance/argv even when it is a
         # symlink; resolving it would silently turn the contract into system Python.
         self.python_executable = Path(python_executable)
+        self.expected_converter_sha256 = expected_converter_sha256
+        self.expected_quantizer_sha256 = expected_quantizer_sha256
         self.runner = runner or SubprocessRunner()
 
     def _paths(self, context: dict[str, object]) -> tuple[Path, Path, Path]:
@@ -188,7 +219,72 @@ class LlamaCppGgufMixedAdapter(BackendAdapter):
         scratch = staging.parent / "llamacpp-work"
         if source == staging or staging.is_relative_to(source) or source.is_relative_to(staging):
             raise BackendUnavailable("GGUF staging and immutable source must not overlap")
+        if source == scratch or scratch.is_relative_to(source) or source.is_relative_to(scratch):
+            raise BackendUnavailable("GGUF scratch and immutable source must not overlap")
         return source, staging, scratch
+
+    def _probe(self) -> LlamaCppProbeResult:
+        return probe_llamacpp_gguf(
+            self.toolchain_root,
+            self.python_executable,
+            expected_converter_sha256=self.expected_converter_sha256,
+            expected_quantizer_sha256=self.expected_quantizer_sha256,
+        )
+
+    @staticmethod
+    def _plain(value: object) -> object:
+        if isinstance(value, Mapping):
+            return {
+                str(key): LlamaCppGgufMixedAdapter._plain(item)
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            }
+        if isinstance(value, (list, tuple)):
+            return [LlamaCppGgufMixedAdapter._plain(item) for item in value]
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return str(value)
+
+    def _bind_resume_provenance(
+        self,
+        context: dict[str, object],
+        scratch: Path,
+        staging: Path,
+        plan_sha: str,
+        probe: LlamaCppProbeResult,
+    ) -> str:
+        provenance = {
+            "schema_version": 1,
+            "source": str(context.get("source", "")),
+            "source_identity": self._plain(context.get("source_identity", {})),
+            "source_revision": self._plain(context.get("source_revision")),
+            "tensor_plan_sha256": plan_sha,
+            "toolchain_commit": probe.commit,
+            "converter_sha256": probe.converter_sha256,
+            "quantizer_sha256": probe.quantizer_sha256,
+        }
+        encoded = (json.dumps(provenance, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        digest = hashlib.sha256(encoded).hexdigest()
+        path = scratch / "resume-provenance.json"
+        existing_outputs = any(
+            candidate.exists()
+            for candidate in (
+                scratch / "source-auto.gguf",
+                scratch / "candidate/model.gguf",
+                staging / "model.gguf",
+            )
+        )
+        if path.exists():
+            if _read_bounded_regular(path, 64 * 1024, "resume provenance") != encoded:
+                raise BackendUnavailable(
+                    "resume provenance does not match source, plan, or toolchain"
+                )
+        elif existing_outputs:
+            raise BackendUnavailable("unbound GGUF resume artifacts are forbidden")
+        else:
+            temporary = path.with_suffix(".tmp")
+            temporary.write_bytes(encoded)
+            os.replace(temporary, path)
+        return digest
 
     @staticmethod
     def _parameters(context: dict[str, object]) -> dict[str, str]:
@@ -212,12 +308,14 @@ class LlamaCppGgufMixedAdapter(BackendAdapter):
             path = Path(source_path).resolve()
             if not declared_hash or not re.fullmatch(r"[0-9a-f]{64}", declared_hash):
                 raise BackendUnavailable("tensor plan path requires a lowercase sha256")
-            if not path.is_file() or path.stat().st_size > _MAX_PLAN_BYTES:
-                raise BackendUnavailable("tensor plan path is missing or exceeds size bound")
-            measured = _sha256_file(path)
+            payload = _read_bounded_regular(path, _MAX_PLAN_BYTES, "tensor plan")
+            measured = hashlib.sha256(payload).hexdigest()
             if measured != declared_hash:
                 raise BackendUnavailable("tensor plan sha256 mismatch")
-            text = path.read_text(encoding="utf-8")
+            try:
+                text = payload.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise BackendUnavailable("tensor plan is not UTF-8") from exc
         else:
             encoded = content.encode("utf-8")
             if not encoded or len(encoded) > _MAX_PLAN_BYTES:
@@ -232,9 +330,7 @@ class LlamaCppGgufMixedAdapter(BackendAdapter):
         return plan, hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def _run_checked(
-        runner: CommandRunner, argv: list[str], *, cwd: Path, label: str
-    ) -> None:
+    def _run_checked(runner: CommandRunner, argv: list[str], *, cwd: Path, label: str) -> None:
         if any(arg.startswith("--prune") for arg in argv):
             raise BackendUnavailable("pruning flags are forbidden for GGUF quantization")
         try:
@@ -255,7 +351,7 @@ class LlamaCppGgufMixedAdapter(BackendAdapter):
         source, staging, scratch = self._paths(context)
         if not source.is_dir():
             raise BackendUnavailable(f"GGUF source is not a directory: {source}")
-        probe = probe_llamacpp_gguf(self.toolchain_root, self.python_executable)
+        probe = self._probe()
         if not probe.available:
             raise BackendUnavailable(f"pinned llama.cpp toolchain unavailable: {probe.evidence}")
         staging.mkdir(parents=True, exist_ok=True)
@@ -273,9 +369,10 @@ class LlamaCppGgufMixedAdapter(BackendAdapter):
         if threads < 1 or threads > 256:
             raise BackendUnavailable("threads must be in [1, 256]")
         plan, plan_sha = self._materialize_plan(params, scratch)
-        probe = probe_llamacpp_gguf(self.toolchain_root, self.python_executable)
+        probe = self._probe()
         if not probe.available:
             raise BackendUnavailable(f"pinned llama.cpp toolchain unavailable: {probe.evidence}")
+        provenance_sha = self._bind_resume_provenance(context, scratch, staging, plan_sha, probe)
         intermediate = scratch / "source-auto.gguf"
         final = staging / "model.gguf"
         resumed = final.is_file() and self._gguf_ok(staging)
@@ -291,13 +388,17 @@ class LlamaCppGgufMixedAdapter(BackendAdapter):
                     str(intermediate),
                     "--outtype",
                     "auto",
-                    "--no-nextn",
                 ]
                 self._run_checked(
                     self.runner, converter_argv, cwd=self.toolchain_root, label="GGUF converter"
                 )
                 if not intermediate.is_file() or not self._gguf_ok(scratch):
                     raise BackendUnavailable("converter did not produce a structurally valid GGUF")
+            candidate_dir = scratch / "candidate"
+            candidate_dir.mkdir(parents=True, exist_ok=True)
+            candidate = candidate_dir / "model.gguf"
+            if candidate.exists():
+                candidate.unlink()
             quantizer_argv = [
                 probe.quantizer,
                 "--allow-requantize",
@@ -308,15 +409,19 @@ class LlamaCppGgufMixedAdapter(BackendAdapter):
                 "--token-embedding-type",
                 "Q4_K",
                 str(intermediate),
-                str(final),
+                str(candidate),
                 "Q4_K",
                 str(threads),
             ]
             self._run_checked(
                 self.runner, quantizer_argv, cwd=self.toolchain_root, label="GGUF quantizer"
             )
-            if not final.is_file() or not self._gguf_ok(staging):
+            if not candidate.is_file() or not self._gguf_ok(candidate_dir):
                 raise BackendUnavailable("quantizer did not produce a structurally valid GGUF")
+            os.replace(candidate, final)
+            candidate_dir.rmdir()
+            if not self._gguf_ok(staging):
+                raise BackendUnavailable("atomically promoted GGUF failed structural validation")
         if intermediate.exists():
             intermediate.unlink()
         return {
@@ -327,15 +432,14 @@ class LlamaCppGgufMixedAdapter(BackendAdapter):
             "handle": handle,
             "resumed": resumed,
             "tensor_plan_sha256": plan_sha,
+            "resume_provenance_sha256": provenance_sha,
             "toolchain": json.loads(probe.evidence),
         }
 
     def resume(self, context: dict[str, object], handle: str) -> dict[str, object]:
         return self.execute(context, handle)
 
-    def validate(
-        self, context: dict[str, object], outputs: dict[str, object]
-    ) -> dict[str, object]:
+    def validate(self, context: dict[str, object], outputs: dict[str, object]) -> dict[str, object]:
         from model_atlas.checkpoint.validators import _gguf_structure
 
         del outputs
@@ -352,16 +456,25 @@ def build_llamacpp_gguf_record(
     *,
     toolchain_root: str | Path = DEFAULT_TOOLCHAIN_ROOT,
     python_executable: str | Path = DEFAULT_PYTHON,
+    expected_converter_sha256: str = EXPECTED_CONVERTER_SHA256,
+    expected_quantizer_sha256: str = EXPECTED_CPU_QUANTIZER_SHA256,
     runner: CommandRunner | None = None,
 ) -> BackendRecord:
     adapter = LlamaCppGgufMixedAdapter(
         toolchain_root=toolchain_root,
         python_executable=python_executable,
+        expected_converter_sha256=expected_converter_sha256,
+        expected_quantizer_sha256=expected_quantizer_sha256,
         runner=runner,
     )
 
     def availability() -> tuple[bool, str | None, str]:
-        result = probe_llamacpp_gguf(toolchain_root, python_executable)
+        result = probe_llamacpp_gguf(
+            toolchain_root,
+            python_executable,
+            expected_converter_sha256=expected_converter_sha256,
+            expected_quantizer_sha256=expected_quantizer_sha256,
+        )
         return result.available, result.commit, result.evidence
 
     return BackendRecord(

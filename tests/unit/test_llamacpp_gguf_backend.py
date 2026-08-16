@@ -53,6 +53,18 @@ def _write_fake_gguf(path: Path) -> None:
     path.write_bytes(bytes(header) + b"\0" * padding + struct.pack("<f", 1.0))
 
 
+def _write_two_tensor_gguf(
+    path: Path, *, names: tuple[bytes, bytes], offsets: tuple[int, int]
+) -> None:
+    header = bytearray(b"GGUF" + struct.pack("<IQQ", 3, 2, 0))
+    for name, offset in zip(names, offsets, strict=True):
+        header += struct.pack("<Q", len(name)) + name
+        header += struct.pack("<IQIQ", 1, 1, 0, offset)
+    padding = (-len(header)) % 32
+    payload_size = max(offsets) + 4
+    path.write_bytes(bytes(header) + b"\0" * padding + b"\0" * payload_size)
+
+
 def _fake_toolchain(tmp_path: Path, *, commit: str = PINNED_COMMIT) -> tuple[Path, Path]:
     root = tmp_path / "llama.cpp"
     (root / ".git").mkdir(parents=True)
@@ -67,6 +79,17 @@ def _fake_toolchain(tmp_path: Path, *, commit: str = PINNED_COMMIT) -> tuple[Pat
     python.write_text("#!/bin/sh\n", encoding="utf-8")
     python.chmod(0o755)
     return root, python
+
+
+def _tool_hashes(root: Path) -> dict[str, str]:
+    return {
+        "expected_converter_sha256": hashlib.sha256(
+            (root / "convert_hf_to_gguf.py").read_bytes()
+        ).hexdigest(),
+        "expected_quantizer_sha256": hashlib.sha256(
+            (root / CPU_QUANTIZER_RELATIVE_PATH).read_bytes()
+        ).hexdigest(),
+    }
 
 
 class FakeRunner:
@@ -120,15 +143,15 @@ def test_probe_is_filesystem_only_and_rejects_wrong_commit(tmp_path: Path) -> No
     assert evidence["probe_executed_binaries"] is False
     assert evidence["converter_sha256"]
     assert evidence["quantizer_sha256"]
-    assert evidence["quantizer"] == str(
-        (root / "build-atlas-cpu/bin/llama-quantize").resolve()
-    )
+    assert evidence["quantizer"] == str((root / "build-atlas-cpu/bin/llama-quantize").resolve())
     assert evidence["quantizer_build_contract"] == {
         "GGML_CUDA": False,
         "GGML_RPC": False,
     }
     assert evidence["commit"] == "0" * 40
-    record = build_llamacpp_gguf_record(toolchain_root=root, python_executable=python)
+    record = build_llamacpp_gguf_record(
+        toolchain_root=root, python_executable=python, **_tool_hashes(root)
+    )
     registry = BackendRegistry({record.backend_id: record})
     assert not registry.is_backend_available(record.backend_id)
     assert record.runtime_compat == ()
@@ -139,9 +162,7 @@ def test_recipe_defaults_bind_regenerated_canonical_plan(tmp_path: Path) -> None
 
     recipe = llamacpp_gguf_mixed_recipe(identity)
 
-    assert recipe.stages[0].parameters["tensor_plan_sha256"] == (
-        GLM52_GGUF_TENSOR_PLAN_SHA256
-    )
+    assert recipe.stages[0].parameters["tensor_plan_sha256"] == (GLM52_GGUF_TENSOR_PLAN_SHA256)
 
 
 def test_fake_subprocess_job_uses_exact_no_pruning_argv_and_preserves_source(
@@ -152,7 +173,10 @@ def test_fake_subprocess_job_uses_exact_no_pruning_argv_and_preserves_source(
     before = source_manifest(str(source))
     runner = FakeRunner()
     record = build_llamacpp_gguf_record(
-        toolchain_root=root, python_executable=python, runner=runner
+        toolchain_root=root,
+        python_executable=python,
+        runner=runner,
+        **_tool_hashes(root),
     )
     registry = BackendRegistry({record.backend_id: record})
     recipe = llamacpp_gguf_mixed_recipe(identity, tensor_plan_content=PLAN, threads=3)
@@ -177,7 +201,6 @@ def test_fake_subprocess_job_uses_exact_no_pruning_argv_and_preserves_source(
         str(engine.run_dir / "stage/llamacpp-gguf-mixed/llamacpp-work/source-auto.gguf"),
         "--outtype",
         "auto",
-        "--no-nextn",
     ]
     assert quantizer[1:9] == [
         "--allow-requantize",
@@ -190,7 +213,7 @@ def test_fake_subprocess_job_uses_exact_no_pruning_argv_and_preserves_source(
         str(engine.run_dir / "stage/llamacpp-gguf-mixed/llamacpp-work/source-auto.gguf"),
     ]
     assert quantizer[-3:] == [
-        str(engine.run_dir / "stage/llamacpp-gguf-mixed/staging/model.gguf"),
+        str(engine.run_dir / "stage/llamacpp-gguf-mixed/llamacpp-work/candidate/model.gguf"),
         "Q4_K",
         "3",
     ]
@@ -199,9 +222,9 @@ def test_fake_subprocess_job_uses_exact_no_pruning_argv_and_preserves_source(
     evidence = json.loads(engine.store.read(outputs["llamacpp-gguf-mixed.evidence.json"]))
     assert evidence["result"]["runtime_validated"] is False
     assert evidence["result"]["pruning"] is False
-    assert evidence["result"]["tensor_plan_sha256"] == hashlib.sha256(
-        PLAN.encode("utf-8")
-    ).hexdigest()
+    assert (
+        evidence["result"]["tensor_plan_sha256"] == hashlib.sha256(PLAN.encode("utf-8")).hexdigest()
+    )
 
 
 def test_tensor_plan_path_hash_mismatch_fails_before_subprocess(tmp_path: Path) -> None:
@@ -211,7 +234,10 @@ def test_tensor_plan_path_hash_mismatch_fails_before_subprocess(tmp_path: Path) 
     plan.write_text(PLAN, encoding="utf-8")
     runner = FakeRunner()
     adapter = LlamaCppGgufMixedAdapter(
-        toolchain_root=root, python_executable=python, runner=runner
+        toolchain_root=root,
+        python_executable=python,
+        runner=runner,
+        **_tool_hashes(root),
     )
     context = {
         "source": str(source),
@@ -236,7 +262,10 @@ def test_quantizer_failure_preserves_intermediate_and_resume_skips_conversion(
     staging = tmp_path / "stage/staging"
     failing = FakeRunner(fail_quantizer=True)
     adapter = LlamaCppGgufMixedAdapter(
-        toolchain_root=root, python_executable=python, runner=failing
+        toolchain_root=root,
+        python_executable=python,
+        runner=failing,
+        **_tool_hashes(root),
     )
     context = _context(source, staging)
     adapter.prepare(context)
@@ -248,7 +277,10 @@ def test_quantizer_failure_preserves_intermediate_and_resume_skips_conversion(
 
     resumed = FakeRunner()
     adapter2 = LlamaCppGgufMixedAdapter(
-        toolchain_root=root, python_executable=python, runner=resumed
+        toolchain_root=root,
+        python_executable=python,
+        runner=resumed,
+        **_tool_hashes(root),
     )
     result = adapter2.resume(context, "second")
 
@@ -265,7 +297,10 @@ def test_old_unscoped_generic_fallback_is_rejected(tmp_path: Path) -> None:
     source, _identity = _source(tmp_path)
     runner = FakeRunner()
     adapter = LlamaCppGgufMixedAdapter(
-        toolchain_root=root, python_executable=python, runner=runner
+        toolchain_root=root,
+        python_executable=python,
+        runner=runner,
+        **_tool_hashes(root),
     )
     bad_plan = PLAN.replace(GENERIC_EXPERT_RULE, r"ffn_(gate|up|down)_exps\.weight=Q1_0")
     context = _context(source, tmp_path / "stage/staging", plan=bad_plan)
@@ -285,3 +320,91 @@ def test_bounded_gguf_validator_rejects_truncated_header(tmp_path: Path) -> None
 
     assert not result.ok
     assert "truncated" in result.detail
+
+
+def test_probe_rejects_modified_toolchain_bytes_without_execution(tmp_path: Path) -> None:
+    root, python = _fake_toolchain(tmp_path)
+    expected = _tool_hashes(root)
+    (root / "convert_hf_to_gguf.py").write_text("# modified\n", encoding="utf-8")
+
+    result = probe_llamacpp_gguf(root, python, **expected)
+
+    assert not result.available
+    assert json.loads(result.evidence)["probe_executed_binaries"] is False
+
+
+def test_validator_rejects_partial_and_unknown_payloads(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "model.gguf"
+    _write_fake_gguf(model)
+    raw = model.read_bytes()
+    model.write_bytes(raw[:-1])
+    assert not _gguf_structure("llamacpp_gguf_mixed", tmp_path, "gguf").ok
+
+    # Tensor type lives 12 bytes before the aligned data in this tiny fixture.
+    raw = bytearray(raw)
+    type_offset = len(raw) - 4 - ((-(len(raw) - 4)) % 32) - 12
+    # Locate robustly from the known name and shape encoding.
+    marker = b"weight" + struct.pack("<IQ", 1, 1)
+    type_offset = raw.index(marker) + len(marker)
+    struct.pack_into("<I", raw, type_offset, 999)
+    model.write_bytes(raw)
+    result = _gguf_structure("llamacpp_gguf_mixed", tmp_path, "gguf")
+    assert not result.ok
+    assert "unsupported GGUF tensor type" in result.detail
+
+
+def test_validator_rejects_duplicate_names_and_overlapping_payloads(tmp_path: Path) -> None:
+    model = tmp_path / "model.gguf"
+    _write_two_tensor_gguf(model, names=(b"same", b"same"), offsets=(0, 32))
+    result = _gguf_structure("llamacpp_gguf_mixed", tmp_path, "gguf")
+    assert not result.ok
+    assert "unique" in result.detail
+
+    _write_two_tensor_gguf(model, names=(b"first", b"second"), offsets=(0, 0))
+    result = _gguf_structure("llamacpp_gguf_mixed", tmp_path, "gguf")
+    assert not result.ok
+    assert "overlap" in result.detail
+
+
+def test_scratch_may_not_overlap_immutable_source(tmp_path: Path) -> None:
+    root, python = _fake_toolchain(tmp_path)
+    source = tmp_path / "stage/llamacpp-work"
+    source.mkdir(parents=True)
+    adapter = LlamaCppGgufMixedAdapter(
+        toolchain_root=root, python_executable=python, **_tool_hashes(root)
+    )
+    context = _context(source, tmp_path / "stage/staging")
+
+    with pytest.raises(BackendUnavailable, match="scratch and immutable source"):
+        adapter.prepare(context)
+
+
+def test_resume_rejects_changed_plan_provenance_before_subprocess(tmp_path: Path) -> None:
+    root, python = _fake_toolchain(tmp_path)
+    source, _identity = _source(tmp_path)
+    staging = tmp_path / "stage/staging"
+    failing = FakeRunner(fail_quantizer=True)
+    adapter = LlamaCppGgufMixedAdapter(
+        toolchain_root=root,
+        python_executable=python,
+        runner=failing,
+        **_tool_hashes(root),
+    )
+    context = _context(source, staging)
+    adapter.prepare(context)
+    with pytest.raises(BackendUnavailable, match="quantizer exited"):
+        adapter.execute(context, "first")
+
+    changed = _context(source, staging, plan=PLAN.replace("blk\\.2", "blk\\.3"))
+    resumed = FakeRunner()
+    adapter2 = LlamaCppGgufMixedAdapter(
+        toolchain_root=root,
+        python_executable=python,
+        runner=resumed,
+        **_tool_hashes(root),
+    )
+    with pytest.raises(BackendUnavailable, match="resume provenance does not match"):
+        adapter2.resume(changed, "second")
+    assert resumed.calls == []
