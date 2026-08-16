@@ -189,7 +189,9 @@ class HardwareEnvelope(BaseModel):
     the GPU/CPU compute capability (e.g. gb10-sm121); ``topology`` is the node
     layout (e.g. 2x-spark); ``runtime_backend`` is the serving runtime (e.g.
     vllm-modelopt). These are SEPARATE axes — never compare glm-5.2 to
-    gb10-sm121, or vllm-modelopt to sm121.
+    gb10-sm121, or vllm-modelopt to sm121. ``runtime_backend='none'`` is the
+    explicit artifact-only target and is legal only when the publish rule does
+    not require runtime benchmarking.
     """
 
     model_config = ConfigDict(extra="forbid")

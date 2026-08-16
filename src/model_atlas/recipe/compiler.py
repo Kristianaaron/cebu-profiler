@@ -690,8 +690,19 @@ class RecipeCompiler:
                             s.id,
                         )
                     )
-                if (
-                    hw.runtime_backend not in record.runtime_compat
+                if hw.runtime_backend == "none" and recipe.publish.require_runtime_benchmarked:
+                    issues.append(
+                        CompileIssue(
+                            "error",
+                            "runtime_required_missing",
+                            "artifact-only runtime_backend='none' cannot satisfy a publish "
+                            "rule that requires runtime benchmarking",
+                            s.id,
+                        )
+                    )
+                elif (
+                    hw.runtime_backend != "none"
+                    and hw.runtime_backend not in record.runtime_compat
                     and "any" not in record.runtime_compat
                 ):
                     issues.append(
@@ -714,6 +725,7 @@ class RecipeCompiler:
                     StageEffectClass.REFINEMENT,
                     StageEffectClass.RESIDUAL,
                     StageEffectClass.CONDITIONING,
+                    StageEffectClass.PRUNING,
                 }
                 and not record.produces_derivative
             ):

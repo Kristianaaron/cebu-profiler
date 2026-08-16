@@ -472,7 +472,8 @@ def _builtin_records() -> dict[str, BackendRecord]:
         architectures=("glm-5.2",),
         compute_archs=("gb10-sm121", "any"),
         topologies=("2x-spark", "single", "any"),
-        runtime_compat=("vllm-modelopt",),
+        # No serving runtime is claimed until a real load/forward succeeds.
+        runtime_compat=(),
         conversion_tool_compat=("atlas-loader",),
         status=RecipeStatus.VALIDATED,
         version="1.0.0",

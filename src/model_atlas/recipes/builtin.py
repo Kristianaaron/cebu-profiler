@@ -449,7 +449,9 @@ def nvfp4_width_slice_optin_recipe(
             seed=0,
             note="uniform structural control uses no quality calibration",
         ),
-        hardware=GLM52_HARDWARE,
+        # Artifact-only structural job. Runtime compatibility is promoted only
+        # after a real loader/forward canary, never inferred from file schema.
+        hardware=GLM52_HARDWARE.model_copy(update={"runtime_backend": "none"}),
         constraints=RecipeConstraints(
             no_pruning=False,
             allow_pruning_capability=True,

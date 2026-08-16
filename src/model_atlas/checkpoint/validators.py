@@ -30,9 +30,22 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from model_atlas.jobs.artifacts import sha256_file
-
 _MAX_HEADER = 64 * 1024 * 1024  # bounded header read (corrupt length fails, never allocates)
+_HASH_CHUNK = 4 * 1024 * 1024
+
+
+def _sha256_file(path: Path) -> str:
+    """Hash checkpoint files without importing the job engine package.
+
+    Checkpoint validation is a lower-level facility than job orchestration;
+    importing ``model_atlas.jobs.artifacts`` here initializes jobs/__init__ and
+    cycles back through JobEngine into this module on a cold import.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(_HASH_CHUNK):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 # dtype -> bytes-per-element in safetensors naming = numpy dtypes
 _DTYPE_BYTES = {
@@ -234,7 +247,7 @@ def _safetensors_structure(
         tensor_count = len(wm)
 
     # --- pass 3: whole-output/checkpoint hashes ---
-    shard_hashes = {p.name: sha256_file(p) for p in shards}
+    shard_hashes = {p.name: _sha256_file(p) for p in shards}
     checkpoint_digest = _whole_checkpoint_digest(files)
     return CheckpointValidationResult(
         True,
@@ -248,7 +261,7 @@ def _safetensors_structure(
 
 def _whole_checkpoint_digest(files: list[Path]) -> str:
     """Canonical digest over the whole staged checkpoint tree (name -> sha256)."""
-    payload = json.dumps({p.name: sha256_file(p) for p in sorted(files)}, sort_keys=True).encode(
+    payload = json.dumps({p.name: _sha256_file(p) for p in sorted(files)}, sort_keys=True).encode(
         "utf-8"
     )
     return hashlib.sha256(payload).hexdigest()

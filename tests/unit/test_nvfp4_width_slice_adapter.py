@@ -1,5 +1,7 @@
 import json
 import struct
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,7 +13,7 @@ from model_atlas.checkpoint.safetensors import write_safetensors
 from model_atlas.jobs.artifacts import source_manifest
 from model_atlas.jobs.engine import JobEngine
 from model_atlas.jobs.schema import JobStatus
-from model_atlas.recipe.compiler import RecipeCompiler
+from model_atlas.recipe.compiler import RecipeCompileError, RecipeCompiler
 from model_atlas.recipe.schema import SourceIdentity, StageEffectClass
 from model_atlas.recipes.builtin import nvfp4_width_slice_optin_recipe
 
@@ -110,9 +112,40 @@ def test_backend_record_and_recipe_are_explicit_pruning(tmp_path: Path) -> None:
 
     assert record.produces_derivative
     assert "pruning" in record.declared_capabilities
+    assert record.runtime_compat == ()
     assert record.adapter is not None and record.adapter.produces_derivative
     assert recipe.stages[0].effect_class is StageEffectClass.PRUNING
+    assert recipe.hardware.runtime_backend == "none"
     RecipeCompiler(registry).compile(recipe)
+
+    record.produces_derivative = False
+    with pytest.raises(RecipeCompileError, match="backend_not_derivative_producer"):
+        RecipeCompiler(registry).compile(recipe)
+
+    record.produces_derivative = True
+    runtime_required = recipe.model_copy(
+        update={
+            "publish": recipe.publish.model_copy(
+                update={"require_runtime_benchmarked": True}
+            )
+        }
+    )
+    with pytest.raises(RecipeCompileError, match="runtime_required_missing"):
+        RecipeCompiler(registry).compile(runtime_required)
+
+
+def test_checkpoint_validator_is_cold_importable() -> None:
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from model_atlas.checkpoint.validators import _safetensors_structure",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_tiny_glm_width_slice_runs_through_job_engine_without_source_mutation(
