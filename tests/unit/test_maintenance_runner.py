@@ -13,7 +13,9 @@ from model_atlas.ops.maintenance import (
     CommandResult,
     MaintenanceConfig,
     MaintenanceCoordinator,
+    MaintenanceFailure,
     MaintenanceInterrupted,
+    ProcessGroupQuiescenceError,
     SubprocessCommandRunner,
     receipt_contains_secret_keys,
 )
@@ -414,3 +416,114 @@ def test_subprocess_runner_waits_leader_even_when_group_is_already_gone() -> Non
     with pytest.raises(MaintenanceInterrupted):
         runner.run(["payload"])
     assert events == ["wait"]
+
+
+@pytest.mark.parametrize(
+    ("kind", "returncode", "stdout"),
+    [
+        ("ssh", 255, ""),
+        ("dbus", 1, ""),
+        ("docker_error", 1, ""),
+        ("docker_malformed", 0, "maybe\n"),
+    ],
+)
+def test_unknown_liveness_fails_closed_before_scope(
+    tmp_path: Path, kind: str, returncode: int, stdout: str
+) -> None:
+    entered: list[str] = []
+
+    @contextmanager
+    def scope():  # type: ignore[no-untyped-def]
+        entered.append("entered")
+        yield
+
+    class UnknownRunner(FakeRunner):
+        def run(self, argv: Sequence[str]) -> CommandResult:
+            command = tuple(argv)
+            inner = self._inner(command)
+            if kind == "ssh" and command[:1] == ("ssh",):
+                return CommandResult(returncode=returncode, stdout=stdout)
+            if kind == "dbus" and inner[:4] == (
+                "systemctl",
+                "--user",
+                "is-active",
+                "--quiet",
+            ):
+                return CommandResult(returncode=returncode, stdout=stdout)
+            if kind.startswith("docker") and inner[:3] == ("docker", "inspect", "--format"):
+                return CommandResult(returncode=returncode, stdout=stdout)
+            return super().run(argv)
+
+    with pytest.raises(MaintenanceFailure, match="liveness"):
+        MaintenanceCoordinator(config(tmp_path), UnknownRunner(), execute=True).run(
+            ["operator-command"], payload_scope=scope
+        )
+    assert entered == []
+
+
+def test_persistent_payload_group_skips_restoration_and_marks_manual_intervention(
+    tmp_path: Path,
+) -> None:
+    class PersistentRunner(FakeRunner):
+        def run(self, argv: Sequence[str]) -> CommandResult:
+            if tuple(argv) == ("operator-command",):
+                raise ProcessGroupQuiescenceError("still alive")
+            return super().run(argv)
+
+    receipt = MaintenanceCoordinator(
+        config(tmp_path), PersistentRunner(active=ALL_PRODUCTION), execute=True
+    ).run(["operator-command"])
+    assert receipt.manual_intervention_required
+    assert receipt.failure == "ProcessGroupQuiescenceError"
+    assert not any(action.action_id.startswith("restore_") for action in receipt.actions)
+
+
+def test_second_signal_during_reap_is_suppressed_until_group_is_gone_then_restore_runs(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    class Child:
+        pid = 818
+        waits = 0
+
+        def communicate(self) -> tuple[str, str | None]:
+            raise MaintenanceInterrupted(15)
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.waits += 1
+            events.append(f"wait-{self.waits}")
+            if self.waits == 1:
+                raise MaintenanceInterrupted(2)
+            return 0
+
+    term_calls = 0
+
+    def killpg(_pid: int, sig: int) -> None:
+        nonlocal term_calls
+        events.append(f"kill-{sig}")
+        if sig == signal.SIGTERM:
+            term_calls += 1
+            if term_calls == 1:
+                raise MaintenanceInterrupted(2)
+        if sig == 0:
+            raise ProcessLookupError
+
+    payload_runner = SubprocessCommandRunner(
+        process_factory=lambda *_args, **_kwargs: Child(), killpg=killpg, wait_timeout_seconds=1
+    )
+
+    class IntegratedRunner(FakeRunner):
+        def run(self, argv: Sequence[str]) -> CommandResult:
+            if tuple(argv) == ("operator-command",):
+                return payload_runner.run(argv)
+            if str(tuple(argv)[0]).endswith("start-deepseek-v4-flash-dspark.sh"):
+                events.append("restore")
+            return super().run(argv)
+
+    receipt = MaintenanceCoordinator(
+        config(tmp_path), IntegratedRunner(active=ALL_PRODUCTION), execute=True
+    ).run(["operator-command"])
+    assert receipt.failure == "MaintenanceInterrupted:signal:15"
+    assert events[:4] == ["kill-15", "kill-15", "wait-1", "wait-2"]
+    assert events.index("kill-0") < events.index("restore")

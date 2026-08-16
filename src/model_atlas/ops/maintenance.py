@@ -15,7 +15,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Callable, Sequence
-from contextlib import AbstractContextManager, nullcontext, suppress
+from contextlib import AbstractContextManager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from types import FrameType
@@ -101,42 +101,61 @@ class SubprocessCommandRunner:
         )
 
     def _wait_leader(self, process: _ChildProcess) -> bool:
-        try:
-            process.wait(timeout=self._wait_timeout)
-            return True
-        except subprocess.TimeoutExpired:
-            return False
+        while True:
+            try:
+                process.wait(timeout=self._wait_timeout)
+                return True
+            except MaintenanceInterrupted:
+                continue
+            except subprocess.TimeoutExpired:
+                return False
 
     def _group_exists(self, process_group: int) -> bool:
-        try:
-            self._killpg(process_group, 0)
-        except ProcessLookupError:
-            return False
-        return True
+        while True:
+            try:
+                self._killpg(process_group, 0)
+            except MaintenanceInterrupted:
+                continue
+            except ProcessLookupError:
+                return False
+            return True
 
     def _wait_for_group_exit(self, process_group: int) -> bool:
         for attempt in range(self._group_poll_attempts):
             if not self._group_exists(process_group):
                 return True
             if attempt + 1 < self._group_poll_attempts:
-                self._sleep(self._wait_timeout / self._group_poll_attempts)
+                while True:
+                    try:
+                        self._sleep(self._wait_timeout / self._group_poll_attempts)
+                    except MaintenanceInterrupted:
+                        continue
+                    break
         return False
 
     def _reap_group(self, process: _ChildProcess) -> None:
         group = process.pid
-        with suppress(ProcessLookupError):
-            self._killpg(group, signal.SIGTERM)
+        self._signal_group(group, signal.SIGTERM)
         leader_reaped = self._wait_leader(process)
         if self._group_exists(group):
-            with suppress(ProcessLookupError):
-                self._killpg(group, signal.SIGKILL)
+            self._signal_group(group, signal.SIGKILL)
             if not leader_reaped:
                 leader_reaped = self._wait_leader(process)
             if not self._wait_for_group_exit(group):
-                raise RuntimeError("payload process group could not be quiesced")
+                raise ProcessGroupQuiescenceError("payload process group could not be quiesced")
         # The group may already be gone, but the direct child still must be reaped.
         if not leader_reaped and not self._wait_leader(process):
-            raise RuntimeError("payload process leader could not be reaped")
+            raise ProcessGroupQuiescenceError("payload process leader could not be reaped")
+
+    def _signal_group(self, process_group: int, sig: signal.Signals) -> None:
+        while True:
+            try:
+                self._killpg(process_group, sig)
+            except MaintenanceInterrupted:
+                continue
+            except ProcessLookupError:
+                return
+            return
 
     def run(self, argv: Sequence[str]) -> CommandResult:
         process = self._process_factory(
@@ -193,6 +212,7 @@ class MaintenanceReceipt(BaseModel):
     binary_hashes: list[BinaryHash] = Field(default_factory=list)
     actions: list[ActionReceipt] = Field(default_factory=list)
     restoration_evidence: dict[str, bool] = Field(default_factory=dict)
+    manual_intervention_required: bool = False
     success: bool = False
     failure: str | None = None
 
@@ -241,6 +261,10 @@ class MaintenanceFailure(RuntimeError):
     pass
 
 
+class ProcessGroupQuiescenceError(RuntimeError):
+    """The payload process group survived termination; operator action is required."""
+
+
 class MaintenanceCoordinator:
     """Execute and always unwind a two-node maintenance window."""
 
@@ -270,11 +294,23 @@ class MaintenanceCoordinator:
         command = ["systemctl", "--user", "is-active", "--quiet", unit]
         if remote:
             command = ["ssh", self.config.worker_ssh_target, *command]
-        return self._command(command).returncode == 0
+        result = self._command(command)
+        if result.returncode == 0:
+            return True
+        if result.returncode == 3:
+            return False
+        raise MaintenanceFailure("unit liveness is unknown")
 
     def _container_active(self, name: str) -> bool:
         result = self._command(["docker", "inspect", "--format", "{{.State.Running}}", name])
-        return result.returncode == 0 and result.stdout.strip() == "true"
+        if result.returncode != 0:
+            raise MaintenanceFailure("container liveness is unknown")
+        state = result.stdout.strip()
+        if state == "true":
+            return True
+        if state == "false":
+            return False
+        raise MaintenanceFailure("container liveness is malformed")
 
     def _snapshot(self) -> None:
         observed = self.clock()
@@ -340,7 +376,11 @@ class MaintenanceCoordinator:
                     raise
                 success = False
                 evidence = "interrupted_during_restore"
+            except ProcessGroupQuiescenceError:
+                raise
             except BaseException as exc:
+                if not self._restoring:
+                    raise
                 success = False
                 evidence = f"exception_type={type(exc).__name__}"
         self._actions.append(
@@ -538,6 +578,7 @@ class MaintenanceCoordinator:
         started = self.clock()
         run_id = f"maintenance-{started.strftime('%Y%m%dT%H%M%S.%fZ')}"
         failure: str | None = None
+        manual_intervention = False
         self._snapshot()
         hashes = [self._hash_binary(path) for path in self.config.all_binary_paths()]
         try:
@@ -553,14 +594,18 @@ class MaintenanceCoordinator:
                         command=list(payload),
                     ):
                         raise MaintenanceFailure("operator_payload:return_code")
+        except ProcessGroupQuiescenceError as exc:
+            failure = self._failure_label(exc)
+            manual_intervention = True
         except BaseException as exc:
             failure = self._failure_label(exc)
         finally:
-            try:
-                self.restore()
-            except BaseException as exc:
-                restore_failure = self._failure_label(exc)
-                failure = f"{failure};restore={restore_failure}" if failure else restore_failure
+            if not manual_intervention:
+                try:
+                    self.restore()
+                except BaseException as exc:
+                    restore_failure = self._failure_label(exc)
+                    failure = f"{failure};restore={restore_failure}" if failure else restore_failure
 
         action_success = all(action.success for action in self._actions)
         evidence_success = all(self._restoration_evidence.values())
@@ -573,6 +618,7 @@ class MaintenanceCoordinator:
             binary_hashes=hashes,
             actions=list(self._actions),
             restoration_evidence=dict(self._restoration_evidence),
+            manual_intervention_required=manual_intervention,
             success=failure is None and action_success and evidence_success,
             failure=failure,
         )
