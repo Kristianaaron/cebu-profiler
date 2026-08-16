@@ -9,6 +9,10 @@
 # materialized derivatives (large generated outputs, never committed)
 /derivatives/
 
+# resumable source-profile state (includes a private HMAC key; never commit)
+/artifacts/glm52-source-manifest.state.json
+/artifacts/glm52-source-manifest.state.key
+
 # python
 .venv/
 .venv-exec/
