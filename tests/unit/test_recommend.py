@@ -932,7 +932,14 @@ def test_start_authorized_runs_persisted_job_asynchronously(tmp_path: Path):
 
     import time as _time
     t0 = _time.time()
-    res = svc.start_authorized(tok, "pv-exec", h, ["exe-method"])
+    res = svc.start_authorized(
+        tok,
+        "pv-exec",
+        h,
+        ["exe-method"],
+        plan_id=artifact.plan_id,
+        recipe_sha256=artifact.recipe_sha256,
+    )
     elapsed = _time.time() - t0
     # asynchronous: returns ~instantly, before the worker's run completes
     assert res["status"] == "started"
@@ -956,7 +963,14 @@ def test_start_authorized_runs_persisted_job_asynchronously(tmp_path: Path):
     # duplicate start is rejected as replay (never a second execution)
     from model_atlas.recommend.api import AuthError
     with pytest.raises(AuthError) as exc:
-        svc.start_authorized(tok, "pv-exec", h, ["exe-method"])
+        svc.start_authorized(
+            tok,
+            "pv-exec",
+            h,
+            ["exe-method"],
+            plan_id=artifact.plan_id,
+            recipe_sha256=artifact.recipe_sha256,
+        )
     assert exc.value.code == "replay"
 
 

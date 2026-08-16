@@ -256,10 +256,8 @@ class RecommendationHandler(BaseHTTPRequestHandler):
             selected = self._selected_list(body)
             raw_inputs = body.get("inputs")
             inputs = raw_inputs if isinstance(raw_inputs, dict) else {}
-            plan_id = body.get("plan_id", "")
-            recipe_sha256 = body.get("recipe_sha256", "")
-            plan_id = plan_id if isinstance(plan_id, str) else ""
-            recipe_sha256 = recipe_sha256 if isinstance(recipe_sha256, str) else ""
+            plan_id = self._require_str(body, "plan_id", "start")
+            recipe_sha256 = self._require_str(body, "recipe_sha256", "start")
             result = svc.start_authorized(
                 token,
                 preview_id,
@@ -389,3 +387,4 @@ def serve_forever(
         server.serve_forever()
     finally:
         server.server_close()
+        service.shutdown()

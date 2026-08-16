@@ -34,10 +34,10 @@ tokenless raw-selection start.
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
 import secrets
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -175,6 +175,7 @@ class _AuthorizationSession:
         no_pruning: bool,
         constraints_snapshot: dict[str, object],
         authorized_methods: list[str],
+        ttl_seconds: float = AUTH_TOKEN_TTL_SECONDS,
     ) -> None:
         self.token = token
         self.recommendation_id = recommendation_id
@@ -184,7 +185,7 @@ class _AuthorizationSession:
         self.constraints_snapshot = constraints_snapshot
         self.authorized_methods = sorted(authorized_methods)
         self.created_at = _now_iso()
-        self.expires_at = _iso_from_epoch(time.time() + AUTH_TOKEN_TTL_SECONDS)
+        self.expires_at = _iso_from_epoch(time.time() + ttl_seconds)
         self.profile_source_path: str = ""
         self.profile_fingerprint: str = ""
         self.profile_bytes_hash: str = ""
@@ -232,6 +233,7 @@ class _PendingPreview:
         "token",
         "preview_id",
         "selection_hash",
+        "authorization_digest",
         "selected",
         "recipe",
         "artifact",
@@ -254,17 +256,19 @@ class _PendingPreview:
         artifact: CompiledPlanArtifact | None,
         inputs: dict[str, object],
         run_id: str,
+        authorization_digest: str = "",
     ) -> None:
         self.token = token
         self.preview_id = preview_id
         self.selection_hash = selection_hash
+        self.authorization_digest = authorization_digest or selection_hash
         self.selected = list(selected)
         self.recipe = recipe
         self.artifact = artifact
         self.inputs = dict(inputs)
         self.run_id = run_id
         self.plan_id = artifact.plan_id if artifact is not None else ""
-        self.recipe_sha256 = ""
+        self.recipe_sha256 = artifact.recipe_sha256 if artifact is not None else ""
         self.target_snapshot: dict[str, object] = {}
         self.constraints_snapshot: dict[str, object] = {}
         self.dispatch_started = False
@@ -301,30 +305,26 @@ class RecommendationService:
         self.dispatched: dict[str, dict[str, object]] = {}
         self._load_dispatch_registry()
         self._load_persisted_previews()
-        # Supervised, NON-daemon background executor. The worker is joined on
-        # shutdown so no run is silently dropped when the service exits a normal
-        # lifecycle; a crash is reconciled on the next startup via resume.
+        # The executor is created lazily on the first queued run. It is daemonized
+        # because durability/reconciliation, not interpreter shutdown ordering,
+        # is the crash-safety boundary. Explicit server/context shutdown still
+        # drains it during a normal lifecycle.
         self.supervised_executor = supervised_executor
         self._shutdown_event = threading.Event()
         self._worker: threading.Thread | None = None
         self._idle = threading.Condition(self._dispatch_lock)
         self._pending_runs: list[_PendingPreview] = []
-        if self.supervised_executor:
-            self._worker = threading.Thread(
-                target=self._executor_loop,
-                name="atlas-recommend-executor",
-                daemon=False,
-            )
-            self._worker.start()
-            # startup reconciliation: resume any reserved/pending/dispatched runs
-            # left behind by a previous process (crash restart).
-            self._reconcile_startup()
-            # Non-daemon supervised executor is joined on shutdown(); registering
-            # it at exit guarantees a clean interpreter teardown even when a
-            # caller (e.g. an embedding test) never calls shutdown() explicitly.
-            import atexit
+        self._reconstruct_dispatch_registry()
+        self._reconcile_startup()
+        if self._pending_runs and self.supervised_executor:
+            with self._dispatch_lock:
+                self._ensure_worker_locked()
 
-            atexit.register(self.shutdown)
+    def __enter__(self) -> RecommendationService:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.shutdown()
 
     # ------------------------------------------------------------- profiles
     def list_profiles(self) -> list[dict[str, Any]]:
@@ -439,6 +439,7 @@ class RecommendationService:
             no_pruning=rec.no_pruning,
             constraints_snapshot=constraints_snapshot,
             authorized_methods=authorized,
+            ttl_seconds=self.token_ttl_seconds,
         )
         self._bind_profile(session, prof)
         self.sessions[token] = session
@@ -502,12 +503,6 @@ class RecommendationService:
             "pins_pass": bool(plan.get("pins_pass")),
             "executable": self._preview_is_executable(pv),
         }
-        preview_id = (
-            "pv-"
-            + sha256_hex(
-                canonical_json({"token": token, "hash": subset_hash})
-            )[:16]
-        )
         recipe = self._selected_recipe(sel, session=session)
         artifact: CompiledPlanArtifact | None = None
         if readiness["executable"]:
@@ -517,6 +512,35 @@ class RecommendationService:
             )
             artifact.verify()
             artifact.verify_pins_against(self.registry)
+        target_snapshot: dict[str, object] = {
+            "model_arch": session.target.hardware_model_arch,
+            "compute": session.target.compute_arch,
+            "topology": session.target.topology,
+            "runtime": session.target.runtime_backend,
+            "memory_gib": session.target.memory_target_gib,
+        }
+        constraints_snapshot = dict(session.constraints_snapshot or {})
+        recipe_sha256 = str(pv.get("recipe_sha256") or "")
+        plan_id = artifact.plan_id if artifact is not None else str(plan.get("plan_id") or "")
+        artifact_identity = (
+            sha256_hex(canonical_json(artifact.to_plain_dict())) if artifact is not None else ""
+        )
+        authorization_digest = sha256_hex(
+            canonical_json(
+                {
+                    "token": token,
+                    "selected": sel,
+                    "selection_hash": subset_hash,
+                    "inputs": inputs or {},
+                    "target": target_snapshot,
+                    "constraints": constraints_snapshot,
+                    "recipe_sha256": recipe_sha256,
+                    "plan_id": plan_id,
+                    "artifact_identity": artifact_identity,
+                }
+            )
+        )
+        preview_id = "pv-" + authorization_digest[:24]
         package = _PendingPreview(
             token=token,
             preview_id=preview_id,
@@ -530,16 +554,11 @@ class RecommendationService:
                 if artifact is not None
                 else _run_id_from_recipe(recipe, inputs or {})
             ),
+            authorization_digest=authorization_digest,
         )
-        package.recipe_sha256 = pv.get("recipe_sha256") or ""
-        package.target_snapshot = {
-            "model_arch": session.target.hardware_model_arch,
-            "compute": session.target.compute_arch,
-            "topology": session.target.topology,
-            "runtime": session.target.runtime_backend,
-            "memory_gib": session.target.memory_target_gib,
-        }
-        package.constraints_snapshot = dict(session.constraints_snapshot or {})
+        package.recipe_sha256 = recipe_sha256
+        package.target_snapshot = target_snapshot
+        package.constraints_snapshot = constraints_snapshot
         # IMMUTABLE preview: once created, a preview_id may NEVER be repointed to
         # a different recipe/identity. Overwriting is refused outright.
         if preview_id in self.pending_previews:
@@ -548,14 +567,14 @@ class RecommendationService:
                 "preview_conflict",
                 "preview already bound to this token+selection; overwrite refused",
             )
-        self.pending_previews[preview_id] = package
-        # Persist the verified package ATOMICALLY (job-bound transaction) BEFORE
-        # returning — a caller must never receive a preview that was not durable.
+        # Persistence is the publication boundary. A failed write leaves neither
+        # a visible in-memory preview nor a partial final directory.
         self._persist_preview(package)
+        self.pending_previews[preview_id] = package
         return {
             "preview_id": preview_id,
             "plan_id": (artifact.plan_id if artifact is not None else plan.get("plan_id")),
-            "hash": subset_hash,
+            "hash": authorization_digest,
             "readiness": readiness,
             "selected_methods": list(sel),
             "run_id": package.run_id,
@@ -574,12 +593,18 @@ class RecommendationService:
         preview is durable BEFORE it is ever served. Persistence is NOT
         best-effort here — start depends on the same on-disk identity."""
 
-        artifact_dir = self.store_root / "previews" / package.preview_id
-        artifact_dir.mkdir(parents=True, exist_ok=True)
+        preview_root = self.store_root / "previews"
+        preview_root.mkdir(parents=True, exist_ok=True)
+        artifact_dir = preview_root / package.preview_id
+        if artifact_dir.exists():
+            raise AuthError(409, "preview_conflict", "durable preview already exists")
+        staging = preview_root / f".{package.preview_id}.staging-{secrets.token_hex(8)}"
+        staging.mkdir(parents=False, exist_ok=False)
         preview_data: dict[str, object] = {
             "preview_id": package.preview_id,
             "token": package.token,
             "selection_hash": package.selection_hash,
+            "authorization_digest": package.authorization_digest,
             "selected": list(package.selected),
             "plan_id": package.plan_id,
             "run_id": package.run_id,
@@ -587,9 +612,14 @@ class RecommendationService:
             "target_snapshot": dict(package.target_snapshot),
             "constraints_snapshot": dict(package.constraints_snapshot),
         }
-        atomic_write_json(artifact_dir / "preview.json", preview_data)
-        if package.artifact is not None:
-            atomic_write_json(artifact_dir / "plan.json", package.artifact.to_plain_dict())
+        try:
+            atomic_write_json(staging / "preview.json", preview_data)
+            if package.artifact is not None:
+                atomic_write_json(staging / "plan.json", package.artifact.to_plain_dict())
+            staging.rename(artifact_dir)
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
 
     # ----------------------------------------------------------- recipe
     def preview_recipe(self, recipe: CompressionRecipe) -> dict[str, Any]:
@@ -826,8 +856,8 @@ class RecommendationService:
             raise AuthError(403, "preview_token_mismatch", "preview does not belong to this token")
         if not selection_hash:
             raise AuthError(400, "hash_required", "selection hash required")
-        if selection_hash != package.selection_hash:
-            raise AuthError(409, "selection_mismatch", "selection hash does not match the preview")
+        if selection_hash != package.authorization_digest:
+            raise AuthError(409, "preview_mismatch", "authorization digest does not match preview")
         if selected is None or len(selected) == 0:
             raise AuthError(400, "selection_empty", "start selection must be non-empty")
         if package.artifact is None:
@@ -847,12 +877,15 @@ class RecommendationService:
         # different input set is a mismatch — never a silent re-identity).
         if (inputs or {}) != package.inputs:
             raise AuthError(409, "inputs_mismatch", "start inputs differ from the preview inputs")
-        # start must reference the preview's plan_id and recipe digest exactly;
-        # any supplied non-empty handle that disagrees is a mismatch (never a
-        # silent re-compile/re-identity).
-        if plan_id and plan_id != package.plan_id:
+        # Both immutable handles are mandatory, never optional compatibility
+        # fields. Omitting either cannot authorize execution.
+        if not plan_id:
+            raise AuthError(400, "plan_required", "plan_id required")
+        if not recipe_sha256:
+            raise AuthError(400, "recipe_required", "recipe_sha256 required")
+        if plan_id != package.plan_id:
             raise AuthError(409, "plan_mismatch", "plan_id does not match the preview's plan")
-        if recipe_sha256 and recipe_sha256 != package.recipe_sha256:
+        if recipe_sha256 != package.recipe_sha256:
             raise AuthError(409, "recipe_mismatch", "recipe digest does not match the preview")
 
         run_id = package.run_id
@@ -880,12 +913,19 @@ class RecommendationService:
             # Persist job identity (durable PENDING job.json) + immutable plan
             # atomically under the lock BEFORE returning run_id, so the run is
             # immediately observable and a crash can never lose a reserved run.
-            self._persist_run(package, run_id)
-            package.dispatch_started = True
+            created_run = self._persist_run(package, run_id)
             self.dispatched[run_id] = {"preview_id": preview_id, "token": token}
-            self._save_dispatch_registry()
+            try:
+                self._save_dispatch_registry()
+            except Exception:
+                self.dispatched.pop(run_id, None)
+                if created_run:
+                    self._remove_created_run(package)
+                raise
+            package.dispatch_started = True
             if self.supervised_executor:
                 self._pending_runs.append(package)
+                self._ensure_worker_locked()
                 self._idle.notify()
             else:
                 # non-supervised fallback: dedicated non-daemon worker (joined
@@ -900,15 +940,15 @@ class RecommendationService:
                 worker.start()
         return {"run_id": run_id, "status": "started"}
 
-    def _persist_run(self, package: _PendingPreview, run_id: str) -> None:
+    def _persist_run(self, package: _PendingPreview, run_id: str) -> bool:
         """Service-side authority for job+plan persistence: ATOMIC job.json +
         plan.json writes BEFORE dispatch. No suppression here — a persistence
         failure aborts the start (never starts a job that is not on disk). The
         plan is written first, then the pending job; if either fails the partial
         run dir is removed so a caller never observes a half-persisted run."""
-        import shutil
-
         compiled = self.plane.compile_recipe(package.recipe)
+        expected_run_dir = self.plane.work_root / "runs" / run_id
+        created_run = not expected_run_dir.exists()
         engine = JobEngine(compiled, self.registry, self.plane.work_root)
         engine._bind_run(package.inputs)
         run_dir = Path(engine.run_dir)
@@ -918,6 +958,28 @@ class RecommendationService:
             # artifact is non-None here (re-verified before dispatch).
             if package.artifact is None:
                 raise RuntimeError("preview has no verified executable plan")
+            if not created_run:
+                existing = self.plane.engine_for(run_id)
+                existing_artifact = CompiledPlanArtifact.model_validate_json(
+                    existing.plan_path.read_text(encoding="utf-8")
+                )
+                existing_identity = (
+                    existing_artifact.run_id,
+                    existing_artifact.plan_id,
+                    existing_artifact.recipe_sha256,
+                    canonical_json(dict(existing_artifact.inputs)),
+                )
+                package_identity = (
+                    package.artifact.run_id,
+                    package.artifact.plan_id,
+                    package.artifact.recipe_sha256,
+                    canonical_json(dict(package.artifact.inputs)),
+                )
+                if existing_identity != package_identity:
+                    raise AuthError(409, "run_conflict", "existing run plan differs")
+                if existing._load_job() is None:
+                    raise AuthError(409, "run_conflict", "existing run has no durable job")
+                return False
             atomic_write_json(engine.plan_path, package.artifact.to_plain_dict())
             if not engine.job_path.exists():
                 job = engine._init_run_dir(package.inputs)  # run dir + journal
@@ -929,9 +991,17 @@ class RecommendationService:
                     engine._save(existing_job)
         except Exception:
             # abort cleanly: no reserved run, no half-persisted run dir
-            if run_dir.exists():
+            if created_run and run_dir.exists():
                 shutil.rmtree(run_dir, ignore_errors=True)
             raise
+        return created_run
+
+    def _remove_created_run(self, package: _PendingPreview) -> None:
+        """Rollback only a run directory created by this failed reservation."""
+        compiled = self.plane.compile_recipe(package.recipe)
+        engine = JobEngine(compiled, self.registry, self.plane.work_root)
+        engine._bind_run(package.inputs)
+        shutil.rmtree(engine.run_dir, ignore_errors=True)
 
     def _reverify_under_lock(self, package: _PendingPreview) -> None:
         """Under the dispatch lock, reverify the stored verified artifact and its
@@ -974,6 +1044,19 @@ class RecommendationService:
             if package is not None:
                 self._exec_one(package)
 
+    def _ensure_worker_locked(self) -> None:
+        """Start the lazy supervised worker while the dispatch lock is held."""
+        if self._shutdown_event.is_set():
+            raise AuthError(503, "service_shutting_down", "service is shutting down")
+        if self._worker is not None and self._worker.is_alive():
+            return
+        self._worker = threading.Thread(
+            target=self._executor_loop,
+            name="atlas-recommend-executor",
+            daemon=True,
+        )
+        self._worker.start()
+
     def _exec_one(self, package: _PendingPreview) -> None:
         try:
             compiled = self.plane.compile_recipe(package.recipe)
@@ -992,8 +1075,8 @@ class RecommendationService:
             engine._bind_run(package.inputs)
             job = engine._load_job()
             if job is None:
-                engine._init_run_dir(package.inputs)
-                job = engine._load_job()
+                job = engine._init_run_dir(package.inputs)
+                engine._save(job)
             if job is None:
                 raise RuntimeError("no durable job to terminalize")
             if job.is_terminal():
@@ -1056,6 +1139,9 @@ class RecommendationService:
                 if not preview_id:
                     continue
                 selection_hash = str(meta.get("selection_hash", ""))
+                authorization_digest = str(meta.get("authorization_digest", ""))
+                if not authorization_digest:
+                    continue
                 selected = list(meta.get("selected") or [])
                 token = str(meta.get("token", ""))
                 artifact = CompiledPlanArtifact.model_validate_json(
@@ -1075,6 +1161,7 @@ class RecommendationService:
                 artifact=artifact if artifact is not None else None,
                 inputs=dict(artifact.inputs),
                 run_id=run_id,
+                authorization_digest=authorization_digest,
             )
             pkg.plan_id = str(meta.get("plan_id", "")) or artifact.plan_id
             pkg.recipe_sha256 = str(meta.get("recipe_sha256", ""))
@@ -1117,6 +1204,37 @@ class RecommendationService:
                         "token": entry.get("token", ""),
                     }
 
+    def _reconstruct_dispatch_registry(self) -> None:
+        """Recover reservations from verified durable preview+run artifacts.
+
+        This closes the crash window between durable run creation and registry
+        promotion: a restart treats every valid persisted run as reserved.
+        """
+        changed = False
+        for package in self.pending_previews.values():
+            run_id = package.run_id
+            if not run_id or run_id in self.dispatched:
+                continue
+            try:
+                engine = self.plane.engine_for(run_id)
+                if not (engine.plan_path.exists() and engine.job_path.exists()):
+                    continue
+                artifact = CompiledPlanArtifact.model_validate_json(
+                    engine.plan_path.read_text(encoding="utf-8")
+                )
+                artifact.verify()
+                if artifact.run_id != run_id or artifact.plan_id != package.plan_id:
+                    continue
+            except Exception:  # noqa: BLE001
+                continue
+            self.dispatched[run_id] = {
+                "preview_id": package.preview_id,
+                "token": package.token,
+            }
+            changed = True
+        if changed:
+            self._save_dispatch_registry()
+
     def _save_dispatch_registry(self) -> None:
         entries = [
             {
@@ -1126,8 +1244,7 @@ class RecommendationService:
             }
             for rid, info in self.dispatched.items()
         ]
-        with contextlib.suppress(Exception):  # noqa: BLE001
-            atomic_write_json(self.store_root / "dispatch-registry.json", entries)
+        atomic_write_json(self.store_root / "dispatch-registry.json", entries)
 
     def _package_for_run(self, run_id: str) -> _PendingPreview | None:
         info = self.dispatched.get(run_id)
@@ -1141,8 +1258,7 @@ class RecommendationService:
             expected = self.plane.work_root / "runs" / run_id
             if not (expected / "job.json").exists():
                 return None
-            compiled = self.plane.compile_recipe(self.plane.engine_for(run_id).compiled.recipe)
-            return JobEngine(compiled, self.registry, self.plane.work_root)
+            return self.plane.engine_for(run_id)
         except Exception:  # noqa: BLE001
             return None
 

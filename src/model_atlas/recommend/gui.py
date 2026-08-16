@@ -302,7 +302,13 @@ $('compressBtn').addEventListener('click', async () => {
     const r = await fetch('/api/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: authToken, preview_id: preview.preview_id, hash: preview.hash, selected: selArr, inputs: {} })
+      body: JSON.stringify({ token: authToken, preview_id: preview.preview_id,
+        hash: preview.hash,
+        plan_id: preview.plan_id,
+        recipe_sha256: preview.recipe_sha256,
+        selected: selArr,
+        inputs: {}
+      })
     });
     const data = await r.json();
     if (!r.ok) throw new Error((data && data.error) || ('start ' + r.status));

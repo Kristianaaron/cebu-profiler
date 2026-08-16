@@ -120,7 +120,8 @@ def test_subset_preview_and_start_bind_subset_hash(server, service):
     )
     assert status == 200
     preview = _json((status, data))
-    assert preview["hash"] == subset_hash
+    assert preview["hash"] != subset_hash
+    assert len(preview["hash"]) == 64
 
     # The subset preview is not executable (placeholder adapters). Instead of
     # mocking, seed a REAL executable recipe for the same preview shape so we
@@ -146,6 +147,7 @@ def test_subset_preview_and_start_bind_subset_hash(server, service):
     status, data = _post(
         server, "/api/start",
         {"token": auth["token"], "preview_id": "pv-subset", "hash": subset_hash,
+         "plan_id": artifact.plan_id, "recipe_sha256": artifact.recipe_sha256,
          "selected": subset, "inputs": {}},
     )
     assert status == 200
@@ -156,15 +158,17 @@ def test_subset_preview_and_start_bind_subset_hash(server, service):
     status, data = _post(
         server, "/api/start",
         {"token": auth["token"], "preview_id": "pv-subset", "hash": auth["selection_hash"],
+         "plan_id": artifact.plan_id, "recipe_sha256": artifact.recipe_sha256,
          "selected": subset, "inputs": {}},
     )
     assert status == 409
-    assert _json((status, data))["code"] == "selection_mismatch"
+    assert _json((status, data))["code"] == "preview_mismatch"
 
     # unknown preview fails closed
     status, data = _post(
         server, "/api/start",
         {"token": auth["token"], "preview_id": "pv-nope", "hash": subset_hash,
+         "plan_id": artifact.plan_id, "recipe_sha256": artifact.recipe_sha256,
          "selected": subset, "inputs": {}},
     )
     assert status == 410
@@ -197,7 +201,10 @@ def test_run_lineage_real_completed_run(tmp_path: Path):
         token=tok, preview_id="pv-rl", selection_hash=h, selected=["rl-method"],
         recipe=recipe, artifact=artifact, inputs={}, run_id=artifact.run_id,
     )
-    res = svc.start_authorized(tok, "pv-rl", h, ["rl-method"])
+    res = svc.start_authorized(
+        tok, "pv-rl", h, ["rl-method"],
+        plan_id=artifact.plan_id, recipe_sha256=artifact.recipe_sha256,
+    )
     run_id = res["run_id"]
 
     # wait for durable completion

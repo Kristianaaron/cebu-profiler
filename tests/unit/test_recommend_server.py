@@ -202,7 +202,7 @@ def test_preview_selection_endpoint(server: RecommendationServer, service):
     token = auth["token"]
     authorized = auth["authorized_methods"]
     # NONEMPTY PROPER SUBSET is allowed, and the returned hash is the subset's
-    # own deterministic hash — not the full authorized set's hash.
+    # own full authorization digest — not the selection-only hash.
     subset = authorized[:2]
     subset_hash = _selection_hash(subset)
     assert subset_hash != auth["selection_hash"]  # the subsets genuinely differ
@@ -212,7 +212,8 @@ def test_preview_selection_endpoint(server: RecommendationServer, service):
     assert status == 200
     body = _json((status, data))
     assert body["preview_id"].startswith("pv-")
-    assert body["hash"] == subset_hash
+    assert body["hash"] != subset_hash
+    assert len(body["hash"]) == 64
     assert body["plan_id"] is None  # placeholder adapters -> no verified plan
     assert body["readiness"]["verified_plan"] is False
     assert body["selected_methods"] == subset
@@ -250,7 +251,7 @@ def test_preview_selection_rejects_unknown_token(server: RecommendationServer, s
 
 def test_preview_selection_full_set_allowed(server: RecommendationServer, service):
     """The FULL authorized set is a valid (non-empty, all-authorized) subset and
-    still previews — its hash equals the token's authorized selection hash."""
+    still previews — its authorization digest is stronger than selection-only."""
 
     auth = _authorize(server, service)
     status, data = _post(
@@ -260,7 +261,8 @@ def test_preview_selection_full_set_allowed(server: RecommendationServer, servic
     )
     assert status == 200
     body = _json((status, data))
-    assert body["hash"] == auth["selection_hash"]
+    assert body["hash"] != auth["selection_hash"]
+    assert len(body["hash"]) == 64
     assert body["selected_methods"] == auth["authorized_methods"]
 
 
@@ -313,10 +315,11 @@ def test_start_rejects_mismatched_hash(server: RecommendationServer, service):
         server,
         "/api/start",
         {"token": auth["token"], "preview_id": preview["preview_id"],
-         "hash": "wrong", "selected": sel, "inputs": {}},
+         "hash": "wrong", "plan_id": "wrong-plan", "recipe_sha256": "wrong-recipe",
+         "selected": sel, "inputs": {}},
     )
     assert status == 409
-    assert _json((status, data))["code"] == "selection_mismatch"
+    assert _json((status, data))["code"] == "preview_mismatch"
 
 
 def test_start_rejects_unknown_preview(server: RecommendationServer, service):
@@ -326,7 +329,8 @@ def test_start_rejects_unknown_preview(server: RecommendationServer, service):
         server,
         "/api/start",
         {"token": auth["token"], "preview_id": "pv-never",
-         "hash": auth["selection_hash"], "selected": sel, "inputs": {}},
+         "hash": auth["selection_hash"], "plan_id": "none", "recipe_sha256": "none",
+         "selected": sel, "inputs": {}},
     )
     assert status == 410
     assert _json((status, data))["code"] == "preview_unknown"
@@ -342,7 +346,8 @@ def test_start_rejects_empty_selection(server: RecommendationServer, service):
         server,
         "/api/start",
         {"token": auth["token"], "preview_id": preview["preview_id"],
-         "hash": preview["hash"], "selected": [], "inputs": {}},
+         "hash": preview["hash"], "plan_id": "none", "recipe_sha256": "none",
+         "selected": [], "inputs": {}},
     )
     assert status == 400
     assert _json((status, data))["code"] == "selection_empty"
@@ -353,7 +358,8 @@ def test_start_rejects_unknown_token(server: RecommendationServer, service):
     status, data = _post(
         server,
         "/api/start",
-        {"token": "bogus", "preview_id": "pv-x", "hash": "h", "selected": ["a"], "inputs": {}},
+        {"token": "bogus", "preview_id": "pv-x", "hash": "h",
+         "plan_id": "none", "recipe_sha256": "none", "selected": ["a"], "inputs": {}},
     )
     assert status == 401
     assert _json((status, data))["code"] == "token_unknown"
@@ -372,7 +378,8 @@ def test_start_rejects_not_executable_preview(server: RecommendationServer, serv
         server,
         "/api/start",
         {"token": auth["token"], "preview_id": preview["preview_id"],
-         "hash": preview["hash"], "selected": sel, "inputs": {}},
+         "hash": preview["hash"], "plan_id": "none",
+         "recipe_sha256": preview["recipe_sha256"], "selected": sel, "inputs": {}},
     )
     assert status == 409
     assert _json((status, data))["code"] == "preview_not_executable"
@@ -422,18 +429,17 @@ def test_browser_http_sequence(server: RecommendationServer, service):
     assert status == 200
     preview = _json((status, data))
     assert preview["preview_id"].startswith("pv-")
-    assert preview["hash"] == auth["selection_hash"]
+    assert preview["hash"] != auth["selection_hash"]
     assert preview["readiness"]["verified_plan"] is False
 
-    # 5. start (no verified executable plan) fails closed
+    # 5. start without immutable plan handles fails closed at the HTTP boundary
     status, data = _post(
         server,
         "/api/start",
         {"token": auth["token"], "preview_id": preview["preview_id"],
          "hash": preview["hash"], "selected": authorized, "inputs": {}},
     )
-    assert status == 409
-    assert _json((status, data))["code"] == "preview_not_executable"
+    assert status == 400
 
 
 # job read endpoints (fixture/monkeypatch)
@@ -618,7 +624,9 @@ def test_start_async_immediate_return_monkeypatched(
 
     status, data = _post(
         server, "/api/start",
-        {"token": tok, "preview_id": "pv-ep", "hash": h, "selected": ["m1"], "inputs": {}},
+        {"token": tok, "preview_id": "pv-ep", "hash": h,
+         "plan_id": artifact.plan_id, "recipe_sha256": artifact.recipe_sha256,
+         "selected": ["m1"], "inputs": {}},
     )
     assert status == 200
     body = _json((status, data))
@@ -634,7 +642,9 @@ def test_start_async_immediate_return_monkeypatched(
     # replay rejected deterministically
     status, data = _post(
         server, "/api/start",
-        {"token": tok, "preview_id": "pv-ep", "hash": h, "selected": ["m1"], "inputs": {}},
+        {"token": tok, "preview_id": "pv-ep", "hash": h,
+         "plan_id": artifact.plan_id, "recipe_sha256": artifact.recipe_sha256,
+         "selected": ["m1"], "inputs": {}},
     )
     assert status == 409
     assert _json((status, data))["code"] == "replay"

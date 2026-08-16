@@ -307,7 +307,8 @@ def test_preview_requires_nonempty_authorized_subset(tmp_path: Path):
     # a nonempty PROPER SUBSET is authorized and binds its own subset hash
     subset = a["authorized_methods"][:1]
     pv = svc.preview_selection(a["token"], subset, inputs={})
-    assert pv["hash"] == _selection_hash(subset)
+    assert pv["hash"] != _selection_hash(subset)
+    assert len(pv["hash"]) == 64
     # a method OUTSIDE the authorized set is never authorized
     with pytest.raises(AuthError) as exc:
         svc.preview_selection(a["token"], ["not-authorized-method"], inputs={})
@@ -352,7 +353,10 @@ def test_pin_drift_refuses_start(tmp_path: Path):
     rec = svc.registry.get("atlas_quant_probe")
     rec.version = "9.9.9-drift"
     with pytest.raises(AuthError) as exc:
-        svc.start_authorized("t-ex", "pv-ex", h, ["m1"], plan_id=pkg.plan_id)
+        svc.start_authorized(
+            "t-ex", "pv-ex", h, ["m1"],
+            plan_id=pkg.plan_id, recipe_sha256=pkg.recipe_sha256,
+        )
     assert exc.value.code in {"pins_drift", "plan_drift"}
     svc.shutdown(wait=True)
 
@@ -365,18 +369,27 @@ def test_replay_and_global_run_reservation(tmp_path: Path):
         profile_root=str(tmp_path / "profiles"), work_root=str(tmp_path / "runs")
     )
     h, pkg = _seed_executable(svc, tmp_path, token="t-a", preview_id="pv-a")
-    r = svc.start_authorized("t-a", "pv-a", h, ["m1"], plan_id=pkg.plan_id)
+    r = svc.start_authorized(
+        "t-a", "pv-a", h, ["m1"],
+        plan_id=pkg.plan_id, recipe_sha256=pkg.recipe_sha256,
+    )
     assert r["status"] == "started"
     # second start same token/preview => replay
     with pytest.raises(AuthError) as exc:
-        svc.start_authorized("t-a", "pv-a", h, ["m1"], plan_id=pkg.plan_id)
+        svc.start_authorized(
+            "t-a", "pv-a", h, ["m1"],
+            plan_id=pkg.plan_id, recipe_sha256=pkg.recipe_sha256,
+        )
     assert exc.value.code == "replay"
     # same recipe+inputs via a DIFFERENT token/preview => same run_id => replay
 
     h2, pkg2 = _seed_executable(svc, tmp_path, token="t-b", preview_id="pv-b")
     assert pkg2.run_id == pkg.run_id  # deterministic identity
     with pytest.raises(AuthError) as exc:
-        svc.start_authorized("t-b", "pv-b", h2, ["m1"], plan_id=pkg2.plan_id)
+        svc.start_authorized(
+            "t-b", "pv-b", h2, ["m1"],
+            plan_id=pkg2.plan_id, recipe_sha256=pkg2.recipe_sha256,
+        )
     assert exc.value.code == "replay"
     svc.shutdown(wait=True, timeout=10)
 
@@ -397,7 +410,10 @@ def test_persistence_failure_aborts_start_no_dispatch(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(api_mod, "atomic_write_json", _boom)
     with pytest.raises(OSError):
-        svc.start_authorized("t-ex", "pv-ex", h, ["m1"], plan_id=pkg.plan_id)
+        svc.start_authorized(
+            "t-ex", "pv-ex", h, ["m1"],
+            plan_id=pkg.plan_id, recipe_sha256=pkg.recipe_sha256,
+        )
     # not dispatched, run_id not reserved
     assert pkg.run_id not in svc.dispatched
     assert not (svc.plane.work_root / "runs" / pkg.run_id / "job.json").exists()
@@ -421,7 +437,10 @@ def test_driver_failure_terminalizes_persisted_job(tmp_path: Path, monkeypatch):
         raise RuntimeError("driver crashed")
 
     monkeypatch.setattr(JobEngine, "run", _boom_run)
-    r = svc.start_authorized("t-ex", "pv-ex", h, ["m1"], plan_id=pkg.plan_id)
+    r = svc.start_authorized(
+        "t-ex", "pv-ex", h, ["m1"],
+        plan_id=pkg.plan_id, recipe_sha256=pkg.recipe_sha256,
+    )
     status = ""
     for _ in range(200):
         status = svc.plane.status(r["run_id"])["status"]
@@ -492,7 +511,10 @@ def test_restart_resumes_reserved_pending_job(tmp_path: Path):
     # service 1: seed + start (run completes)
     svc1 = _build()
     si = _seed(svc1, "tok-1", "pv-1")
-    r1 = svc1.start_authorized("tok-1", "pv-1", si[0], ["m1"], plan_id=si[1].plan_id)
+    r1 = svc1.start_authorized(
+        "tok-1", "pv-1", si[0], ["m1"],
+        plan_id=si[1].plan_id, recipe_sha256=si[1].recipe_sha256,
+    )
     for _ in range(200):
         st = svc1.plane.status(r1["run_id"])["status"]
         if str(st).endswith(("completed", "failed_terminal", "failed_recoverable", "cancelled")):
@@ -520,7 +542,10 @@ def test_shutdown_hook_drains_pending_runs(tmp_path: Path):
         profile_root=str(tmp_path / "profiles"), work_root=str(tmp_path / "runs")
     )
     h, pkg = _seed_executable(svc, tmp_path)
-    r = svc.start_authorized("t-ex", "pv-ex", h, ["m1"], plan_id=pkg.plan_id)
+    r = svc.start_authorized(
+        "t-ex", "pv-ex", h, ["m1"],
+        plan_id=pkg.plan_id, recipe_sha256=pkg.recipe_sha256,
+    )
     svc.shutdown(wait=True, timeout=15)
     status = svc.plane.status(r["run_id"])["status"]
     assert str(status) not in ("pending", "preparing", "running", "resuming")
@@ -536,8 +561,10 @@ def test_start_rejected_after_shutdown(tmp_path: Path):
     h, pkg = _seed_executable(svc, tmp_path)
     svc.shutdown(wait=True)
     with pytest.raises(AuthError) as exc:
-        svc.start_authorized("t-ex", "pv-ex", h, ["m1"], plan_id=pkg.plan_id)
+        svc.start_authorized(
+            "t-ex", "pv-ex", h, ["m1"],
+            plan_id=pkg.plan_id, recipe_sha256=pkg.recipe_sha256,
+        )
     assert exc.value.code == "service_shutting_down"
     assert pkg.run_id not in svc.dispatched  # never reserved
     svc.shutdown(wait=True)
-
