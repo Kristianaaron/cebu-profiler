@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import signal
+import subprocess
 from collections.abc import Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -11,6 +14,7 @@ from model_atlas.ops.maintenance import (
     MaintenanceConfig,
     MaintenanceCoordinator,
     MaintenanceInterrupted,
+    SubprocessCommandRunner,
     receipt_contains_secret_keys,
 )
 
@@ -271,3 +275,84 @@ def test_unit_is_not_removed_when_journal_cannot_be_persisted(tmp_path: Path) ->
     assert "remove_head_runtime_unit" not in ids
     assert "remove_worker_rpc_unit" not in ids
     assert not receipt.success
+
+
+def test_payload_scope_is_never_entered_when_acquisition_fails(tmp_path: Path) -> None:
+    entered: list[str] = []
+
+    @contextmanager
+    def scope():  # type: ignore[no-untyped-def]
+        entered.append("enter")
+        try:
+            yield
+        finally:
+            entered.append("exit")
+
+    runner = FakeRunner(active=ALL_PRODUCTION, fail_mutation=1)
+    MaintenanceCoordinator(config(tmp_path), runner, execute=True).run(
+        ["operator-command"], payload_scope=scope
+    )
+    assert entered == []
+
+
+def test_payload_scope_wraps_only_payload_and_exits_before_restore(tmp_path: Path) -> None:
+    events: list[str] = []
+
+    @contextmanager
+    def scope():  # type: ignore[no-untyped-def]
+        events.append("lease-enter")
+        try:
+            yield
+        finally:
+            events.append("lease-exit")
+
+    class OrderedRunner(FakeRunner):
+        def run(self, argv: Sequence[str]) -> CommandResult:
+            if tuple(argv) == ("operator-command",):
+                events.append("payload")
+            if tuple(argv)[-2:] == ("stop", HEAD_TRANSIENT_UNIT):
+                events.append("restore-begins")
+            return super().run(argv)
+
+    MaintenanceCoordinator(
+        config(tmp_path), OrderedRunner(active=ALL_PRODUCTION), execute=True
+    ).run(["operator-command"], payload_scope=scope)
+    assert events.index("lease-enter") < events.index("payload") < events.index("lease-exit")
+    assert events.index("lease-exit") < events.index("restore-begins")
+
+
+def test_subprocess_runner_terminates_and_reaps_group_before_interrupt_propagates() -> None:
+    events: list[str] = []
+
+    class Child:
+        pid = 444
+        waits = 0
+
+        def communicate(self) -> tuple[str, str | None]:
+            events.append("communicate")
+            raise MaintenanceInterrupted(15)
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.waits += 1
+            events.append(f"wait-{self.waits}")
+            if self.waits == 1:
+                raise subprocess.TimeoutExpired(["payload"], timeout)
+            return 0
+
+    def factory(*_args: object, **kwargs: object) -> Child:
+        assert kwargs["start_new_session"] is True
+        return Child()
+
+    def killpg(pid: int, sig: signal.Signals) -> None:
+        events.append(f"kill-{pid}-{sig.name}")
+
+    runner = SubprocessCommandRunner(process_factory=factory, killpg=killpg, wait_timeout_seconds=1)
+    with pytest.raises(MaintenanceInterrupted):
+        runner.run(["payload"])
+    assert events == [
+        "communicate",
+        "kill-444-SIGTERM",
+        "wait-1",
+        "kill-444-SIGKILL",
+        "wait-2",
+    ]

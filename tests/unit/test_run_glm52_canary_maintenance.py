@@ -57,7 +57,7 @@ def test_main_restores_signal_handlers_when_coordinator_is_interrupted(
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
-        def run(self, _payload: object) -> MaintenanceReceipt:
+        def run(self, _payload: object, **_kwargs: object) -> MaintenanceReceipt:
             raise MaintenanceInterrupted(15)
 
     monkeypatch.setattr(module, "MaintenanceCoordinator", _Coordinator)
@@ -79,8 +79,16 @@ def test_main_installs_traps_around_fake_coordinator_only(
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             calls.append("init")
 
-        def run(self, _payload: object) -> MaintenanceReceipt:
+        def run(self, payload: object, **kwargs: object) -> MaintenanceReceipt:
             calls.append("run")
+            assert isinstance(payload, tuple)
+            assert "run_bound_canary_payload.py" not in payload
+            scope_factory = kwargs["payload_scope"]
+            assert callable(scope_factory)
+            with scope_factory():
+                assert _args(tmp_path).lease.exists()
+                calls.append("lease-live")
+            assert not _args(tmp_path).lease.exists()
             now = datetime.now(UTC)
             return MaintenanceReceipt(
                 run_id="fake", dry_run=False, started_at=now, finished_at=now, success=True
@@ -88,7 +96,7 @@ def test_main_installs_traps_around_fake_coordinator_only(
 
     monkeypatch.setattr(module, "MaintenanceCoordinator", _Coordinator)
     assert module.main() == 0
-    assert calls == ["init", "run", "restore"]
+    assert calls == ["init", "run", "lease-live", "restore"]
 
 
 def test_canary_cli_default_uses_installed_vllm_python(
@@ -111,3 +119,7 @@ def test_canary_cli_default_uses_installed_vllm_python(
     assert module.parse_args().telemetry_python == Path(
         "/home/kristianaaron/ai-lab/venvs/vllm/bin/python"
     )
+
+
+def test_deleted_direct_lease_wrapper_cannot_be_invoked() -> None:
+    assert not (Path(__file__).parents[2] / "scripts" / "run_bound_canary_payload.py").exists()

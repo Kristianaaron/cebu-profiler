@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import sys
+from functools import partial
 from pathlib import Path
 
 from model_atlas.canary_constants import HEAD_TRANSIENT_UNIT, WORKER_TRANSIENT_UNIT
+from model_atlas.canary_lease import CanaryLeaseBinding, active_lease_scope
 from model_atlas.ops.maintenance import (
     MaintenanceConfig,
     MaintenanceCoordinator,
@@ -34,23 +36,7 @@ def main() -> int:
     args = parse_args()
     canary_args = args.canary_args[1:] if args.canary_args[:1] == ["--"] else args.canary_args
     canary_script = Path(__file__).with_name("run_two_node_canary.py")
-    payload_script = Path(__file__).with_name("run_bound_canary_payload.py")
     payload = (
-        sys.executable,
-        str(payload_script),
-        "--lease",
-        str(args.lease),
-        "--plan-sha256",
-        args.plan_sha256,
-        "--artifact",
-        args.artifact,
-        "--artifact-sha256",
-        args.artifact_sha256,
-        "--head-unit",
-        HEAD_TRANSIENT_UNIT,
-        "--worker-unit",
-        WORKER_TRANSIENT_UNIT,
-        "--",
         sys.executable,
         str(canary_script),
         "--execute",
@@ -70,9 +56,21 @@ def main() -> int:
     )
     previous = install_signal_traps()
     try:
+        binding = CanaryLeaseBinding(
+            plan_sha256=args.plan_sha256,
+            artifact_path=args.artifact,
+            artifact_sha256=args.artifact_sha256,
+            head_unit=HEAD_TRANSIENT_UNIT,
+            worker_unit=WORKER_TRANSIENT_UNIT,
+        )
         receipt = MaintenanceCoordinator(
             config, SubprocessCommandRunner(), execute=args.execute
-        ).run(payload if args.execute else None)
+        ).run(
+            payload if args.execute else None,
+            payload_scope=(
+                partial(active_lease_scope, args.lease, binding) if args.execute else None
+            ),
+        )
     finally:
         restore_signal_traps(previous)
     print(receipt.model_dump_json())

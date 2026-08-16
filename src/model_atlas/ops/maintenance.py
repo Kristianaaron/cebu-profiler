@@ -14,6 +14,7 @@ import os
 import signal
 import subprocess
 from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from types import FrameType
@@ -41,18 +42,91 @@ class CommandRunner(Protocol):
         """Run argv directly (never through a shell)."""
 
 
+class _ChildProcess(Protocol):
+    pid: int
+
+    def communicate(self) -> tuple[str, str | None]: ...
+
+    def wait(self, timeout: float | None = None) -> int: ...
+
+
+class _ProcessFactory(Protocol):
+    def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        stdout: int,
+        stderr: int,
+        text: bool,
+        start_new_session: bool,
+    ) -> _ChildProcess: ...
+
+
 class SubprocessCommandRunner:
-    """Production runner.  stderr is intentionally not retained."""
+    """Production runner that reaps its child group before propagating signals."""
+
+    def __init__(
+        self,
+        *,
+        process_factory: _ProcessFactory | None = None,
+        killpg: Callable[[int, signal.Signals], None] = os.killpg,
+        wait_timeout_seconds: float = 10.0,
+    ) -> None:
+        if wait_timeout_seconds <= 0:
+            raise ValueError("wait timeout must be positive")
+        self._process_factory = process_factory or self._popen
+        self._killpg = killpg
+        self._wait_timeout = wait_timeout_seconds
+
+    @staticmethod
+    def _popen(
+        argv: Sequence[str],
+        *,
+        stdout: int,
+        stderr: int,
+        text: bool,
+        start_new_session: bool,
+    ) -> _ChildProcess:
+        return subprocess.Popen(
+            list(argv),
+            stdout=stdout,
+            stderr=stderr,
+            text=text,
+            start_new_session=start_new_session,
+        )
+
+    def _reap_group(self, process: _ChildProcess) -> None:
+        try:
+            self._killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            process.wait(timeout=self._wait_timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                self._killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                return
+            try:
+                process.wait(timeout=self._wait_timeout)
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("payload process group could not be reaped") from exc
 
     def run(self, argv: Sequence[str]) -> CommandResult:
-        result = subprocess.run(
-            list(argv),
-            check=False,
-            capture_output=True,
+        process = self._process_factory(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
-            timeout=None,
+            start_new_session=True,
         )
-        return CommandResult(returncode=result.returncode, stdout=result.stdout)
+        try:
+            stdout, _stderr = process.communicate()
+        except BaseException:
+            self._reap_group(process)
+            raise
+        returncode = process.wait()
+        return CommandResult(returncode=returncode, stdout=stdout)
 
 
 class BinaryHash(BaseModel):
@@ -404,7 +478,12 @@ class MaintenanceCoordinator:
                 == self._states["worker_rpc"].active,
             }
 
-    def run(self, payload: Sequence[str] | None = None) -> MaintenanceReceipt:
+    def run(
+        self,
+        payload: Sequence[str] | None = None,
+        *,
+        payload_scope: Callable[[], AbstractContextManager[None]] | None = None,
+    ) -> MaintenanceReceipt:
         started = self.clock()
         run_id = f"maintenance-{started.strftime('%Y%m%dT%H%M%S.%fZ')}"
         failure: str | None = None
@@ -412,13 +491,16 @@ class MaintenanceCoordinator:
         hashes = [self._hash_binary(path) for path in self.config.all_binary_paths()]
         try:
             self._acquire()
-            if payload and not self._record(
-                "operator_payload",
-                "operator_payload",
-                requested=True,
-                command=list(payload),
-            ):
-                raise MaintenanceFailure("operator_payload:return_code")
+            if payload:
+                scope = payload_scope() if payload_scope is not None else nullcontext()
+                with scope:
+                    if not self._record(
+                        "operator_payload",
+                        "operator_payload",
+                        requested=True,
+                        command=list(payload),
+                    ):
+                        raise MaintenanceFailure("operator_payload:return_code")
         except BaseException as exc:
             failure = self._failure_label(exc)
         finally:

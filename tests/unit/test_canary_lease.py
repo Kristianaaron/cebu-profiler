@@ -8,6 +8,7 @@ import pytest
 from model_atlas.canary_lease import (
     CanaryLeaseBinding,
     CanaryLeaseError,
+    active_lease_scope,
     remove_active_lease,
     require_active_lease,
     write_active_lease,
@@ -27,9 +28,10 @@ def _binding() -> CanaryLeaseBinding:
 def test_private_lease_binds_exact_plan_artifact_and_unit_names(tmp_path: Path) -> None:
     path = tmp_path / "active.json"
     handle = write_active_lease(path, _binding())
-    assert require_active_lease(
-        path, _binding(), expected_coordinator_pid=os.getpid()
-    ).binding == _binding()
+    assert (
+        require_active_lease(path, _binding(), expected_coordinator_pid=os.getpid()).binding
+        == _binding()
+    )
     with pytest.raises(CanaryLeaseError, match="binding"):
         require_active_lease(
             path,
@@ -69,3 +71,14 @@ def test_live_lease_rejects_wrong_coordinator_pid(tmp_path: Path) -> None:
     with pytest.raises(CanaryLeaseError, match="identity"):
         require_active_lease(path, _binding(), expected_coordinator_pid=os.getppid())
     remove_active_lease(handle)
+
+
+def test_scope_removes_live_lease_after_interrupted_payload(tmp_path: Path) -> None:
+    path = tmp_path / "active.json"
+    with pytest.raises(RuntimeError, match="payload"), active_lease_scope(path, _binding()):
+        assert (
+            require_active_lease(path, _binding(), expected_coordinator_pid=os.getpid()).binding
+            == _binding()
+        )
+        raise RuntimeError("payload interrupted")
+    assert not path.exists()

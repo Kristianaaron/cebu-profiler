@@ -5,6 +5,8 @@ from __future__ import annotations
 import fcntl
 import os
 import secrets
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -74,14 +76,18 @@ def write_active_lease(
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         now = datetime.now(UTC)
-        encoded = ActiveMaintenanceLease(
-            nonce=secrets.token_hex(32),
-            coordinator_pid=os.getpid(),
-            coordinator_start_ticks=_process_start_ticks(os.getpid()),
-            issued_at=now,
-            expires_at=now + lifetime,
-            binding=binding,
-        ).model_dump_json().encode()
+        encoded = (
+            ActiveMaintenanceLease(
+                nonce=secrets.token_hex(32),
+                coordinator_pid=os.getpid(),
+                coordinator_start_ticks=_process_start_ticks(os.getpid()),
+                issued_at=now,
+                expires_at=now + lifetime,
+                binding=binding,
+            )
+            .model_dump_json()
+            .encode()
+        )
         written = os.write(descriptor, encoded)
         if written != len(encoded):
             raise CanaryLeaseError("incomplete maintenance lease write")
@@ -151,3 +157,13 @@ def remove_active_lease(handle: ActiveLeaseHandle) -> None:
         raise CanaryLeaseError("maintenance lease cleanup failed") from exc
     finally:
         os.close(handle.descriptor)
+
+
+@contextmanager
+def active_lease_scope(path: Path, binding: CanaryLeaseBinding) -> Iterator[None]:
+    """Issue and remove a lease only while an acquired coordinator runs payload."""
+    handle = write_active_lease(path, binding)
+    try:
+        yield
+    finally:
+        remove_active_lease(handle)
