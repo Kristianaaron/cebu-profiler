@@ -21,6 +21,8 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from model_atlas.canary_constants import HEAD_TRANSIENT_UNIT, WORKER_TRANSIENT_UNIT
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -116,8 +118,8 @@ class MaintenanceConfig(BaseModel):
         "/home/kristianaaron/ai-lab/repos/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark/"
         "start-deepseek-v4-flash-dspark.sh"
     )
-    head_runtime_unit: str = "atlas-glm52-runtime.service"
-    worker_rpc_unit: str = "atlas-glm52-rpc.service"
+    head_runtime_unit: str = HEAD_TRANSIENT_UNIT
+    worker_rpc_unit: str = WORKER_TRANSIENT_UNIT
     worker_ssh_target: str = "10.77.0.2"
     head_runtime_unit_file: Path | None = None
     worker_rpc_unit_file: Path | None = None
@@ -391,8 +393,7 @@ class MaintenanceCoordinator:
             self._restoration_evidence = {
                 "dsv4": self._container_active(self.config.dsv4_container)
                 == self._states["dsv4"].active,
-                "qwen": self._unit_active(self.config.qwen_unit)
-                == self._states["qwen"].active,
+                "qwen": self._unit_active(self.config.qwen_unit) == self._states["qwen"].active,
                 "vision_adapter": self._unit_active(self.config.vision_adapter_unit)
                 == self._states["vision_adapter"].active,
                 "gateway": self._unit_active(self.config.gateway_unit)

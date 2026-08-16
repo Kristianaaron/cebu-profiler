@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from model_atlas.canary_constants import HEAD_TRANSIENT_UNIT, WORKER_TRANSIENT_UNIT
 from model_atlas.ops.maintenance import (
     CommandResult,
     MaintenanceConfig,
@@ -87,8 +88,8 @@ def config(tmp_path: Path) -> MaintenanceConfig:
         dsv4_stop_script=stop,
         dsv4_start_script=start,
         binary_paths=(binary,),
-        head_runtime_unit_file=tmp_path / "atlas-glm52-runtime.service",
-        worker_rpc_unit_file=Path("/tmp/atlas-glm52-rpc.service"),
+        head_runtime_unit_file=tmp_path / HEAD_TRANSIENT_UNIT,
+        worker_rpc_unit_file=Path("/tmp") / WORKER_TRANSIENT_UNIT,
         journal_dir=tmp_path / "journals",
         receipt_path=tmp_path / "receipt.json",
     )
@@ -178,8 +179,8 @@ def test_restore_starts_only_previously_active_production_services(tmp_path: Pat
 
 def test_restore_recreates_exact_preexisting_runtime_state(tmp_path: Path) -> None:
     active = ALL_PRODUCTION | {
-        "atlas-glm52-runtime.service",
-        "atlas-glm52-rpc.service",
+        HEAD_TRANSIENT_UNIT,
+        WORKER_TRANSIENT_UNIT,
     }
     runner = FakeRunner(active=active)
     receipt = MaintenanceCoordinator(config(tmp_path), runner, execute=True).run()
@@ -202,7 +203,7 @@ def test_second_signal_during_restore_does_not_abort_later_actions(tmp_path: Pat
             "systemctl",
             "--user",
             "stop",
-            "atlas-glm52-rpc.service",
+            WORKER_TRANSIENT_UNIT,
         ),
     )
     receipt = MaintenanceCoordinator(config(tmp_path), runner, execute=True).run(

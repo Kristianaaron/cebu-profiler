@@ -13,6 +13,8 @@ import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
+from model_atlas.canary_constants import HEAD_TRANSIENT_UNIT, WORKER_TRANSIENT_UNIT
+from model_atlas.canary_lease import CanaryLeaseBinding, require_active_lease
 from model_atlas.fit_telemetry import (
     CandidateBinding,
     TwoNodeTelemetryCollector,
@@ -24,6 +26,7 @@ from model_atlas.runtime_canary_driver import (
     LoopbackHttpTransport,
     SystemdUserRuntimeLifecycle,
 )
+from model_atlas.telemetry_python import TelemetryPythonConfig, verify_telemetry_python
 from model_atlas.two_node_canary_executor import (
     JsonlEvidenceStore,
     SshWorkerHashProbe,
@@ -55,6 +58,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--rdma-interface")
     parser.add_argument("--disk-device")
+    parser.add_argument(
+        "--telemetry-python",
+        type=Path,
+        default=Path("/home/kristian/ai-lab/venvs/vllm/bin/python"),
+    )
+    parser.add_argument("--telemetry-python-sha256")
+    parser.add_argument("--maintenance-lease", type=Path)
     parser.add_argument("--worker-ssh-target", default="10.77.0.2")
     parser.add_argument("--worker-host", default="169.254.200.197")
     parser.add_argument(
@@ -112,16 +122,42 @@ def main() -> int:
             )
         )
         return 0
-    if not args.rdma_interface or not args.disk_device:
-        raise RuntimeError("--rdma-interface and --disk-device are required with --execute")
+    if (
+        not args.rdma_interface
+        or not args.disk_device
+        or not args.telemetry_python_sha256
+        or args.maintenance_lease is None
+    ):
+        raise RuntimeError(
+            "--rdma-interface, --disk-device, --telemetry-python-sha256, and "
+            "--maintenance-lease are required with --execute"
+        )
+    require_active_lease(
+        args.maintenance_lease,
+        CanaryLeaseBinding(
+            plan_sha256=plan.canonical_sha256(),
+            artifact_path=str(config.artifact_path),
+            artifact_sha256=config.artifact_sha256,
+            head_unit=HEAD_TRANSIENT_UNIT,
+            worker_unit=WORKER_TRANSIENT_UNIT,
+        ),
+    )
 
     argv_runner = _ArgvRunner()
+    telemetry_python = TelemetryPythonConfig(
+        interpreter=args.telemetry_python,
+        interpreter_sha256=args.telemetry_python_sha256,
+        worker_ssh_target=args.worker_ssh_target,
+    )
+    verify_telemetry_python(telemetry_python, runner=argv_runner)
     requests = CanaryRequestClient(config, transport=LoopbackHttpTransport())
     lifecycle = SystemdUserRuntimeLifecycle(
         config,
         worker_ssh_target=args.worker_ssh_target,
         runner=argv_runner,
         health_ready=requests.health_ready,
+        worker_unit=WORKER_TRANSIENT_UNIT,
+        head_unit=HEAD_TRANSIENT_UNIT,
     )
     worker = SshWorkerHashProbe(
         ssh_target=args.worker_ssh_target,
@@ -131,8 +167,8 @@ def main() -> int:
         runner=argv_runner,
     )
     telemetry = TwoNodeTelemetryCollector(
-        probe_argv=(
-            str(args.telemetry_probe),
+        probe_argv=telemetry_python.probe_argv(
+            args.telemetry_probe,
             "--rdma-interface",
             args.rdma_interface,
             "--disk-device",
