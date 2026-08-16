@@ -1,0 +1,61 @@
+{
+  "forced_tokens_sha256": "539e8f6682cfe3768195e65e75ffcd2ba83b229282e79d94983856ff70ad07c8",
+  "ordered_sample_ids_sha256": "8c8500753e0450351aed1ec8fd1fe41920163030bba0f95945fcd226edfeb52f",
+  "partition": "canary_not_quality_evidence",
+  "purpose": "pipeline_identity_control",
+  "quality_claim": false,
+  "sample_count": 8,
+  "samples": [
+    {
+      "domain": "math",
+      "prompt_sha256": "42166e8d92c492abcddf61fb21bdaec3ead784142e9b4c006cc74f5a3dd9c188",
+      "sample_id": "canary-math-001"
+    },
+    {
+      "domain": "code",
+      "prompt_sha256": "a8479c056460248b7dd3954113439a25688481f8e664324bd7ba1758aad57381",
+      "sample_id": "canary-code-001"
+    },
+    {
+      "domain": "reasoning",
+      "prompt_sha256": "1260c8b40b28c69a8328f889a6c996c0e59e8c30529a73a18ecc27d5b3716c10",
+      "sample_id": "canary-reason-001"
+    },
+    {
+      "domain": "science",
+      "prompt_sha256": "d24c322d2c33fd5d42511d650a37a6e85895a034159b2f817f584d9615d13ae2",
+      "sample_id": "canary-science-001"
+    },
+    {
+      "domain": "instruction",
+      "prompt_sha256": "e6150649663150debd91470ba0b5d3087f255ac9fa3a688fd1be5da73c4609fa",
+      "sample_id": "canary-json-001"
+    },
+    {
+      "domain": "summarization",
+      "prompt_sha256": "4a61d8c117178380ce5db24268e625434dd6ee7204ee31cf091baaa92a61339e",
+      "sample_id": "canary-summary-001"
+    },
+    {
+      "domain": "logic",
+      "prompt_sha256": "30451f052b12562c52addca9c41ab17fea0c89a31934f2d86235a83c4ce01858",
+      "sample_id": "canary-logic-001"
+    },
+    {
+      "domain": "safety",
+      "prompt_sha256": "a68ba2ca96fceefafb3e4e35b95b509dfff726eabb71eb76a023ffef5e912ded",
+      "sample_id": "canary-safety-001"
+    }
+  ],
+  "schema_version": 1,
+  "tokenizer": {
+    "add_special_tokens": false,
+    "chat_template_sha256": "172dc74a35e1752df75ecfb2b2cf9326d2852bb1379868ebeec9571654489679",
+    "config_sha256": "77af7d4769cd62c107b90495cac9b0ba81573c86486821bfba2980c04285ec7a",
+    "implementation": "tokenizers.Tokenizer.from_file",
+    "implementation_version": "0.22.2",
+    "local_files_only": true,
+    "path": "/media/glm52/models/nvidia/GLM-5.2-NVFP4/tokenizer.json",
+    "sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d"
+  }
+}
