@@ -12,6 +12,8 @@ from model_atlas.ops.maintenance import (
     MaintenanceConfig,
     MaintenanceCoordinator,
     SubprocessCommandRunner,
+    install_signal_traps,
+    restore_signal_traps,
 )
 
 
@@ -66,9 +68,13 @@ def main() -> int:
         head_runtime_unit=HEAD_TRANSIENT_UNIT,
         worker_rpc_unit=WORKER_TRANSIENT_UNIT,
     )
-    receipt = MaintenanceCoordinator(config, SubprocessCommandRunner(), execute=args.execute).run(
-        payload if args.execute else None
-    )
+    previous = install_signal_traps()
+    try:
+        receipt = MaintenanceCoordinator(
+            config, SubprocessCommandRunner(), execute=args.execute
+        ).run(payload if args.execute else None)
+    finally:
+        restore_signal_traps(previous)
     print(receipt.model_dump_json())
     return 0 if receipt.success else 1
 

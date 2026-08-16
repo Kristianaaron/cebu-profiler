@@ -12,6 +12,7 @@ import json
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 from model_atlas.canary_constants import HEAD_TRANSIENT_UNIT, WORKER_TRANSIENT_UNIT
 from model_atlas.canary_lease import CanaryLeaseBinding, require_active_lease
@@ -29,6 +30,7 @@ from model_atlas.runtime_canary_driver import (
 from model_atlas.telemetry_python import TelemetryPythonConfig, verify_telemetry_python
 from model_atlas.two_node_canary_executor import (
     JsonlEvidenceStore,
+    RuntimeContract,
     SshWorkerHashProbe,
     SubprocessTelemetryRunner,
     TwoNodeCanaryExecutor,
@@ -61,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--telemetry-python",
         type=Path,
-        default=Path("/home/kristian/ai-lab/venvs/vllm/bin/python"),
+        default=Path("/home/kristianaaron/ai-lab/venvs/vllm/bin/python"),
     )
     parser.add_argument("--telemetry-python-sha256")
     parser.add_argument("--maintenance-lease", type=Path)
@@ -178,7 +180,10 @@ def main() -> int:
         runner=SubprocessTelemetryRunner(),
     )
     result = TwoNodeCanaryExecutor(
-        runtime=LlamaCppRpcRuntimeAdapter(config, toolchain_root=args.toolchain_root),
+        runtime=cast(
+            RuntimeContract,
+            LlamaCppRpcRuntimeAdapter(config, toolchain_root=args.toolchain_root),
+        ),
         worker_attestation=worker,
         lifecycle=lifecycle,
         requests=requests,
