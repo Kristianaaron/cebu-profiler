@@ -41,6 +41,21 @@ class RecConfidence(StrEnum):
     INSUFFICIENT = "insufficient"
 
 
+class CompressionIntent(StrEnum):
+    """User-selected compression strategy, bound into every authorization."""
+
+    QUANTIZE_ONLY = "quantize_only"
+    PRUNE_ONLY = "prune_only"
+    HYBRID = "hybrid"
+    CUSTOM = "custom"
+
+
+class MethodFamily(StrEnum):
+    ANALYSIS = "analysis"
+    QUANTIZATION = "quantization"
+    PRUNING = "pruning"
+
+
 RECOMMENDATION_POLICY_VERSION = "policy-v1"
 
 
@@ -215,6 +230,7 @@ class RecBlock:
 @dataclass(frozen=True)
 class MethodRecommendation:
     method: str
+    family: MethodFamily
     rank: int
     reason: str
     evidence_refs: list[str] = field(default_factory=list)
@@ -235,6 +251,7 @@ class Recommendation:
     policy_version: str
     profile_id: str
     target: RecTarget
+    intent: CompressionIntent = CompressionIntent.QUANTIZE_ONLY
     no_pruning: bool = True
     methods: tuple[MethodRecommendation, ...] = ()
     blocked_methods: tuple[MethodRecommendation, ...] = ()
@@ -254,6 +271,7 @@ class Recommendation:
                 "runtime_backend": self.target.runtime_backend,
                 "memory_target_gib": self.target.memory_target_gib,
             },
+            "intent": self.intent.value,
             "no_pruning": self.no_pruning,
             "methods": [_m(m) for m in self.methods],
             "blocked_methods": [_m(m) for m in self.blocked_methods],
@@ -266,6 +284,7 @@ class Recommendation:
 def _m(m: MethodRecommendation) -> dict[str, Any]:
     return {
         "method": m.method,
+        "family": m.family.value,
         "rank": m.rank,
         "reason": m.reason,
         "evidence_refs": list(m.evidence_refs),
@@ -302,6 +321,22 @@ _ANALYSIS_METHODS = {
     "bit-allocation",
     "kv-optimization",
 }
+
+
+def method_family(method: str) -> MethodFamily:
+    if method in _ANALYSIS_METHODS:
+        return MethodFamily.ANALYSIS
+    return MethodFamily.QUANTIZATION
+
+
+def intent_accepts(intent: CompressionIntent, family: MethodFamily) -> bool:
+    if family == MethodFamily.ANALYSIS or intent == CompressionIntent.CUSTOM:
+        return True
+    if intent == CompressionIntent.QUANTIZE_ONLY:
+        return family == MethodFamily.QUANTIZATION
+    if intent == CompressionIntent.PRUNE_ONLY:
+        return family == MethodFamily.PRUNING
+    return family in {MethodFamily.QUANTIZATION, MethodFamily.PRUNING}
 
 # The compression methods that operate on router-indexed expert tensors. Their
 # saliency/suitability evidence is only trustworthy if the routing-consistency
@@ -419,6 +454,7 @@ class RecommendationPolicy:
         *,
         allow_pruning: bool = False,
         memory_target_gib: float | None = None,
+        intent: CompressionIntent = CompressionIntent.QUANTIZE_ONLY,
     ) -> Recommendation:
         """Deterministic ranking. Missing evidence reduces confidence/blocks;
         never invents metrics."""
@@ -430,23 +466,45 @@ class RecommendationPolicy:
                 runtime_backend=target.runtime_backend,
                 memory_target_gib=memory_target_gib,
             )
-        no_pruning = not self._pruning_permitted(allow_pruning)  # no_pruning defaults True
+        intent = CompressionIntent(intent)
+        pruning_requested = intent in {
+            CompressionIntent.PRUNE_ONLY,
+            CompressionIntent.HYBRID,
+            CompressionIntent.CUSTOM,
+        }
+        no_pruning = not self._pruning_permitted(
+            allow_pruning and pruning_requested
+        )
         methods: list[MethodRecommendation] = []
         blocked: list[MethodRecommendation] = []
         for method, stage_ids in _METHOD_STAGES.items():
             rec = self._score(profile, target, method, stage_ids, no_pruning)
+            if not intent_accepts(intent, rec.family):
+                rec = MethodRecommendation(
+                    **{
+                        **rec.__dict__,
+                        "blockers": [
+                            *rec.blockers,
+                            RecBlock(
+                                "intent_family_mismatch",
+                                f"{rec.family.value} method is outside {intent.value}",
+                            ),
+                        ],
+                    }
+                )
             (blocked if rec.blockers else methods).append(rec)
         methods.sort(key=lambda r: self._ordering_sort_key(r, profile, target))
         blocked.sort(key=lambda r: r.method)
         # overall confidence = min over non-blocked recommended methods (plus
         # profile coverage), INSUFFICIENT if any critical stage evidence missing
         conf = self._overall_confidence(methods, profile)
-        rid = self._recommendation_id(profile, target, no_pruning)
+        rid = self._recommendation_id(profile, target, no_pruning, intent)
         return Recommendation(
             recommendation_id=rid,
             policy_version=RECOMMENDATION_POLICY_VERSION,
             profile_id=profile.profile_id_of(),
             target=target,
+            intent=intent,
             no_pruning=no_pruning,
             methods=tuple(methods),
             blocked_methods=tuple(blocked),
@@ -525,6 +583,7 @@ class RecommendationPolicy:
         if missing:
             rec = MethodRecommendation(
                 method=method,
+                family=method_family(method),
                 rank=99,
                 reason="missing evidence for required stage(s); confidence "
                 "INSUFFICIENT and decision blocked until re-profiled",
@@ -550,6 +609,7 @@ class RecommendationPolicy:
             _status = RecipeStatus.DISCOVERED
         return MethodRecommendation(
             method=method,
+            family=method_family(method),
             rank=rank,
             reason=reason,
             evidence_refs=evidence_refs,
@@ -707,7 +767,13 @@ class RecommendationPolicy:
             return 0.0
         return sum(covs) / len(covs)
 
-    def _recommendation_id(self, profile: AtlasProfile, target: RecTarget, no_pruning: bool) -> str:
+    def _recommendation_id(
+        self,
+        profile: AtlasProfile,
+        target: RecTarget,
+        no_pruning: bool,
+        intent: CompressionIntent,
+    ) -> str:
         payload = canonical_json(
             {
                 "policy": RECOMMENDATION_POLICY_VERSION,
@@ -720,6 +786,7 @@ class RecommendationPolicy:
                     "memory_gib": target.memory_target_gib,
                 },
                 "no_pruning": no_pruning,
+                "intent": intent.value,
             }
         )
         return "rec-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]

@@ -69,8 +69,15 @@ _GUI_PAGE = """<!doctype html>
 <label>Memory target (GiB):
   <input type="number" id="mem" value="115" min="1" step="0.5">
 </label>
-<label><input type="checkbox" id="allowPrune" disabled> allow_pruning
-  <span>(locked: <span class="np">no_pruning=true</span>)</span></label>
+<label>Strategy:
+  <select id="intent">
+    <option value="quantize_only">Quantize only</option>
+    <option value="prune_only">Prune only</option>
+    <option value="hybrid">Quantize + prune</option>
+    <option value="custom">Custom</option>
+  </select>
+</label>
+<label><input type="checkbox" id="allowPrune"> authorize pruning capability</label>
 </div>
 <button id="recoBtn">Recommend</button>
 <span id="recoMeta" class="evid"></span>
@@ -136,13 +143,15 @@ async function recommend() {
   const pid = $('profileSel').value;
   if (!pid) { setRecoBtn('no profile selected'); return; }
   const mem = parseFloat($('mem').value) || 115;
+  const intent = $('intent').value;
+  const allowPruning = $('allowPrune').checked;
   setRecoBtn('computing…');
   let data;
   try {
     const r = await fetch('/api/recommend', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profile_id: pid, memory_target_gib: mem, constraints: { allow_pruning: false } })
+      body: JSON.stringify({ profile_id: pid, memory_target_gib: mem, intent: intent, constraints: { allow_pruning: allowPruning } })
     });
     data = await r.json();
     if (!r.ok) throw new Error((data && data.error) || ('recommend ' + r.status));
@@ -202,6 +211,7 @@ function renderRec(rec) {
   });
   const np = document.createElement('div'); np.className = 'np';
   np.textContent = 'no_pruning = ' + esc(rec.no_pruning);
+  np.textContent += '; intent = ' + esc(rec.intent || 'quantize_only');
   host.appendChild(np);
   // Initialize the Profile+Compress selection from the methods the browser
   // actually checked (the authorized, unblocked ones). The recipe is then the
@@ -238,6 +248,8 @@ function renderPreview(p) {
     plan_id: p.plan_id,
     hash: p.hash,
     readiness: p.readiness || {},
+    intent: p.intent || '',
+    intent_blockers: p.intent_blockers || [],
     selected_methods: p.selected_methods || []
   }, null, 2);
   const ok = p.readiness && p.readiness.executable && p.plan_id;
@@ -266,8 +278,6 @@ function computeGates() {
   if (!authToken) reasons.push('no valid recommendation token (recommend first)');
   if (!reco) reasons.push('no recommendation computed yet');
   if (reco && (!reco.methods || reco.methods.length === 0)) reasons.push('no policy-authorized methods recommended');
-  if (reco && reco.blocked_methods && reco.blocked_methods.length)
-    reasons.push(reco.blocked_methods.length + ' method(s) fatally blocked');
   if (!selection || selection.size === 0) reasons.push('no methods selected for the recipe');
   if (!preview) reasons.push('no preview: build a recipe draft from a selection');
   if (preview && preview.hash && preview.selected_methods
@@ -275,6 +285,8 @@ function computeGates() {
     reasons.push('selection changed since preview — re-preview');
   if (preview && !(preview.readiness && preview.readiness.executable))
     reasons.push('no verified executable plan produced for this selection');
+  if (preview && preview.intent_blockers)
+    preview.intent_blockers.forEach(b => reasons.push((b.code || 'intent_blocked') + ': ' + (b.message || '')));
   const ready = reasons.length === 0;
   return { ready, reasons };
 }
@@ -292,6 +304,11 @@ function clearBinding(reason) {
 }
 $('profileSel').addEventListener('change', () => clearBinding('profile changed'));
 $('mem').addEventListener('input', () => clearBinding('memory target changed'));
+$('intent').addEventListener('change', () => {
+  if ($('intent').value === 'quantize_only') $('allowPrune').checked = false;
+  clearBinding('strategy changed');
+});
+$('allowPrune').addEventListener('change', () => clearBinding('pruning authorization changed'));
 $('compressBtn').addEventListener('click', async () => {
   if (!authToken || !preview) return;
   const g = computeGates();

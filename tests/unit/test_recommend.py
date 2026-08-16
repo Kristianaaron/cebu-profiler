@@ -26,6 +26,8 @@ from model_atlas.recommend import (
     write_gui,
 )
 from model_atlas.recommend.policy import (
+    CompressionIntent,
+    MethodFamily,
     RecConfidence,
     RecommendationPolicy,
     canonical_stage,
@@ -77,6 +79,34 @@ def test_deterministic_ranking_and_stable_ids():
         "modelopt-nvfp4",
         "nvfp4-substitute",
     }
+
+
+def test_compression_intent_is_typed_bound_and_family_filtered():
+    pol = RecommendationPolicy(build_default_registry())
+    quant = pol.recommend(
+        _full_profile(), RecTarget(), intent=CompressionIntent.QUANTIZE_ONLY
+    )
+    prune = pol.recommend(
+        _full_profile(),
+        RecTarget(),
+        intent=CompressionIntent.PRUNE_ONLY,
+        allow_pruning=True,
+    )
+    assert quant.intent is CompressionIntent.QUANTIZE_ONLY
+    assert prune.intent is CompressionIntent.PRUNE_ONLY
+    assert quant.recommendation_id != prune.recommendation_id
+    assert all(m.family is MethodFamily.ANALYSIS for m in prune.methods)
+    quantized = [
+        m for m in prune.blocked_methods if m.family is MethodFamily.QUANTIZATION
+    ]
+    assert quantized
+    assert all(
+        any(block.code == "intent_family_mismatch" for block in method.blockers)
+        for method in quantized
+    )
+    payload = prune.to_dict()
+    assert payload["intent"] == "prune_only"
+    assert all("family" in method for method in payload["methods"])
 
 
 def test_v3_string_and_object_evidence_parsing():
@@ -206,7 +236,12 @@ def test_pruning_requires_verified_backend():
     )
     reg2 = BackendRegistry({**_fake_records(reg), prune.backend_id: prune})
     pol2 = RecommendationPolicy(reg2)
-    rec2 = pol2.recommend(_full_profile(), RecTarget(), allow_pruning=True)
+    rec2 = pol2.recommend(
+        _full_profile(),
+        RecTarget(),
+        allow_pruning=True,
+        intent=CompressionIntent.PRUNE_ONLY,
+    )
     assert rec2.no_pruning is False
     # still no pruning STAGE recommended unless a method maps to it
     assert not any("pruning" in m.method for m in rec2.methods)
@@ -827,9 +862,11 @@ def test_gui_compress_button_disabled_with_blockers(tmp_path: Path):
     # executable plan with passing live pins.
     assert 'id="compressBtn" disabled' in text
     assert "disabled until every gate passes" in text
-    # no_pruning is locked on — allow_pruning is a disabled checkbox.
-    assert 'id="allowPrune" disabled' in text
-    assert "no_pruning=true" in text
+    assert 'id="intent"' in text
+    assert 'value="quantize_only"' in text
+    assert 'value="prune_only"' in text
+    assert 'value="hybrid"' in text
+    assert 'id="allowPrune"' in text
 
 
 # --- Authorization token + preview + start with a REAL persisted job engine ---
@@ -892,6 +929,22 @@ def test_authorize_binds_token_to_recommendation_and_method_set(tmp_path: Path):
     # recommendation payload matches the plain recommend() exactly
     plain = svc.recommend("k3-mini", RecTarget(memory_target_gib=115.0))
     assert a1["recommendation"]["recommendation_id"] == plain.recommendation_id
+
+    prune = svc.authorize(
+        "k3-mini",
+        RecTarget(memory_target_gib=115.0),
+        intent=CompressionIntent.PRUNE_ONLY,
+        constraints={"allow_pruning": True},
+    )
+    assert prune["intent"] == "prune_only"
+    assert prune["recommendation_id"] != a1["recommendation_id"]
+    session = svc.sessions[prune["token"]]
+    assert session.intent is CompressionIntent.PRUNE_ONLY
+    assert session.constraints_snapshot["intent"] == "prune_only"
+    preview = svc.preview_selection(prune["token"], prune["authorized_methods"])
+    assert preview["readiness"]["intent_satisfied"] is False
+    assert preview["readiness"]["executable"] is False
+    assert preview["intent_blockers"][0]["code"] == "intent_not_satisfied"
 
 
 def test_start_authorized_runs_persisted_job_asynchronously(tmp_path: Path):
