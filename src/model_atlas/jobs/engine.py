@@ -637,6 +637,8 @@ class JobEngine:
             # Isolated staging: the adapter writes into the stage's private
             # scratch; nothing is visible to the run until verified + published.
             stager = StageStager(self.run_dir, stage)
+            source = self.compiled.recipe.source
+            calibration = self.compiled.recipe.calibration
             context: dict[str, object] = {
                 "workdir": str(self.run_dir),
                 "staging_dir": str(stager.staging),
@@ -645,6 +647,12 @@ class JobEngine:
                 "stage_id": stage,
                 "run_id": job.run_id,
                 "inputs": inputs,
+                # Canonical recipe-bound identities. Derivative adapters consume
+                # these instead of guessing checkpoint or calibration paths.
+                "source": source.checkpoint_path,
+                "source_identity": source.model_dump(mode="json"),
+                "source_revision": source.checkpoint_revision,
+                "calibration": calibration.model_dump(mode="json"),
             }
             handle = self.registry.prepare_stage(recipe_stage.backend.backend_id, context)
             so.handle = handle

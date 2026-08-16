@@ -65,8 +65,7 @@ class ContentAddressedStore:
             os.replace(tmp, dst)
         # collision guard: a pre-existing slot whose content does NOT match the
         # advertised full digest is corruption — never overwrite it.
-        existing = dst.read_bytes() if dst.exists() else b""
-        if hashlib.sha256(existing).hexdigest() != digest:
+        if not dst.exists() or sha256_file(dst) != digest:
             raise RuntimeError(
                 f"CAS collision guard: slot for digest {digest[:16]}… already holds "
                 "different content; refusing to overwrite"
@@ -98,8 +97,7 @@ class ContentAddressedStore:
                         break
                     fout.write(chunk)
             os.replace(tmp, dst)
-        existing = dst.read_bytes() if dst.exists() else b""
-        if hashlib.sha256(existing).hexdigest() != digest:
+        if not dst.exists() or sha256_file(dst) != digest:
             raise RuntimeError(
                 f"CAS collision guard: slot for digest {digest[:16]}… already holds "
                 "different content; refusing to overwrite"
