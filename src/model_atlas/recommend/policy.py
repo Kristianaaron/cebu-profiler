@@ -24,6 +24,7 @@ Rules (deterministic, no model inference):
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -180,6 +181,93 @@ class StageEvidence:
         )
 
 
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True)
+class ProfileExecutionBinding:
+    """Immutable model/calibration identity required for derivative execution."""
+
+    source_id: str
+    checkpoint_path: str
+    checkpoint_revision: str | None
+    source_manifest_digest: str
+    source_sha256: tuple[tuple[str, str], ...]
+    calibration_id: str
+    corpus_name: str
+    calibration_seed: int
+    calibration_partition: str
+    corpus_records_path: str | None
+    tokenizer_hash: str
+
+    def __post_init__(self) -> None:
+        required = {
+            "source_id": self.source_id,
+            "checkpoint_path": self.checkpoint_path,
+            "calibration_id": self.calibration_id,
+            "corpus_name": self.corpus_name,
+            "calibration_partition": self.calibration_partition,
+            "tokenizer_hash": self.tokenizer_hash,
+        }
+        if any(not value for value in required.values()):
+            raise ValueError("profile execution identity fields must be nonempty")
+        if not self.source_manifest_digest and not self.source_sha256:
+            raise ValueError("profile execution identity requires source hashes")
+        digests = [self.tokenizer_hash]
+        if self.source_manifest_digest:
+            digests.append(self.source_manifest_digest)
+        digests.extend(digest for _, digest in self.source_sha256)
+        if any(not _SHA256_RE.fullmatch(digest) for digest in digests):
+            raise ValueError("profile execution digests must be lowercase SHA-256")
+        paths = [path for path, _ in self.source_sha256]
+        if len(paths) != len(set(paths)) or any(not path for path in paths):
+            raise ValueError("profile source hash paths must be nonempty and unique")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ProfileExecutionBinding:
+        hashes = data.get("source_sha256") or {}
+        if not isinstance(hashes, dict):
+            raise ValueError("source_sha256 must be a path-to-digest object")
+        return cls(
+            source_id=str(data.get("source_id", "")),
+            checkpoint_path=str(data.get("checkpoint_path", "")),
+            checkpoint_revision=(
+                str(data["checkpoint_revision"])
+                if data.get("checkpoint_revision") is not None
+                else None
+            ),
+            source_manifest_digest=str(data.get("source_manifest_digest", "")),
+            source_sha256=tuple(
+                sorted((str(path), str(digest)) for path, digest in hashes.items())
+            ),
+            calibration_id=str(data.get("calibration_id", "")),
+            corpus_name=str(data.get("corpus_name", "")),
+            calibration_seed=int(data.get("calibration_seed", 0)),
+            calibration_partition=str(data.get("calibration_partition", "atlas_calibration")),
+            corpus_records_path=(
+                str(data["corpus_records_path"])
+                if data.get("corpus_records_path") is not None
+                else None
+            ),
+            tokenizer_hash=str(data.get("tokenizer_hash", "")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source_id": self.source_id,
+            "checkpoint_path": self.checkpoint_path,
+            "checkpoint_revision": self.checkpoint_revision,
+            "source_manifest_digest": self.source_manifest_digest,
+            "source_sha256": dict(self.source_sha256),
+            "calibration_id": self.calibration_id,
+            "corpus_name": self.corpus_name,
+            "calibration_seed": self.calibration_seed,
+            "calibration_partition": self.calibration_partition,
+            "corpus_records_path": self.corpus_records_path,
+            "tokenizer_hash": self.tokenizer_hash,
+        }
+
+
 @dataclass(frozen=True)
 class AtlasProfile:
     """A completed Atlas profile (evidence + coverage) with a stable identity."""
@@ -190,6 +278,7 @@ class AtlasProfile:
     evidence: dict[str, StageEvidence] = field(default_factory=dict)
     routing_consistency_passed: bool | None = None
     hardware_model_arch: str = "glm-5.2"
+    execution: ProfileExecutionBinding | None = None
     notes: str = ""
 
     @classmethod
@@ -209,6 +298,12 @@ class AtlasProfile:
                 if _SRC_PRECEDENCE.get(st.kind, 5) <= _SRC_PRECEDENCE.get(prev.kind, 5):
                     continue  # keep the strongest observed claim
             evidence[canonical] = st
+        execution_data = data.get("execution")
+        execution = (
+            ProfileExecutionBinding.from_dict(execution_data)
+            if isinstance(execution_data, dict)
+            else None
+        )
         return cls(
             profile_id=str(
                 data.get("declared_profile_id")
@@ -225,6 +320,7 @@ class AtlasProfile:
                     (data.get("hardware") or {}).get("model_arch", "glm-5.2"),
                 )
             ),
+            execution=execution,
             notes=str(data.get("notes", "")),
         )
 
@@ -236,6 +332,7 @@ class AtlasProfile:
                 "notes": self.notes,
                 "declared": self.profile_id,
                 "routing_consistency": self.routing_consistency_passed,
+                "execution": self.execution.to_dict() if self.execution else None,
                 "stages": sorted(
                     (
                         k,

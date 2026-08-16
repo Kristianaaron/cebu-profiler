@@ -50,9 +50,11 @@ from model_atlas.jobs.engine import JobEngine
 from model_atlas.jobs.schema import JobStatus
 from model_atlas.recipe.compiler import CompiledRecipe, canonical_json, sha256_hex
 from model_atlas.recipe.schema import (
+    CalibrationIdentity,
     CompressionRecipe,
     RecipeConstraints,
     RecipeStage,
+    SourceIdentity,
     StageEffectClass,
 )
 from model_atlas.recipes import CompiledPlanArtifact
@@ -60,6 +62,7 @@ from model_atlas.recipes.builtin import glm52_no_pruning_recipe
 from model_atlas.recommend.policy import (
     METHOD_CATALOG,
     AtlasProfile,
+    ProfileExecutionBinding,
     Recommendation,
     RecommendationPolicy,
     RecTarget,
@@ -150,6 +153,8 @@ class _AuthorizationSession:
         "profile_source_path",
         "profile_fingerprint",
         "profile_bytes_hash",
+        "profile_model_arch",
+        "execution_binding",
         "revoked",
     )
 
@@ -176,6 +181,8 @@ class _AuthorizationSession:
         self.profile_source_path: str = ""
         self.profile_fingerprint: str = ""
         self.profile_bytes_hash: str = ""
+        self.profile_model_arch: str = ""
+        self.execution_binding: ProfileExecutionBinding | None = None
         self.revoked = False
 
     def selected_hash(self) -> str:
@@ -351,6 +358,8 @@ class RecommendationService:
         from model_atlas.jobs.artifacts import sha256_file
 
         session.profile_fingerprint = prof.profile_id_of()
+        session.profile_model_arch = prof.hardware_model_arch
+        session.execution_binding = prof.execution
         src: Path | None = None
         for f in sorted(self.profile_root.rglob("*.json")):
             try:
@@ -660,6 +669,56 @@ class RecommendationService:
         ceiling), so the preview reflects exactly what was authorized.
         """
         base = glm52_no_pruning_recipe()
+        try:
+            selected_specs = [method_spec(method) for method in (selected or ())]
+        except KeyError as exc:
+            raise AuthError(
+                400,
+                "method_unknown",
+                f"unknown or unclassified compression method: {exc.args[0]}",
+            ) from exc
+        derivative_selected = any(not spec.planning_only for spec in selected_specs)
+        binding = session.execution_binding if session is not None else None
+        if derivative_selected and binding is None:
+            raise AuthError(
+                409,
+                "profile_execution_identity_missing",
+                "derivative selection requires source, calibration, and tokenizer identity",
+            )
+        if (
+            session is not None
+            and session.profile_model_arch
+            and session.profile_model_arch != session.target.hardware_model_arch
+        ):
+            raise AuthError(
+                409,
+                "profile_target_mismatch",
+                "profile model architecture differs from authorization target",
+            )
+        if binding is not None:
+            base.source = SourceIdentity(
+                source_id=binding.source_id,
+                checkpoint_path=binding.checkpoint_path,
+                checkpoint_revision=binding.checkpoint_revision,
+                sha256=dict(binding.source_sha256),
+                manifest_digest=binding.source_manifest_digest,
+            )
+            base.calibration = CalibrationIdentity(
+                calibration_id=binding.calibration_id,
+                corpus_name=binding.corpus_name,
+                seed=binding.calibration_seed,
+                partition=binding.calibration_partition,
+                corpus_records_path=binding.corpus_records_path,
+            )
+        if session is not None:
+            base.hardware = base.hardware.model_copy(
+                update={
+                    "model_arch": session.target.hardware_model_arch,
+                    "compute_arch": session.target.compute_arch,
+                    "topology": session.target.topology,
+                    "runtime_backend": session.target.runtime_backend,
+                }
+            )
         stages_by_id = {s.id: s for s in base.stages}
         if selected is None or none_is_all:
             stages = list(base.stages)
@@ -1489,6 +1548,7 @@ def _profile_to_dict(profile: AtlasProfile) -> dict[str, Any]:
         "model": profile.model,
         "seed": profile.seed,
         "hardware_model_arch": profile.hardware_model_arch,
+        "execution": profile.execution.to_dict() if profile.execution else None,
         "routing_consistency_passed": profile.routing_consistency_passed,
         "evidence": {
             k: {"kind": v.kind, "present": v.present, "coverage": v.coverage}

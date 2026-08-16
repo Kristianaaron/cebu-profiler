@@ -31,6 +31,7 @@ from model_atlas.recommend.policy import (
     METHOD_CATALOG_VERSION,
     CompressionIntent,
     MethodFamily,
+    ProfileExecutionBinding,
     RecConfidence,
     RecommendationPolicy,
     canonical_stage,
@@ -60,6 +61,22 @@ def _full_profile() -> AtlasProfile:
             "kv_budget": StageEvidence("kv_budget", "estimated"),
             "nvfp4_suitability": StageEvidence("nvfp4_suitability", "estimated"),
         },
+    )
+
+
+def _execution_binding(checkpoint_path: str = "/models/glm") -> ProfileExecutionBinding:
+    return ProfileExecutionBinding(
+        source_id="glm-5.2-nvfp4",
+        checkpoint_path=checkpoint_path,
+        checkpoint_revision="rev-1",
+        source_manifest_digest="a" * 64,
+        source_sha256=(),
+        calibration_id="glm-cal-v1",
+        corpus_name="balanced-glm-cal",
+        calibration_seed=7,
+        calibration_partition="atlas_calibration",
+        corpus_records_path="/corpus/cal.jsonl",
+        tokenizer_hash="b" * 64,
     )
 
 
@@ -105,6 +122,79 @@ def test_method_catalog_is_explicit_stable_and_fail_closed() -> None:
     assert exl3.family is MethodFamily.QUANTIZATION
     assert CompressionIntent.PRUNE_ONLY not in exl3.compatible_intents
     assert exl3.routing_dependent is True
+
+
+def test_profile_execution_binding_is_strict_and_identity_bound(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="requires source hashes"):
+        ProfileExecutionBinding(
+            **{
+                **_execution_binding().__dict__,
+                "source_manifest_digest": "",
+            }
+        )
+    with pytest.raises(ValueError, match="lowercase SHA-256"):
+        ProfileExecutionBinding(
+            **{
+                **_execution_binding().__dict__,
+                "tokenizer_hash": "not-a-digest",
+            }
+        )
+
+    base = _full_profile()
+    bound = AtlasProfile(**{**base.__dict__, "execution": _execution_binding()})
+    changed = AtlasProfile(
+        **{
+            **base.__dict__,
+            "execution": _execution_binding("/models/other"),
+        }
+    )
+    assert bound.profile_id_of() != base.profile_id_of()
+    assert changed.profile_id_of() != bound.profile_id_of()
+
+    service = RecommendationService(
+        profile_root=str(tmp_path / "profiles"), work_root=str(tmp_path / "runs")
+    )
+    saved = service.save_profile(bound)
+    reloaded = service.import_profile(saved)
+    assert reloaded.execution == bound.execution
+    assert reloaded.profile_id_of() == bound.profile_id_of()
+
+
+def test_derivative_recipe_requires_and_applies_profile_execution_binding(
+    tmp_path: Path,
+) -> None:
+    from model_atlas.recommend.api import AuthError
+
+    service = RecommendationService(
+        profile_root=str(tmp_path / "profiles"), work_root=str(tmp_path / "runs")
+    )
+    unbound = _full_profile()
+    service.save_profile(unbound)
+    auth = service.authorize(unbound)
+    session = service.sessions[auth["token"]]
+    with pytest.raises(AuthError) as exc:
+        service._selected_recipe(["exl3-primary"], session=session)
+    assert exc.value.code == "profile_execution_identity_missing"
+
+    bound = AtlasProfile(
+        **{
+            **unbound.__dict__,
+            "profile_id": "bound",
+            "execution": _execution_binding(str(tmp_path / "glm-source")),
+        }
+    )
+    service.save_profile(bound)
+    bound_auth = service.authorize(bound, RecTarget(memory_target_gib=81.0))
+    bound_session = service.sessions[bound_auth["token"]]
+    recipe = service._selected_recipe(["exl3-primary"], session=bound_session)
+    assert recipe.source.source_id == "glm-5.2-nvfp4"
+    assert recipe.source.checkpoint_path == str(tmp_path / "glm-source")
+    assert recipe.source.manifest_digest == "a" * 64
+    assert recipe.calibration.calibration_id == "glm-cal-v1"
+    assert recipe.calibration.seed == 7
+    assert recipe.hardware.model_arch == "glm-5.2"
+    assert recipe.hardware.compute_arch == "gb10-sm121"
+    assert recipe.constraints.max_resident_gib == 81.0
 
 
 def test_catalog_has_no_implicit_pruning_classification() -> None:
