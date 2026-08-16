@@ -670,21 +670,15 @@ class RecommendationService:
         """
         base = glm52_no_pruning_recipe()
         try:
-            selected_specs = [method_spec(method) for method in (selected or ())]
+            for method in selected or ():
+                method_spec(method)
         except KeyError as exc:
             raise AuthError(
                 400,
                 "method_unknown",
                 f"unknown or unclassified compression method: {exc.args[0]}",
             ) from exc
-        derivative_selected = any(not spec.planning_only for spec in selected_specs)
         binding = session.execution_binding if session is not None else None
-        if derivative_selected and binding is None:
-            raise AuthError(
-                409,
-                "profile_execution_identity_missing",
-                "derivative selection requires source, calibration, and tokenizer identity",
-            )
         if (
             session is not None
             and session.profile_model_arch
@@ -709,6 +703,7 @@ class RecommendationService:
                 seed=binding.calibration_seed,
                 partition=binding.calibration_partition,
                 corpus_records_path=binding.corpus_records_path,
+                tokenizer_sha256=binding.tokenizer_hash,
             )
         if session is not None:
             base.hardware = base.hardware.model_copy(
@@ -735,6 +730,22 @@ class RecommendationService:
                     ) from exc
             wanted = self._format_closure(stages_by_id, wanted)
             stages = [stages_by_id[sid] for sid in _STAGE_ORDER if sid in wanted]
+        derivative_effects = {
+            StageEffectClass.CONDITIONING,
+            StageEffectClass.QUANTIZATION,
+            StageEffectClass.REFINEMENT,
+            StageEffectClass.RESIDUAL,
+            StageEffectClass.REPAIR,
+            StageEffectClass.PRUNING,
+        }
+        if session is not None and binding is None and any(
+            stage.effect_class in derivative_effects for stage in stages
+        ):
+            raise AuthError(
+                409,
+                "profile_execution_identity_missing",
+                "derivative recipe requires source, calibration, and tokenizer identity",
+            )
         recipe = base.model_copy(deep=True)
         recipe.stages = stages
         memory_gib = session.target.memory_target_gib if session is not None else 115.0

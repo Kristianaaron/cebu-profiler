@@ -178,6 +178,7 @@ class CalibrationIdentity(BaseModel):
     partition: str = "atlas_calibration"
     capability_labels: list[str] = Field(default_factory=list)
     corpus_records_path: str | None = None
+    tokenizer_sha256: str = Field(default="", pattern=r"^$|^[0-9a-f]{64}$")
     note: str = ""
 
 

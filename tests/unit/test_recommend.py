@@ -139,6 +139,14 @@ def test_profile_execution_binding_is_strict_and_identity_bound(tmp_path: Path) 
                 "tokenizer_hash": "not-a-digest",
             }
         )
+    for field in ("checkpoint_revision", "corpus_records_path"):
+        with pytest.raises(ValueError, match="must be nonempty"):
+            ProfileExecutionBinding(
+                **{
+                    **_execution_binding().__dict__,
+                    field: "",
+                }
+            )
 
     base = _full_profile()
     bound = AtlasProfile(**{**base.__dict__, "execution": _execution_binding()})
@@ -175,6 +183,9 @@ def test_derivative_recipe_requires_and_applies_profile_execution_binding(
     with pytest.raises(AuthError) as exc:
         service._selected_recipe(["exl3-primary"], session=session)
     assert exc.value.code == "profile_execution_identity_missing"
+    with pytest.raises(AuthError) as all_exc:
+        service._selected_recipe(None, session=session)
+    assert all_exc.value.code == "profile_execution_identity_missing"
 
     bound = AtlasProfile(
         **{
@@ -192,9 +203,32 @@ def test_derivative_recipe_requires_and_applies_profile_execution_binding(
     assert recipe.source.manifest_digest == "a" * 64
     assert recipe.calibration.calibration_id == "glm-cal-v1"
     assert recipe.calibration.seed == 7
+    assert recipe.calibration.tokenizer_sha256 == "b" * 64
     assert recipe.hardware.model_arch == "glm-5.2"
     assert recipe.hardware.compute_arch == "gb10-sm121"
     assert recipe.constraints.max_resident_gib == 81.0
+
+    changed_binding = ProfileExecutionBinding(
+        **{
+            **bound.execution.__dict__,
+            "tokenizer_hash": "c" * 64,
+        }
+    )
+    changed_profile = AtlasProfile(
+        **{
+            **bound.__dict__,
+            "profile_id": "changed-tokenizer",
+            "execution": changed_binding,
+        }
+    )
+    service.save_profile(changed_profile)
+    changed_auth = service.authorize(changed_profile, RecTarget(memory_target_gib=81.0))
+    changed_recipe = service._selected_recipe(
+        ["exl3-primary"], session=service.sessions[changed_auth["token"]]
+    )
+    _, _, recipe_sha = service.plane.compiler.validate(recipe)
+    _, _, changed_sha = service.plane.compiler.validate(changed_recipe)
+    assert changed_sha != recipe_sha
 
 
 def test_catalog_has_no_implicit_pruning_classification() -> None:

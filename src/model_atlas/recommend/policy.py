@@ -190,23 +190,25 @@ class ProfileExecutionBinding:
 
     source_id: str
     checkpoint_path: str
-    checkpoint_revision: str | None
+    checkpoint_revision: str
     source_manifest_digest: str
     source_sha256: tuple[tuple[str, str], ...]
     calibration_id: str
     corpus_name: str
     calibration_seed: int
     calibration_partition: str
-    corpus_records_path: str | None
+    corpus_records_path: str
     tokenizer_hash: str
 
     def __post_init__(self) -> None:
         required = {
             "source_id": self.source_id,
             "checkpoint_path": self.checkpoint_path,
+            "checkpoint_revision": self.checkpoint_revision,
             "calibration_id": self.calibration_id,
             "corpus_name": self.corpus_name,
             "calibration_partition": self.calibration_partition,
+            "corpus_records_path": self.corpus_records_path,
             "tokenizer_hash": self.tokenizer_hash,
         }
         if any(not value for value in required.values()):
@@ -231,11 +233,7 @@ class ProfileExecutionBinding:
         return cls(
             source_id=str(data.get("source_id", "")),
             checkpoint_path=str(data.get("checkpoint_path", "")),
-            checkpoint_revision=(
-                str(data["checkpoint_revision"])
-                if data.get("checkpoint_revision") is not None
-                else None
-            ),
+            checkpoint_revision=str(data.get("checkpoint_revision", "")),
             source_manifest_digest=str(data.get("source_manifest_digest", "")),
             source_sha256=tuple(
                 sorted((str(path), str(digest)) for path, digest in hashes.items())
@@ -244,11 +242,7 @@ class ProfileExecutionBinding:
             corpus_name=str(data.get("corpus_name", "")),
             calibration_seed=int(data.get("calibration_seed", 0)),
             calibration_partition=str(data.get("calibration_partition", "atlas_calibration")),
-            corpus_records_path=(
-                str(data["corpus_records_path"])
-                if data.get("corpus_records_path") is not None
-                else None
-            ),
+            corpus_records_path=str(data.get("corpus_records_path", "")),
             tokenizer_hash=str(data.get("tokenizer_hash", "")),
         )
 
