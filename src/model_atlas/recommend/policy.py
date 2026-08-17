@@ -24,9 +24,11 @@ Rules (deterministic, no model inference):
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 from model_atlas.backend.registry import BackendRegistry
@@ -516,7 +518,7 @@ _QUANT_INTENTS = (
     CompressionIntent.CUSTOM,
 )
 
-METHOD_CATALOG: tuple[MethodSpec, ...] = (
+_BUILTIN_METHOD_CATALOG: tuple[MethodSpec, ...] = (
     MethodSpec(
         "teacher-identity", 1, MethodFamily.ANALYSIS, "atlas_analysis_v3",
         ("identity",), ("t1-identity",), (StageEffectClass.IDENTITY,),
@@ -587,6 +589,57 @@ METHOD_CATALOG: tuple[MethodSpec, ...] = (
         recipe_template="glm52_width_slice",
     ),
 )
+
+
+# --- MethodSpec plugin seam -----------------------------------------------
+# New methods are plugins, not core edits. A method plugin module in the
+# (optional) env-supplied directory exposes ``register_methods() ->
+# dict[str, MethodSpec]``; the builtin catalog stays stable and plugin methods
+# are appended deterministically (sorted by module, then method id). Backends
+# remain a separate plugin concern via ``register_backends()``. When the env
+# var is unset, this is a no-op and the catalog/digest are unchanged.
+_METHOD_PLUGIN_ENV = "ATLAS_METHOD_PLUGIN_DIR"
+
+
+def _method_plugin_root() -> Path | None:
+    raw = os.environ.get(_METHOD_PLUGIN_ENV)
+    return Path(raw).resolve() if raw else None
+
+
+def _load_method_plugins(root: Path | None) -> tuple[MethodSpec, ...]:
+    if root is None or not root.exists():
+        return ()
+    collected: dict[str, MethodSpec] = {}
+    for mod in sorted(root.glob("*.py")):
+        if mod.name.startswith("_"):
+            continue
+        try:
+            ns: dict[str, object] = {}
+            exec(mod.read_text(encoding="utf-8"), ns)  # noqa: S102 — trusted local plugins
+        except Exception as exc:  # noqa: BLE001
+            print(f"[method] plugin {mod.name} failed to load: {exc}")
+            continue
+        reg = ns.get("register_methods")
+        if not callable(reg):
+            continue
+        try:
+            contributed = reg()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[method] plugin {mod.name} register_methods failed: {exc}")
+            continue
+        if not isinstance(contributed, dict):
+            continue
+        for key, spec in contributed.items():
+            if isinstance(spec, MethodSpec) and spec.method == key:
+                collected[key] = spec
+    return tuple(collected[m] for m in sorted(collected))
+
+
+# Builtin catalog plus any env-supplied method plugins (deterministic order).
+METHOD_CATALOG: tuple[MethodSpec, ...] = (
+    _BUILTIN_METHOD_CATALOG + _load_method_plugins(_method_plugin_root())
+)
+
 
 def validate_method_catalog(specs: tuple[MethodSpec, ...]) -> None:
     ids = [spec.method for spec in specs]
