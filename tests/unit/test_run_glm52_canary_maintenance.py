@@ -42,7 +42,7 @@ def _args(tmp_path: Path) -> Namespace:
         journal_dir=tmp_path / "journal",
         receipt=tmp_path / "receipt.json",
         lease=tmp_path / "lease.json",
-        plan_sha256="a" * 64,
+        plan_sha256=None,
         compression_result=None,
         artifact="/artifacts/glm52.gguf",
         artifact_sha256="b" * 64,
@@ -284,6 +284,50 @@ def test_compression_result_mode_derives_exact_verified_artifact(
     assert payload[payload.index("--producer-plan-id") + 1] == "plan-1"
     assert payload[payload.index("--producer-recipe-sha256") + 1] == "a" * 64
     assert "--producer-handoff-sha256" in payload
+
+
+def test_dry_run_derives_canonical_plan_from_compression_result_without_maintenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _module()
+    result, artifact, digest = _compression_result(tmp_path)
+    args = _args(tmp_path)
+    args.execute = False
+    args.compression_result = result
+    args.artifact = None
+    args.artifact_sha256 = None
+    monkeypatch.setattr(module, "parse_args", lambda: args)
+    monkeypatch.setattr(
+        module,
+        "MaintenanceCoordinator",
+        lambda *_a, **_k: pytest.fail("plan preview must not construct maintenance"),
+    )
+    assert module.main() == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["execute"] is False
+    assert preview["artifact"] == str(artifact)
+    assert preview["artifact_sha256"] == digest
+    assert preview["plan_sha256"] == module.build_base_canary_plan(
+        module.CandidateBinding.model_validate(preview["plan"]["candidate"])
+    ).canonical_sha256()
+    assert preview["plan"]["candidate"]["producer_run_id"] == "run-1"
+    assert preview["plan"]["candidate"]["producer_handoff_sha256"]
+
+
+def test_supplied_canary_plan_hash_must_match_derived_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    result, _artifact, _digest = _compression_result(tmp_path)
+    args = _args(tmp_path)
+    args.execute = False
+    args.compression_result = result
+    args.artifact = None
+    args.artifact_sha256 = None
+    args.plan_sha256 = "f" * 64
+    monkeypatch.setattr(module, "parse_args", lambda: args)
+    with pytest.raises(RuntimeError, match="differs from the canonical"):
+        module.main()
 
 
 def test_compression_result_mode_rejects_drifted_artifact(tmp_path: Path) -> None:
