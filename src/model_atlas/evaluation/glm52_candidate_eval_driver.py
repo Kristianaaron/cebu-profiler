@@ -13,6 +13,7 @@ import json
 import os
 import stat
 import subprocess
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,9 @@ from model_atlas.evaluation.glm52_candidate_eval import (
     CandidateEvalResult,
     CandidateEvalTaskEvidence,
     build_task_evidence,
+    measure_eval_lab_console,
+    measure_eval_lab_environment,
+    measure_eval_lab_source,
     parse_candidate_eval_runs,
 )
 from model_atlas.fit_telemetry import CanaryPhase, CanaryStep
@@ -86,6 +90,49 @@ class RuntimeQuiescenceVerifier(Protocol):
     def verify(self, pids: RuntimeProcessIds) -> None: ...
 
 
+class EvalLabCheckoutVerifier(Protocol):
+    def verify(self, root: Path, revision: str) -> None: ...
+
+
+class GitEvalLabCheckoutVerifier:
+    """Require the executed Eval Lab sources to equal the pinned Git tree."""
+
+    def verify(self, root: Path, revision: str) -> None:
+        commands = (
+            ("git", "-C", str(root), "rev-parse", "HEAD"),
+            (
+                "git",
+                "-C",
+                str(root),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--",
+                "src",
+                "pyproject.toml",
+                "uv.lock",
+            ),
+        )
+        measured: list[bytes] = []
+        for command in commands:
+            try:
+                completed = subprocess.run(
+                    command,
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    timeout=30.0,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise CandidateEvalExecutionError("Eval Lab checkout probe failed") from exc
+            if completed.returncode != 0 or len(completed.stdout) > _MAX_STDOUT_BYTES:
+                raise CandidateEvalExecutionError("Eval Lab checkout probe failed")
+            measured.append(completed.stdout.strip())
+        if measured != [revision.encode("ascii"), b""]:
+            raise CandidateEvalExecutionError("Eval Lab checkout differs from pinned sources")
+
+
 class SubprocessEvalLabRunner:
     """Production subprocess boundary; stderr is never captured or disclosed."""
 
@@ -93,15 +140,24 @@ class SubprocessEvalLabRunner:
         self, argv: Sequence[str], *, cwd: Path, timeout_seconds: float
     ) -> EvalLabCommandResult:
         try:
-            completed = subprocess.run(
-                tuple(argv),
-                cwd=cwd,
-                check=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                timeout=timeout_seconds,
-            )
+            with tempfile.TemporaryDirectory(prefix="atlas-eval-pycache-") as pycache:
+                completed = subprocess.run(
+                    tuple(argv),
+                    cwd=cwd,
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    timeout=timeout_seconds,
+                    env={
+                        "HOME": "/home/kristianaaron",
+                        "LANG": "C.UTF-8",
+                        "LC_ALL": "C.UTF-8",
+                        "PATH": "/usr/bin:/bin",
+                        "PYTHONHASHSEED": "0",
+                        "PYTHONPYCACHEPREFIX": pycache,
+                    },
+                )
         except (OSError, subprocess.SubprocessError) as exc:
             raise CandidateEvalExecutionError("Eval Lab command execution failed") from exc
         if len(completed.stdout) > _MAX_STDOUT_BYTES:
@@ -136,9 +192,7 @@ class SystemdRuntimeQuiescenceVerifier:
         self._ssh_argv = tuple(ssh_argv)
 
     def _run(self, argv: Sequence[str], *, worker: bool) -> str:
-        command = (
-            self._ssh_argv + ("--", self._target) + tuple(argv) if worker else tuple(argv)
-        )
+        command = self._ssh_argv + ("--", self._target) + tuple(argv) if worker else tuple(argv)
         try:
             return self._runner(command)
         except Exception as exc:  # noqa: BLE001 - sanitize command output
@@ -211,8 +265,8 @@ class CandidateEvalExecutionResult(BaseModel):
     schema_version: Literal[1] = 1
     execution_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    eval_lab_revision: Literal["a20da6c6b9cbf872f7c083bffe66afde40c2c8f2"] = (
-        "a20da6c6b9cbf872f7c083bffe66afde40c2c8f2"
+    eval_lab_revision: Literal["318606802f9ce025b270ca9791516b59b8f88039"] = (
+        "318606802f9ce025b270ca9791516b59b8f88039"
     )
     eval_lab_cwd: str = Field(pattern=r"^/")
     endpoint_health_verified: Literal[True] = True
@@ -297,6 +351,7 @@ class CandidateEvalExecutor:
         transport: CandidateHttpTransport,
         command_runner: EvalLabCommandRunner,
         quiescence: RuntimeQuiescenceVerifier,
+        checkout_verifier: EvalLabCheckoutVerifier,
         eval_lab_cwd: Path,
     ) -> None:
         if not eval_lab_cwd.is_absolute():
@@ -306,7 +361,24 @@ class CandidateEvalExecutor:
         self._transport = transport
         self._command_runner = command_runner
         self._quiescence = quiescence
+        self._checkout_verifier = checkout_verifier
         self._cwd = eval_lab_cwd
+
+    def _verify_python_environment(self, plan: CandidateEvalPlan) -> None:
+        try:
+            interpreter, interpreter_sha256 = measure_eval_lab_console(Path(plan.argv[0]))
+            environment, environment_sha256, lock_sha256 = measure_eval_lab_environment(self._cwd)
+        except Exception as exc:  # noqa: BLE001 - normalize filesystem boundary
+            raise CandidateEvalExecutionError("pinned Eval Lab environment drifted") from exc
+        if (
+            str(interpreter) != plan.eval_lab_interpreter_path
+            or interpreter_sha256 != plan.eval_lab_interpreter_sha256
+            or str(environment) != plan.eval_lab_environment_path
+            or environment_sha256 != plan.eval_lab_environment_sha256
+            or lock_sha256 != plan.eval_lab_lock_sha256
+            or measure_eval_lab_source(self._cwd) != plan.eval_lab_source_sha256
+        ):
+            raise CandidateEvalExecutionError("pinned Eval Lab environment drifted")
 
     def _check_plan(self, plan: CandidateEvalPlan) -> None:
         request = plan.eval_request
@@ -318,6 +390,8 @@ class CandidateEvalExecutor:
             raise CandidateEvalExecutionError("pinned Eval Lab cwd is unavailable") from exc
         if self._cwd.is_symlink() or cwd != self._cwd or Path(request.eval_lab_root) != cwd:
             raise CandidateEvalExecutionError("candidate evaluation cwd differs from its plan")
+        self._checkout_verifier.verify(cwd, plan.eval_lab_revision)
+        self._verify_python_environment(plan)
         expected_endpoint = f"http://{self._config.api_host}:{self._config.api_port}/v1"
         endpoint = str(request.endpoint.endpoint_url).rstrip("/")
         expected = (
@@ -416,6 +490,8 @@ class CandidateEvalExecutor:
                 raise CandidateEvalExecutionError("Eval Lab command result is invalid")
             if _stable_executable_sha256(Path(plan.argv[0])) != plan.eval_lab_executable_sha256:
                 raise CandidateEvalExecutionError("pinned Eval Lab executable drifted")
+            self._verify_python_environment(plan)
+            self._checkout_verifier.verify(self._cwd, plan.eval_lab_revision)
             if command.returncode != 0:
                 failure = CandidateEvalExecutionError("Eval Lab command exited nonzero")
         except CandidateEvalExecutionError as exc:
@@ -488,6 +564,8 @@ __all__ = [
     "CandidateRuntimeLifecycle",
     "EvalLabCommandResult",
     "EvalLabCommandRunner",
+    "EvalLabCheckoutVerifier",
+    "GitEvalLabCheckoutVerifier",
     "RuntimeQuiescenceVerifier",
     "SubprocessEvalLabRunner",
     "SystemdRuntimeQuiescenceVerifier",

@@ -17,7 +17,11 @@ from model_atlas.evaluation.eval_lab import (
     FrozenHeldOutManifest,
     canonical_directory_sha256,
 )
-from model_atlas.evaluation.glm52_candidate_eval import CandidateEvalPlan
+from model_atlas.evaluation.glm52_candidate_eval import (
+    CandidateEvalPlan,
+    CandidateEvalScorerContract,
+    CandidateEvalTaskContract,
+)
 from model_atlas.evaluation.glm52_candidate_eval_driver import (
     CandidateEvalExecutionError,
     CandidateEvalExecutor,
@@ -51,18 +55,26 @@ def _plan(tmp_path: Path, config: LlamaCppRpcRuntimeConfig) -> CandidateEvalPlan
     (root / ".git" / "refs" / "heads").mkdir(parents=True)
     (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     (root / ".git" / "refs" / "heads" / "main").write_text(
-        "a20da6c6b9cbf872f7c083bffe66afde40c2c8f2\n"
+        "318606802f9ce025b270ca9791516b59b8f88039\n"
     )
+    site_packages = root / ".venv/lib/python3.12/site-packages"
+    site_packages.mkdir(parents=True)
+    (site_packages / "dependency.py").write_text("PINNED = True\n")
+    (root / "uv.lock").write_text("version = 1\n")
+    source = root / "src/eval_lab"
+    source.mkdir(parents=True)
+    (source / "__init__.py").write_text("VERSION = 'test'\n")
     suite.parent.mkdir(parents=True)
-    suite.write_text(
-        "tasks:\n  - task_id: synthetic.math\n  - task_id: synthetic.logic\n"
-    )
+    suite.write_text("tasks:\n  - task_id: synthetic.math\n  - task_id: synthetic.logic\n")
     tasks_dir.mkdir()
     for task_id in ("synthetic.math", "synthetic.logic"):
         (tasks_dir / f"{task_id}.yaml").write_text(
+            "schema_version: '1.0'\n"
             f"id: {task_id}\n"
+            "version: 1\n"
             "data_partition: held_out_evaluation\n"
             "execution:\n  runner: direct\n  timeout_seconds: 30\n"
+            "oracle:\n  - type: exact\n    weight: 1.0\n    required: true\n"
         )
     held_out = FrozenHeldOutManifest(
         data_partition=DataPartition.HELD_OUT_EVALUATION,
@@ -87,9 +99,7 @@ def _plan(tmp_path: Path, config: LlamaCppRpcRuntimeConfig) -> CandidateEvalPlan
         ),
         held_out=held_out,
         tasks=["synthetic.math", "synthetic.logic"],
-        parameters=EvalParameters(
-            seed=17, temperature=0.0, max_tokens=96, timeout_seconds=30
-        ),
+        parameters=EvalParameters(seed=17, temperature=0.0, max_tokens=96, timeout_seconds=30),
         eval_lab_root=str(root),
         suite_ref=str(suite),
         tasks_dir=str(tasks_dir),
@@ -102,6 +112,8 @@ def _plan(tmp_path: Path, config: LlamaCppRpcRuntimeConfig) -> CandidateEvalPlan
     executable.write_text("#!/bin/sh\nexit 0\n")
     executable.chmod(0o755)
     executable_sha256 = hashlib.sha256(executable.read_bytes()).hexdigest()
+    interpreter = Path("/bin/sh").resolve()
+    interpreter_sha256 = hashlib.sha256(interpreter.read_bytes()).hexdigest()
     argv = EvalLabAdapter(executable=str(executable)).emit_argv(request).argv
     return CandidateEvalPlan(
         compression_handoff_sha256="1" * 64,
@@ -111,11 +123,27 @@ def _plan(tmp_path: Path, config: LlamaCppRpcRuntimeConfig) -> CandidateEvalPlan
         candidate_artifact_path=str(config.artifact_path),
         candidate_artifact_sha256=config.artifact_sha256,
         eval_lab_executable_sha256=executable_sha256,
+        eval_lab_interpreter_path=str(interpreter),
+        eval_lab_interpreter_sha256=interpreter_sha256,
+        eval_lab_environment_path=str(site_packages),
+        eval_lab_environment_sha256=canonical_directory_sha256(site_packages),
+        eval_lab_lock_sha256=hashlib.sha256((root / "uv.lock").read_bytes()).hexdigest(),
+        eval_lab_source_sha256=canonical_directory_sha256(source),
         held_out_manifest_id=request.held_out.manifest_id,
         task_suite_sha256=request.held_out.task_suite_sha256,
         task_definitions_sha256=request.held_out.task_definitions_sha256,
         tokenizer_sha256=request.held_out.tokenizer_sha256,
         template_sha256=request.held_out.template_sha256,
+        task_contracts=tuple(
+            CandidateEvalTaskContract(
+                task_id=task_id,
+                task_version=1,
+                scorers=(
+                    CandidateEvalScorerContract(scorer_id="exact", weight=1.0, required=True),
+                ),
+            )
+            for task_id in request.tasks
+        ),
         parameters=request.parameters,
         eval_request=request,
         argv=argv,
@@ -183,25 +211,51 @@ class _Http:
 def _write_run(plan: CandidateEvalPlan, task_id: str, run_id: str) -> None:
     run = Path(plan.eval_request.runs_root) / run_id
     run.mkdir(parents=True)
+    score = {
+        "schema_version": "1.0",
+        "scorer_id": "exact",
+        "score": 1.0,
+        "passed": True,
+        "confidence": 1.0,
+        "required": True,
+        "details": {},
+        "evidence_artifacts": [],
+        "error": None,
+    }
     (run / "manifest.json").write_text(
         json.dumps(
             {
                 "run_id": run_id,
+                "schema_version": "1.0",
+                "created_at": "2026-08-17T00:00:00Z",
                 "task_id": task_id,
+                "task_version": 1,
                 "model_id": plan.eval_request.model_id,
                 "random_seed": 17,
                 "sampling": {"temperature": 0.0, "max_tokens": 96},
                 "budgets": {"timeout_seconds": 30.0, "http_timeout_seconds": 30.0},
                 "result_status": "completed",
+                "run_dir": str(run),
+                "aggregate_score": 1.0,
+                "passed": True,
+                "duration_s": 1.5,
             }
         )
     )
     (run / "result.json").write_text(
-        json.dumps({"run_id": run_id, "error": None, "duration_s": 1.5})
+        json.dumps(
+            {
+                "run_id": run_id,
+                "output": "answer",
+                "error": None,
+                "aggregate": 1.0,
+                "passed": True,
+                "scores": [score],
+                "duration_s": 1.5,
+            }
+        )
     )
-    (run / "scores.jsonl").write_text(
-        json.dumps({"scorer_id": "exact", "score": 1.0}) + "\n"
-    )
+    (run / "scores.jsonl").write_text(json.dumps(score) + "\n")
 
 
 class _Command:
@@ -211,9 +265,7 @@ class _Command:
         self.extra_run = False
         self.calls: list[tuple[tuple[str, ...], Path, float]] = []
 
-    def run(
-        self, argv: Any, *, cwd: Path, timeout_seconds: float
-    ) -> EvalLabCommandResult:
+    def run(self, argv: Any, *, cwd: Path, timeout_seconds: float) -> EvalLabCommandResult:
         command = tuple(argv)
         self.calls.append((command, cwd, timeout_seconds))
         if self.returncode == 0:
@@ -242,6 +294,17 @@ class _Quiescence:
             raise RuntimeError("secret process detail")
 
 
+class _Checkout:
+    def __init__(self) -> None:
+        self.fail = False
+        self.calls: list[tuple[Path, str]] = []
+
+    def verify(self, root: Path, revision: str) -> None:
+        self.calls.append((root, revision))
+        if self.fail:
+            raise RuntimeError("secret checkout detail")
+
+
 def _executor(
     plan: CandidateEvalPlan,
     config: LlamaCppRpcRuntimeConfig,
@@ -256,6 +319,7 @@ def _executor(
         transport=http,
         command_runner=command,
         quiescence=quiescence,
+        checkout_verifier=_Checkout(),
         eval_lab_cwd=Path(plan.eval_request.eval_lab_root),
     )
 
@@ -267,9 +331,7 @@ def test_executes_exact_plan_and_returns_verified_typed_result(tmp_path: Path) -
     quiescence = _Quiescence(lifecycle)
     result = _executor(plan, config, lifecycle, http, command, quiescence).execute(plan)
 
-    assert command.calls == [
-        (plan.argv, Path(plan.eval_request.eval_lab_root), 120.0)
-    ]
+    assert command.calls == [(plan.argv, Path(plan.eval_request.eval_lab_root), 120.0)]
     assert http.calls == [
         ("GET", "http://127.0.0.1:8892/health"),
         ("GET", "http://127.0.0.1:8892/v1/models"),
@@ -283,12 +345,11 @@ def test_executes_exact_plan_and_returns_verified_typed_result(tmp_path: Path) -
         "verify-quiescent",
     ]
     assert result.plan_sha256 == plan.plan_sha256
-    assert tuple(item.task_id for item in result.task_evidence) == tuple(
-        plan.eval_request.tasks
-    )
+    assert tuple(item.task_id for item in result.task_evidence) == tuple(plan.eval_request.tasks)
     assert result.stdout_size_bytes > 0
     assert not hasattr(result, "stdout")
-    assert result.candidate_result.report.performance.tokens_per_second == 0.0
+    assert result.candidate_result.report.performance.tokens_per_second is None
+    assert result.candidate_result.report.performance.elapsed_scope == "sum_task_duration"
 
 
 def test_nonzero_exit_is_sanitized_and_still_attested_stopped_quiesced(
@@ -367,9 +428,7 @@ def test_rejects_endpoint_config_drift_before_start(tmp_path: Path) -> None:
     plan = _plan(tmp_path, config)
     request = plan.eval_request.model_copy(
         update={
-            "endpoint": plan.eval_request.endpoint.model_copy(
-                update={"config_sha256": "f" * 64}
-            )
+            "endpoint": plan.eval_request.endpoint.model_copy(update={"config_sha256": "f" * 64})
         }
     )
     drifted = plan.model_copy(update={"eval_request": request})
@@ -405,9 +464,7 @@ def test_systemd_quiescence_verifier_checks_head_then_worker_units_and_pids() ->
         calls.append(command)
         return "0\n" if any("MainPID" in item for item in command) else ""
 
-    verifier = SystemdRuntimeQuiescenceVerifier(
-        worker_ssh_target="10.77.0.2", runner=runner
-    )
+    verifier = SystemdRuntimeQuiescenceVerifier(worker_ssh_target="10.77.0.2", runner=runner)
     verifier.verify(RuntimeProcessIds(head_server_pid=101, worker_rpc_pid=202))
     assert calls[0][-1] == "atlas-glm52-rpc-head"
     assert calls[1][-1] == "/proc/101"

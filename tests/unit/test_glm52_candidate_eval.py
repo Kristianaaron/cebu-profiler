@@ -133,8 +133,15 @@ def _request(tmp_path: Path, compression: CompressionHandoff) -> EvalLabRequest:
     (root / ".git" / "refs" / "heads").mkdir(parents=True)
     (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     (root / ".git" / "refs" / "heads" / "main").write_text(
-        "a20da6c6b9cbf872f7c083bffe66afde40c2c8f2\n"
+        "318606802f9ce025b270ca9791516b59b8f88039\n"
     )
+    site_packages = root / ".venv/lib/python3.12/site-packages"
+    site_packages.mkdir(parents=True)
+    (site_packages / "dependency.py").write_text("PINNED = True\n")
+    (root / "uv.lock").write_text("version = 1\n")
+    source = root / "src/eval_lab"
+    source.mkdir(parents=True)
+    (source / "__init__.py").write_text("VERSION = 'test'\n")
     executable = root / ".venv" / "bin" / "eval-lab"
     executable.parent.mkdir(parents=True)
     executable.write_text("#!/bin/sh\nexit 0\n")
@@ -144,9 +151,12 @@ def _request(tmp_path: Path, compression: CompressionHandoff) -> EvalLabRequest:
     tasks.mkdir()
     for task_id in ("synthetic.math", "synthetic.logic"):
         (tasks / f"{task_id}.yaml").write_text(
+            "schema_version: '1.0'\n"
             f"id: {task_id}\n"
+            "version: 1\n"
             "data_partition: held_out_evaluation\n"
             "execution:\n  runner: direct\n  timeout_seconds: 30\n"
+            "oracle:\n  - type: exact\n    weight: 1.0\n    required: true\n"
         )
     held_out = FrozenHeldOutManifest(
         data_partition=DataPartition.HELD_OUT_EVALUATION,
@@ -193,19 +203,47 @@ def _run(request: EvalLabRequest, task_id: str, run_id: str) -> Path:
         json.dumps(
             {
                 "run_id": run_id,
+                "schema_version": "1.0",
+                "created_at": "2026-08-17T00:00:00Z",
                 "task_id": task_id,
+                "task_version": 1,
                 "model_id": request.model_id,
                 "random_seed": request.parameters.seed,
                 "sampling": {"temperature": 0.0, "max_tokens": 96},
                 "budgets": {"timeout_seconds": 30.0, "http_timeout_seconds": 30.0},
                 "result_status": "completed",
+                "run_dir": str(root),
+                "aggregate_score": 1.0,
+                "passed": True,
+                "duration_s": 1.5,
             }
         )
     )
+    score = {
+        "schema_version": "1.0",
+        "scorer_id": "exact",
+        "score": 1.0,
+        "passed": True,
+        "confidence": 1.0,
+        "required": True,
+        "details": {},
+        "evidence_artifacts": [],
+        "error": None,
+    }
     (root / "result.json").write_text(
-        json.dumps({"run_id": run_id, "error": None, "duration_s": 1.5})
+        json.dumps(
+            {
+                "run_id": run_id,
+                "output": "answer",
+                "error": None,
+                "aggregate": 1.0,
+                "passed": True,
+                "scores": [score],
+                "duration_s": 1.5,
+            }
+        )
     )
-    (root / "scores.jsonl").write_text(json.dumps({"scorer_id": "exact", "score": 1.0}) + "\n")
+    (root / "scores.jsonl").write_text(json.dumps(score) + "\n")
     return root
 
 
@@ -277,6 +315,38 @@ def test_parser_requires_current_evidence_and_frozen_manifest(tmp_path: Path) ->
         parse_candidate_eval_runs(plan, evidence)
 
 
+def test_parser_rejects_run_directory_symlink_and_cross_artifact_disagreement(
+    tmp_path: Path,
+) -> None:
+    compression = _compression()
+    request = _request(tmp_path, compression)
+    plan = build_candidate_eval_plan(
+        compression_handoff=compression,
+        runtime_canary_handoff=_canary(compression),
+        eval_request=request,
+        adapter=_adapter(request),
+    )
+    run = _run(request, request.tasks[0], "0" * 12)
+    second_run = _run(request, request.tasks[1], "1" * 12)
+    first = build_task_evidence(request.tasks[0], run)
+    second = build_task_evidence(request.tasks[1], second_run)
+    result = json.loads(Path(first.result_path).read_text())
+    result["duration_s"] = 2.0
+    Path(first.result_path).write_text(json.dumps(result))
+    disagreed = first.model_copy(
+        update={"result_sha256": hashlib.sha256(Path(first.result_path).read_bytes()).hexdigest()}
+    )
+    with pytest.raises(CandidateEvalError, match="durations differ"):
+        parse_candidate_eval_runs(plan, (disagreed, second))
+
+    outside = tmp_path / "outside" / first.run_id
+    outside.parent.mkdir()
+    run.rename(outside)
+    run.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(CandidateEvalError, match="cannot be opened safely"):
+        build_task_evidence(request.tasks[0], run)
+
+
 def test_plan_rejects_unverified_or_mismatched_handoffs(tmp_path: Path) -> None:
     compression = _compression()
     request = _request(tmp_path, compression)
@@ -303,12 +373,19 @@ def _real_default_checkout(tmp_path: Path) -> Path:
     (root / ".git" / "refs" / "heads").mkdir(parents=True)
     (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     (root / ".git" / "refs" / "heads" / "main").write_text(
-        "a20da6c6b9cbf872f7c083bffe66afde40c2c8f2\n"
+        "318606802f9ce025b270ca9791516b59b8f88039\n"
     )
     executable = root / ".venv" / "bin" / "eval-lab"
     executable.parent.mkdir(parents=True)
     executable.write_text("#!/bin/sh\nexit 0\n")
     executable.chmod(0o755)
+    site_packages = root / ".venv/lib/python3.12/site-packages"
+    site_packages.mkdir(parents=True)
+    (site_packages / "dependency.py").write_text("PINNED = True\n")
+    (root / "uv.lock").write_text("version = 1\n")
+    source = root / "src/eval_lab"
+    source.mkdir(parents=True)
+    (source / "__init__.py").write_text("VERSION = 'test'\n")
     suite = root / "configs" / "suites" / "atlas-glm52-heldout.yaml"
     suite.parent.mkdir(parents=True)
     suite.write_text(
@@ -325,9 +402,12 @@ def _real_default_checkout(tmp_path: Path) -> Path:
         task_root = tasks / directory
         task_root.mkdir(parents=True)
         (task_root / "task.yaml").write_text(
+            "schema_version: '1.0'\n"
             f"id: {task_id}\n"
+            "version: 1\n"
             "data_partition: held_out_evaluation\n"
             "execution:\n  runner: direct\n  timeout_seconds: 300\n"
+            "oracle:\n  - type: exact\n    weight: 1.0\n    required: true\n"
         )
         (task_root / "prompt.md").write_text(prompt)
     return root
@@ -381,7 +461,7 @@ def test_real_default_builder_fails_closed_on_revision_and_content_drift(
             eval_output_root=operation_root,
             verified_tokenizer_sha256="e" * 64,
         )
-    (root / ".git/refs/heads/main").write_text("a20da6c6b9cbf872f7c083bffe66afde40c2c8f2\n")
+    (root / ".git/refs/heads/main").write_text("318606802f9ce025b270ca9791516b59b8f88039\n")
     plan = build_glm52_candidate_eval_plan(
         compression_handoff=compression,
         runtime_canary_handoff=canary,

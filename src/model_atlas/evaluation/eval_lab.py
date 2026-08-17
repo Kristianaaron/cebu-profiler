@@ -20,15 +20,15 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.networks import HttpUrl
 
-EVAL_LAB_REVISION = "a20da6c6b9cbf872f7c083bffe66afde40c2c8f2"
+EVAL_LAB_REVISION = "318606802f9ce025b270ca9791516b59b8f88039"
 _SHA256 = r"^[0-9a-f]{64}$"
 _REVISION = r"^[0-9a-f]{40}$"
 
 
 def _canonical_digest(payload: dict[str, Any]) -> str:
-    encoded = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -222,7 +222,8 @@ class PerformanceReport(_StrictFrozenModel):
     requests: int = Field(gt=0)
     successful_requests: int = Field(ge=0)
     elapsed_seconds: float = Field(gt=0.0)
-    tokens_per_second: float = Field(ge=0.0)
+    elapsed_scope: Literal["sum_task_duration"] = "sum_task_duration"
+    tokens_per_second: float | None = Field(default=None, ge=0.0)
     latency_p50_ms: float = Field(ge=0.0)
     latency_p95_ms: float = Field(ge=0.0)
     peak_memory_bytes: int | None = Field(default=None, ge=0)
@@ -305,8 +306,8 @@ class HandoffBlocker(StrEnum):
 
 class EvalLabHandoff(_StrictFrozenModel):
     request_id: str = Field(pattern=_SHA256)
-    eval_lab_revision: Literal["a20da6c6b9cbf872f7c083bffe66afde40c2c8f2"] = (
-        "a20da6c6b9cbf872f7c083bffe66afde40c2c8f2"
+    eval_lab_revision: Literal["318606802f9ce025b270ca9791516b59b8f88039"] = (
+        "318606802f9ce025b270ca9791516b59b8f88039"
     )
     executable: bool
     blockers: list[HandoffBlocker] = Field(default_factory=list)
