@@ -965,6 +965,25 @@ def test_source_stat_boundary_detects_change_without_content_hash(tmp_path: Path
         assert_source_stats_unchanged(snap, str(src))
 
 
+def test_source_integrity_ignores_transport_metadata_but_not_payload(tmp_path: Path):
+    src = tmp_path / "src_dir"
+    src.mkdir()
+    (src / "tensor.bin").write_bytes(b"weights-v1")
+    cache = src / ".cache" / "huggingface" / "download"
+    cache.mkdir(parents=True)
+    sidecar = cache / "._tensor.bin.incomplete"
+    sidecar.write_bytes(b"metadata-v1")
+    snap = source_snapshot(str(src))
+
+    sidecar.write_bytes(b"metadata-v2")
+    assert_source_stats_unchanged(snap, str(src))
+    assert_source_readonly(snap, str(src))
+
+    (src / "tensor.bin").write_bytes(b"weights-v2")
+    with pytest.raises(RuntimeError, match="changed"):
+        assert_source_readonly(snap, str(src))
+
+
 def test_engine_hashes_source_once_after_initial_snapshot(
     compiler: RecipeCompiler, tmp_path: Path, monkeypatch
 ):

@@ -13,7 +13,7 @@ from model_atlas.glm52_source_profile import (
     build_glm52_mixed_gguf_profile,
     build_resumable_source_manifest,
 )
-from model_atlas.jobs.artifacts import source_manifest_digest
+from model_atlas.jobs.artifacts import source_manifest, source_manifest_digest
 from model_atlas.recommend.policy import AtlasProfile
 
 
@@ -72,11 +72,54 @@ def test_manifest_rehashes_only_when_stat_changes(tmp_path: Path) -> None:
     assert result_files["b.txt"] == _sha(source / "b.txt")
 
 
+def test_manifest_and_job_engine_share_transport_junk_exclusion(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    _write(source / "config.json", "payload")
+    _write(source / "._config.json", "appledouble")
+    _write(source / ".cache/required.bin", "payload-cache")
+    _write(source / ".cache/huggingface/download/._model.incomplete", "cache")
+    _write(source / ".cache/huggingface/download/model.metadata", "metadata")
+    _write(source / ".cache/huggingface/download/model.lock", "lock")
+    _write(source / ".cache/huggingface/download/model.incomplete", "partial")
+    output = tmp_path / "manifest.json"
+    result = build_resumable_source_manifest(
+        source, checkpoint_path=tmp_path / "state.json", output_path=output
+    )
+    assert set(result.manifest["files"]) == {"config.json", ".cache/required.bin"}
+    engine_manifest = source_manifest(str(source))
+    assert set(engine_manifest["files"]) == {"config.json", ".cache/required.bin"}
+    assert source_manifest_digest(engine_manifest) == result.digest
+
+
+def test_transport_junk_inode_churn_does_not_invalidate_payload(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    _write(source / "model.bin", "weights")
+    junk = source / ".cache/huggingface/download/._model.incomplete"
+    _write(junk, "junk")
+    metadata = source / ".cache/huggingface/download/model.metadata"
+    _write(metadata, "metadata-v1")
+    checkpoint = tmp_path / "state.json"
+    output = tmp_path / "manifest.json"
+    first = build_resumable_source_manifest(
+        source, checkpoint_path=checkpoint, output_path=output
+    )
+    junk.unlink()
+    _write(junk, "junk")
+    metadata.unlink()
+    _write(metadata, "metadata-v2")
+    second = build_resumable_source_manifest(
+        source, checkpoint_path=checkpoint, output_path=output
+    )
+    assert second.digest == first.digest
+    assert second.hashed_files == 0
+    assert second.reused_files == 1
+
+
 def test_manifest_rejects_symlink_and_never_follows_it(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
     _write(tmp_path / "outside.txt", "secret")
-    os.symlink(tmp_path / "outside.txt", source / "escape")
+    os.symlink(tmp_path / "outside.txt", source / "._escape")
     with pytest.raises(SourceProfileError, match="symlink"):
         build_resumable_source_manifest(
             source, checkpoint_path=tmp_path / "state.json", output_path=tmp_path / "manifest.json"

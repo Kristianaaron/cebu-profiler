@@ -18,12 +18,31 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from model_atlas.jobs.schema import OutputRef
 from model_atlas.recipe.compiler import canonical_json, sha256_hex
 
 _IO_CHUNK = 1 << 20
+
+
+def is_huggingface_source_cache(relative_path: str) -> bool:
+    """Return whether a relative path belongs to HF downloader state."""
+
+    parts = PurePosixPath(relative_path).parts
+    return len(parts) >= 2 and parts[:2] == (".cache", "huggingface")
+
+
+def is_model_source_payload(relative_path: str) -> bool:
+    """Return whether a relative source path belongs to the model payload.
+
+    Hugging Face download caches and AppleDouble/Finder sidecars are transport
+    metadata, not checkpoint inputs.  Excluding them here keeps the resumable
+    profile manifest and JobEngine source identity on one canonical policy.
+    """
+
+    path = PurePosixPath(relative_path)
+    return not (is_huggingface_source_cache(relative_path) or path.name.startswith("._"))
 
 
 def sha256_file(path: Path) -> str:
@@ -243,6 +262,8 @@ def source_manifest(source_path: str) -> dict[str, object]:
     p = Path(source_path)
     if not p.exists():
         return {"type": "missing"}
+    if p.is_symlink():
+        raise SourceIntegrityError(f"source {source_path} is a forbidden symlink")
     if p.is_file():
         size = p.stat().st_size
         mtime = p.stat().st_mtime_ns
@@ -254,11 +275,20 @@ def source_manifest(source_path: str) -> dict[str, object]:
     files: dict[str, str] = {}
     stats: dict[str, object] = {}
     for child in sorted(p.rglob("*")):
-        if child.is_file():
-            rel = str(child.relative_to(p))
-            files[rel] = sha256_file(child)
-            st = child.stat()
-            stats[rel] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+        rel = str(child.relative_to(p))
+        if is_huggingface_source_cache(rel):
+            continue
+        if child.is_symlink():
+            raise SourceIntegrityError(f"source contains forbidden symlink: {rel}")
+        if child.is_dir():
+            continue
+        if not child.is_file():
+            raise SourceIntegrityError(f"source contains non-regular entry: {rel}")
+        if not is_model_source_payload(rel):
+            continue
+        files[rel] = sha256_file(child)
+        st = child.stat()
+        stats[rel] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
     return {"type": "dir", "files": files, "file_stats": stats}
 
 
@@ -282,6 +312,8 @@ def source_stat_manifest(source_path: str) -> dict[str, object]:
     path = Path(source_path)
     if not path.exists():
         return {"type": "missing", "file_stats": {}}
+    if path.is_symlink():
+        raise SourceIntegrityError(f"source {source_path} is a forbidden symlink")
     if path.is_file():
         stat = path.stat()
         return {
@@ -292,12 +324,22 @@ def source_stat_manifest(source_path: str) -> dict[str, object]:
         }
     stats: dict[str, object] = {}
     for child in sorted(path.rglob("*")):
-        if child.is_file():
-            stat = child.stat()
-            stats[str(child.relative_to(path))] = {
-                "size": stat.st_size,
-                "mtime_ns": stat.st_mtime_ns,
-            }
+        relative = str(child.relative_to(path))
+        if is_huggingface_source_cache(relative):
+            continue
+        if child.is_symlink():
+            raise SourceIntegrityError(f"source contains forbidden symlink: {relative}")
+        if child.is_dir():
+            continue
+        if not child.is_file():
+            raise SourceIntegrityError(f"source contains non-regular entry: {relative}")
+        if not is_model_source_payload(relative):
+            continue
+        child_stat = child.stat()
+        stats[relative] = {
+            "size": child_stat.st_size,
+            "mtime_ns": child_stat.st_mtime_ns,
+        }
     return {"type": "dir", "file_stats": stats}
 
 

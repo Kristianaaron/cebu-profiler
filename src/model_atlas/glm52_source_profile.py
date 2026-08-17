@@ -20,7 +20,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from model_atlas.jobs.artifacts import source_manifest_digest
+from model_atlas.jobs.artifacts import (
+    is_huggingface_source_cache,
+    is_model_source_payload,
+    source_manifest_digest,
+)
 from model_atlas.recipes.builtin import GLM52_GGUF_TENSOR_PLAN_SHA256
 
 _HASH_CHUNK_BYTES = 4 * 1024 * 1024
@@ -180,6 +184,8 @@ def _enumerate_regular_files(root_descriptor: int) -> dict[str, dict[str, int]]:
             if stat.S_ISLNK(entry_stat.st_mode):
                 raise SourceProfileError(f"source contains forbidden symlink: {relative}")
             if stat.S_ISDIR(entry_stat.st_mode):
+                if is_huggingface_source_cache(str(relative)):
+                    continue
                 try:
                     child_descriptor = os.open(
                         entry.name, directory_flags, dir_fd=directory_descriptor
@@ -204,6 +210,8 @@ def _enumerate_regular_files(root_descriptor: int) -> dict[str, dict[str, int]]:
             if not stat.S_ISREG(entry_stat.st_mode):
                 raise SourceProfileError(f"source contains non-regular entry: {relative}")
             relative_text = str(relative)
+            if not is_model_source_payload(relative_text):
+                continue
             if relative_text.startswith("../") or relative_text == "..":
                 raise SourceProfileError(f"source path escape: {relative_text}")
             files[relative_text] = _reuse_stat_record(entry_stat)
