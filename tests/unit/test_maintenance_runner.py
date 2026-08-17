@@ -132,6 +132,10 @@ def test_exact_stop_and_rollback_order(tmp_path: Path) -> None:
         "operator_payload",
     ]
     assert ids[9:] == [
+        "preserve_head_runtime_journal",
+        "stop_head_runtime",
+        "preserve_worker_rpc_journal",
+        "stop_worker_rpc",
         "restore_worker_rpc",
         "restore_head_runtime",
         "restore_dsv4",
@@ -475,6 +479,27 @@ def test_persistent_payload_group_skips_restoration_and_marks_manual_interventio
     ).run(["operator-command"])
     assert receipt.manual_intervention_required
     assert receipt.failure == "ProcessGroupQuiescenceError"
+    assert not any(action.action_id.startswith("restore_") for action in receipt.actions)
+
+
+def test_payload_worker_that_survives_stop_blocks_production_restore(tmp_path: Path) -> None:
+    class StubbornWorkerRunner(FakeRunner):
+        def run(self, argv: Sequence[str]) -> CommandResult:
+            command = tuple(argv)
+            inner = self._inner(command)
+            if command == ("operator-command",):
+                self.active.add(WORKER_TRANSIENT_UNIT)
+            if inner == ("systemctl", "--user", "stop", WORKER_TRANSIENT_UNIT):
+                self.calls.append(command)
+                self.mutations.append(command)
+                return CommandResult(returncode=0)
+            return super().run(argv)
+
+    receipt = MaintenanceCoordinator(
+        config(tmp_path), StubbornWorkerRunner(active=ALL_PRODUCTION), execute=True
+    ).run(["operator-command"])
+    assert receipt.manual_intervention_required
+    assert "ProcessGroupQuiescenceError" in (receipt.failure or "")
     assert not any(action.action_id.startswith("restore_") for action in receipt.actions)
 
 

@@ -413,7 +413,12 @@ def _single_option(common_argv: tuple[str, ...], option: str) -> str:
     return common_argv[positions[0] + 1]
 
 
-def build_capture_argv(request: CaptureRequest, *, common_argv: tuple[str, ...]) -> tuple[str, ...]:
+def build_capture_argv(
+    request: CaptureRequest,
+    *,
+    common_argv: tuple[str, ...],
+    execution_output_dir: str | None = None,
+) -> tuple[str, ...]:
     """Build the exact non-shell native invocation after contract verification."""
 
     normalized = canonical_capture_runtime_argv(
@@ -438,11 +443,23 @@ def build_capture_argv(request: CaptureRequest, *, common_argv: tuple[str, ...])
         raise CaptureValidationError("capture argv model path is not canonical")
     if "--no-warmup" not in common_argv:
         raise CaptureValidationError("capture argv must disable warmup")
+    output_dir = execution_output_dir or request.output_dir
+    if execution_output_dir is not None:
+        execution = Path(execution_output_dir)
+        expected = Path(request.output_dir)
+        if (
+            len(execution.parts) != 6
+            or execution.parts[:4] != ("/", "proc", "self", "fd")
+            or not execution.parts[4].isdecimal()
+            or execution.name != expected.name
+            or execution.parent.resolve(strict=True) / execution.name != expected
+        ):
+            raise CaptureValidationError("capture execution output is not the pinned work root")
     receipt_args = (
         "--tokens-jsonl",
         request.forced_tokens_path,
         "--out-dir",
-        request.output_dir,
+        output_dir,
         "--layers",
         ",".join(str(layer) for layer in request.layers),
         "--request-id",
@@ -725,7 +742,11 @@ def _verify_request_inputs(request: CaptureRequest, root: Path) -> None:
             if request.precision_evidence_path is not None
             else None
         )
-        resolved_root = root.resolve(strict=True)
+        resolved_root = (
+            root.resolve(strict=True)
+            if root.exists()
+            else root.parent.resolve(strict=True) / root.name
+        )
     except (OSError, RuntimeError) as exc:
         raise CaptureValidationError("capture request input path is unavailable") from exc
     if any(path != path.resolve(strict=True) for path in raw_paths):
@@ -761,8 +782,51 @@ def _verify_request_inputs(request: CaptureRequest, root: Path) -> None:
         raise CaptureValidationError("model artifact evidence does not match the request")
     if _sha256_file(tool) != request.tool.binary_sha256:
         raise CaptureValidationError("capture tool bytes drifted from the request")
-    if _sha256_file(tool_contract) != request.tool.build_contract_sha256:
+    tool_contract_bytes = _read_bounded_regular(tool_contract, _MAX_JSON_BYTES)
+    if hashlib.sha256(tool_contract_bytes).hexdigest() != request.tool.build_contract_sha256:
         raise CaptureValidationError("capture tool build contract drifted from the request")
+    try:
+        build_contract = json.loads(tool_contract_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CaptureValidationError("capture tool build contract is invalid") from exc
+    if not isinstance(build_contract, dict):
+        raise CaptureValidationError("capture tool build contract is invalid")
+    library_root_value = build_contract.get("library_root")
+    libraries = build_contract.get("libraries")
+    library_sizes = build_contract.get("library_sizes")
+    if (
+        not isinstance(library_root_value, str)
+        or not library_root_value.startswith("/")
+        or not isinstance(libraries, dict)
+        or not libraries
+        or len(libraries) > 32
+        or not isinstance(library_sizes, dict)
+        or set(library_sizes) != set(libraries)
+    ):
+        raise CaptureValidationError("capture tool library contract is invalid")
+    library_root = Path(library_root_value)
+    if library_root.is_symlink() or library_root != library_root.resolve(strict=True):
+        raise CaptureValidationError("capture tool library root is not canonical")
+    for library_name, library_sha in libraries.items():
+        library_size = library_sizes.get(library_name)
+        if (
+            not isinstance(library_name, str)
+            or Path(library_name).name != library_name
+            or not isinstance(library_sha, str)
+            or re.fullmatch(_SHA256, library_sha) is None
+            or not isinstance(library_size, int)
+            or isinstance(library_size, bool)
+            or library_size <= 0
+            or library_size > 512 * 1024 * 1024
+        ):
+            raise CaptureValidationError("capture tool library contract is invalid")
+        library = library_root / library_name
+        if library.is_symlink() or library != library.resolve(strict=True):
+            raise CaptureValidationError("capture tool library path is not canonical")
+        if library.stat().st_size != library_size:
+            raise CaptureValidationError("capture tool library size drifted")
+        if _sha256_file(library) != library_sha:
+            raise CaptureValidationError("capture tool library bytes drifted")
     if _sha256_file(held_out) != request.held_out_manifest_sha256:
         raise CaptureValidationError("held-out manifest bytes drifted from the request")
     if _sha256_file(tokenizer) != request.profile_tokenizer_sha256:
@@ -785,6 +849,17 @@ def _verify_request_inputs(request: CaptureRequest, root: Path) -> None:
             or evidence.precision != expected_precision
         ):
             raise CaptureValidationError("precision evidence does not describe the model")
+
+
+def preflight_capture_request(request: CaptureRequest) -> None:
+    """Verify every executable/input pin before launching the native helper."""
+
+    root = Path(request.output_dir)
+    if not root.is_absolute() or root.is_symlink() or root.exists():
+        raise CaptureValidationError("capture output must be a new absolute non-symlink path")
+    if root != root.parent.resolve(strict=True) / root.name:
+        raise CaptureValidationError("capture output parent must be canonical and symlink-free")
+    _verify_request_inputs(request, root)
 
 
 def _exclusive_json(root_fd: int, name: str, payload: dict[str, Any]) -> None:
@@ -825,13 +900,22 @@ def _exclusive_json(root_fd: int, name: str, payload: dict[str, Any]) -> None:
             os.unlink(temporary, dir_fd=root_fd)
 
 
-def finalize_capture(request: CaptureRequest) -> CaptureManifest:
+def finalize_capture(
+    request: CaptureRequest, *, root_override: Path | None = None
+) -> CaptureManifest:
     """Validate and publish ``capture-manifest.json`` without executing a model."""
 
-    root = Path(request.output_dir)
+    root = root_override or Path(request.output_dir)
     if not root.is_absolute() or root.is_symlink() or not root.is_dir():
         raise CaptureValidationError("capture output must be an absolute real directory")
-    if root != root.resolve(strict=True):
+    is_fd_anchor = (
+        root_override is not None
+        and len(root.parts) == 6
+        and root.parts[:4] == ("/", "proc", "self", "fd")
+        and root.parts[4].isdecimal()
+        and root.name == Path(request.output_dir).name
+    )
+    if not is_fd_anchor and root != root.resolve(strict=True):
         raise CaptureValidationError("capture output path must be canonical and symlink-free")
     _verify_request_inputs(request, root)
     root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
@@ -1096,6 +1180,7 @@ __all__ = [
     "canonical_capture_runtime_argv",
     "capture_runtime_argv_sha256",
     "build_capture_argv",
+    "preflight_capture_request",
     "finalize_capture",
     "validate_capture_pair",
 ]

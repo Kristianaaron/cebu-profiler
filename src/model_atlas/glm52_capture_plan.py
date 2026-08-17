@@ -27,7 +27,7 @@ CAPTURE_BUILD_CONTRACT = Path(
     "/home/kristianaaron/tmp/model-atlas/artifacts/llama-atlas-capture-build.json"
 )
 CAPTURE_BUILD_CONTRACT_SHA256 = (
-    "9f39069e39d78b3012990913288fc0abd25939619419bad88da50aebd499741c"
+    "bca3446b8a98f06d75822d7e4e5e60e17cefe21ee2c428062da69bba1bd983b8"
 )
 FORCED_TOKENS = Path(
     "/home/kristianaaron/tmp/model-atlas/artifacts/glm52-capture-canary.jsonl"

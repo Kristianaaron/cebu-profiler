@@ -5,6 +5,7 @@
   "atlas_capture_commit": "5b685f895caf9dbd17933449cde7a9e48baac6fd",
   "binary_path": "/home/kristianaaron/tmp/atlas-toolchains/llama.cpp/build-atlas-capture/llama-atlas-capture",
   "binary_sha256": "d41b76cfc042b868b86f2e23431a11da1eb736bf570bb8b3dcb99aa23b3f5859",
+  "library_root": "/home/kristianaaron/tmp/atlas-toolchains/llama.cpp/build-atlas/bin",
   "compiler": "GNU C++ 13.3.0",
   "build_type": "Release",
   "libraries": {
@@ -12,8 +13,18 @@
     "libllama.so.0.1.0": "4d2a5b7b570e183e4f7351b9c60dffb6b184c56756380cdb24fda56a039cbc7d",
     "libggml.so.0.20.0": "2ae33bcc985d7edbe940c52a66a1624039a39b5ef17bfddd74c0c87fb070c348",
     "libggml-base.so.0.20.0": "a2a90764169134c752361ce4beb974c6cb68c938869218e5a9f9dd1b1b8cf9c4",
+    "libggml-cpu.so.0.20.0": "bfb377274064ed69363858ae7448d247680b80118a0fb9541f6a30facca13802",
     "libggml-cuda.so.0.20.0": "ac8949b044097be4c34bb9bef4c6794f360ce7f09c2e91d3708a106ff39fc5b0",
     "libggml-rpc.so.0.20.0": "65f5f0da4ec3c28e29891171ac7060883783ea8ad6900bfc2ace049adf3622e3"
+  },
+  "library_sizes": {
+    "libllama-common.so.0.1.0": 5413272,
+    "libllama.so.0.1.0": 4162680,
+    "libggml.so.0.20.0": 77928,
+    "libggml-base.so.0.20.0": 873536,
+    "libggml-cpu.so.0.20.0": 929080,
+    "libggml-cuda.so.0.20.0": 77342936,
+    "libggml-rpc.so.0.20.0": 165008
   },
   "executed_binary": false
 }

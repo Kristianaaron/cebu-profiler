@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 from argparse import Namespace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -66,6 +67,8 @@ def _plan(tmp_path: Path) -> tuple[Glm52CapturePlan, CompressionHandoff]:
 
 
 def _args(tmp_path: Path) -> Namespace:
+    (tmp_path / "compression.json").write_text("{}")
+    (tmp_path / "profile.json").write_text("{}")
     return Namespace(
         execute=False,
         payload=False,
@@ -78,6 +81,7 @@ def _args(tmp_path: Path) -> Namespace:
         result=tmp_path / "result.json",
         plan_sha256=None,
         expected_plan_sha256="",
+        expected_operation_sha256="",
         worker_ssh_target="10.77.0.2",
     )
 
@@ -113,6 +117,7 @@ def test_payload_runs_candidate_then_identity_and_requires_identity_gate(
     args.execute = True
     args.payload = True
     args.expected_plan_sha256 = plan.plan_sha256
+    args.expected_operation_sha256 = module._operation_sha256(args, plan)
     monkeypatch.setattr(module, "_plan", lambda _args: (plan, handoff))
     monkeypatch.setattr(module, "require_active_lease", lambda *_args: None)
 
@@ -143,15 +148,21 @@ def test_payload_runs_candidate_then_identity_and_requires_identity_gate(
             events.append("stop")
 
     monkeypatch.setattr(module, "WorkerRpcSystemdLifecycle", _Lifecycle)
-    monkeypatch.setattr(module, "_write_model_evidence", lambda _plan: events.append("evidence"))
-    monkeypatch.setattr(module, "_run_native", lambda _argv: events.append("native"))
+    monkeypatch.setattr(
+        module, "_write_model_evidence", lambda _plan, _root_fd: events.append("evidence")
+    )
+    monkeypatch.setattr(module, "preflight_capture_request", lambda _request: None)
+    monkeypatch.setattr(module, "_prepare_runtime_libraries", lambda root_fd: os.dup(root_fd))
+    monkeypatch.setattr(
+        module, "_run_native", lambda _argv, **_kwargs: events.append("native")
+    )
     captures = iter(
         (
             SimpleNamespace(capture_id="candidate"),
             SimpleNamespace(capture_id="identity"),
         )
     )
-    monkeypatch.setattr(module, "finalize_capture", lambda _request: next(captures))
+    monkeypatch.setattr(module, "finalize_capture", lambda _request, **_kwargs: next(captures))
     report = SimpleNamespace(
         identity_control_passed=True,
         report_id="report",
@@ -159,8 +170,84 @@ def test_payload_runs_candidate_then_identity_and_requires_identity_gate(
     )
     monkeypatch.setattr(module, "evaluate_capture_pair", lambda **_kwargs: report)
     monkeypatch.setattr(module, "build_capture_argv", lambda *_args, **_kwargs: ("capture",))
+    monkeypatch.setattr(
+        module,
+        "_bounded_sha256",
+        lambda path: hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else "a" * 64,
+    )
     assert module._execute_payload(args) == 0
     assert events == ["evidence", "start", "native", "remeasure", "native", "remeasure", "stop"]
     result = json.loads(args.result.read_text())
     assert result["identity_control_passed"] is True
     assert result["quality_claim"] is False
+
+
+def test_control_path_rejects_symlinked_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    plan, handoff = _plan(tmp_path)
+    args = _args(tmp_path)
+    real = tmp_path / "real-result-parent"
+    real.mkdir()
+    alias = tmp_path / "alias-result-parent"
+    alias.symlink_to(real, target_is_directory=True)
+    args.result = alias / "result.json"
+    with pytest.raises(RuntimeError, match="symlinked ancestor"):
+        module._validate_paths(args, plan, handoff)
+
+
+def test_work_root_path_replacement_is_detected(tmp_path: Path) -> None:
+    module = _module()
+    root = tmp_path / "work"
+    root.mkdir()
+    descriptor = module._open_directory_chain(root)
+    try:
+        identity = module._directory_identity(descriptor)
+        moved = tmp_path / "moved"
+        root.rename(moved)
+        root.mkdir()
+        with pytest.raises(RuntimeError, match="path identity drifted"):
+            module._assert_directory_path_identity(root, identity)
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize("source_kind", ["fifo", "size-drift"])
+def test_runtime_library_staging_rejects_unbounded_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_kind: str
+) -> None:
+    module = _module()
+    library_root = tmp_path / "libraries"
+    library_root.mkdir()
+    library = library_root / "libbounded.so.1.0"
+    if source_kind == "fifo":
+        os.mkfifo(library)
+        expected_size = 1
+    else:
+        library.write_bytes(b"larger-than-contract")
+        expected_size = 1
+    contract = tmp_path / "build.json"
+    contract.write_text(
+        json.dumps(
+            {
+                "library_root": str(library_root),
+                "libraries": {library.name: "a" * 64},
+                "library_sizes": {library.name: expected_size},
+            }
+        )
+    )
+    monkeypatch.setattr(module, "CAPTURE_BUILD_CONTRACT", contract)
+    monkeypatch.setattr(
+        module,
+        "CAPTURE_BUILD_CONTRACT_SHA256",
+        hashlib.sha256(contract.read_bytes()).hexdigest(),
+    )
+    work = tmp_path / "work"
+    work.mkdir()
+    root_fd = os.open(work, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(RuntimeError, match="contracted regular file"):
+            module._prepare_runtime_libraries(root_fd)
+    finally:
+        os.close(root_fd)

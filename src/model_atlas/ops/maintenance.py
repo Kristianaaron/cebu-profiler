@@ -291,6 +291,7 @@ class MaintenanceCoordinator:
         self._actions: list[ActionReceipt] = []
         self._restored: set[str] = set()
         self._runtime_drained: set[str] = set()
+        self._restore_completed = False
         self._restoration_evidence: dict[str, bool] = {}
         self._restoring = False
 
@@ -506,9 +507,15 @@ class MaintenanceCoordinator:
 
     def restore(self) -> None:
         """Best-effort, idempotent rollback; every transition is attempted."""
+        if self._restore_completed:
+            return
         self._restoring = True
         try:
             # Experimental consumers are always drained head-first, then worker.
+            # A payload may have started these exact transient units after the
+            # acquisition drain, so restoration must stop them again.
+            self._runtime_drained.discard("head_runtime")
+            self._runtime_drained.discard("worker_rpc")
             self._preserve_and_stop_runtime(
                 key="head_runtime",
                 unit=self.config.head_runtime_unit,
@@ -521,6 +528,20 @@ class MaintenanceCoordinator:
                 remote=True,
                 unit_file=self.config.worker_rpc_unit_file,
             )
+            if self.execute:
+                try:
+                    runtime_active = self._unit_active(self.config.head_runtime_unit)
+                    worker_active = self._unit_active(
+                        self.config.worker_rpc_unit, remote=True
+                    )
+                except BaseException as exc:
+                    raise ProcessGroupQuiescenceError(
+                        "experimental runtime quiescence is unknown"
+                    ) from exc
+                if runtime_active or worker_active:
+                    raise ProcessGroupQuiescenceError(
+                        "experimental runtime did not quiesce"
+                    )
             # Restore a pre-existing runtime in dependency order: worker first.
             self._restore_action(
                 "worker_rpc",
@@ -575,6 +596,7 @@ class MaintenanceCoordinator:
                 "worker_rpc": self._unit_active(self.config.worker_rpc_unit, remote=True)
                 == self._states["worker_rpc"].active,
             }
+        self._restore_completed = True
 
     def run(
         self,
@@ -610,6 +632,10 @@ class MaintenanceCoordinator:
             if not manual_intervention:
                 try:
                     self.restore()
+                except ProcessGroupQuiescenceError as exc:
+                    restore_failure = self._failure_label(exc)
+                    failure = f"{failure};restore={restore_failure}" if failure else restore_failure
+                    manual_intervention = True
                 except BaseException as exc:
                     restore_failure = self._failure_label(exc)
                     failure = f"{failure};restore={restore_failure}" if failure else restore_failure

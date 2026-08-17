@@ -25,6 +25,7 @@ from model_atlas.evaluation.llamacpp_capture import (
     canonical_capture_runtime_argv,
     capture_runtime_argv_sha256,
     finalize_capture,
+    preflight_capture_request,
     validate_capture_pair,
 )
 
@@ -58,6 +59,16 @@ def test_capture_model_evidence_preserves_exact_atlas_ids() -> None:
         malformed[field] = "8" * 64
         with pytest.raises(ValueError):
             CaptureModelEvidence.model_validate(malformed)
+
+
+def test_preflight_rejects_drifted_tool_before_native_execution(tmp_path: Path) -> None:
+    tokens = tmp_path / "tokens.jsonl"
+    tokens.write_text('{"sample_id":"s","domain":"d","token_ids":[1,2]}\n')
+    request = _request(tmp_path, tmp_path / "capture", tokens)
+    preflight_capture_request(request)
+    Path(request.tool.binary_path).write_bytes(b"drifted-tool")
+    with pytest.raises(CaptureValidationError, match="tool bytes drifted"):
+        preflight_capture_request(request)
 
 
 def _common_argv(model: Path) -> tuple[str, ...]:
@@ -95,6 +106,10 @@ def _request(tmp_path: Path, output: Path, tokens: Path) -> CaptureRequest:
     model_manifest = tmp_path / "model-artifact.json"
     tool = tmp_path / "llama-atlas-capture"
     tool_contract = tmp_path / "capture-build.json"
+    library_root = tmp_path / "libraries"
+    library_root.mkdir()
+    library = library_root / "libcapture-test.so"
+    library.write_bytes(b"bounded-library")
     held_out = tmp_path / "held-out-manifest.json"
     tokenizer = tmp_path / "tokenizer.json"
     model.write_bytes(b"bounded-model")
@@ -118,7 +133,15 @@ def _request(tmp_path: Path, output: Path, tokens: Path) -> CaptureRequest:
         )
     )
     tool.write_bytes(b"bounded-tool")
-    tool_contract.write_bytes(b"bounded-build-contract")
+    tool_contract.write_text(
+        json.dumps(
+            {
+                "library_root": str(library_root),
+                "libraries": {library.name: _sha(library.read_bytes())},
+                "library_sizes": {library.name: library.stat().st_size},
+            }
+        )
+    )
     held_out.write_bytes(b"bounded-held-out")
     tokenizer.write_bytes(b"bounded-tokenizer")
     runtime_argv = canonical_capture_runtime_argv(

@@ -89,9 +89,25 @@ def _artifact(manifest: CaptureManifest, name: str) -> CaptureArtifact:
 
 
 def _open_verified(root: Path, artifact: CaptureArtifact) -> int:
-    if not root.is_absolute() or root.is_symlink() or root != root.resolve(strict=True):
-        raise CaptureMetricError("capture root must be canonical and symlink-free")
-    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+    is_fd_anchor = (
+        len(root.parts) == 6
+        and root.parts[:4] == ("/", "proc", "self", "fd")
+        and root.parts[4].isdecimal()
+    )
+    if is_fd_anchor:
+        parent_fd = os.dup(int(root.parts[4]))
+        try:
+            root_fd = os.open(
+                root.name,
+                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+        finally:
+            os.close(parent_fd)
+    else:
+        if not root.is_absolute() or root.is_symlink() or root != root.resolve(strict=True):
+            raise CaptureMetricError("capture root must be canonical and symlink-free")
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
     try:
         descriptor = os.open(
             artifact.name,

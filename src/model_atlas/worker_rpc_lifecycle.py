@@ -8,7 +8,6 @@ free.  A capture coordinator must remeasure the worker after every capture.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from contextlib import suppress
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -44,6 +43,7 @@ class WorkerRpcLaunchEvidence(BaseModel):
 
     schema_version: Literal[1] = 1
     worker_pid: int = Field(gt=0)
+    worker_start_ticks: int = Field(gt=0)
     worker_argv: tuple[str, ...]
     worker_exe_path: str = Field(pattern=r"^/")
     worker_exe_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -126,16 +126,21 @@ class WorkerRpcSystemdLifecycle:
         if not exe_path.startswith("/"):
             raise WorkerRpcLifecycleError("worker RPC executable path unavailable")
 
-        hash_fields = self._run(("sha256sum", exe_path)).strip().split()
+        proc_exe = f"/proc/{pid}/exe"
+        hash_fields = self._run(("sha256sum", proc_exe)).strip().split()
         valid_hash = (
             len(hash_fields) >= 2
             and len(hash_fields[0]) == 64
             and all(character in "0123456789abcdef" for character in hash_fields[0])
-            and hash_fields[1] == exe_path
+            and hash_fields[1] == proc_exe
         )
         if not valid_hash:
             raise WorkerRpcLifecycleError("worker RPC executable hash unavailable")
 
+        raw_stat = self._run(("cat", f"/proc/{pid}/stat")).strip().split()
+        if len(raw_stat) < 22 or not raw_stat[21].isdecimal() or int(raw_stat[21]) <= 0:
+            raise WorkerRpcLifecycleError("worker RPC process start identity unavailable")
+        start_ticks = int(raw_stat[21])
         raw_cmdline = self._run(("cat", f"/proc/{pid}/cmdline"))
         argv = tuple(value for value in raw_cmdline.split("\0") if value)
         commit = self._run(("git", "-C", str(self._toolchain_root), "rev-parse", "HEAD")).strip()
@@ -151,6 +156,7 @@ class WorkerRpcSystemdLifecycle:
 
         return WorkerRpcLaunchEvidence(
             worker_pid=pid,
+            worker_start_ticks=start_ticks,
             worker_argv=argv,
             worker_exe_path=exe_path,
             worker_exe_sha256=hash_fields[0],
@@ -172,7 +178,10 @@ class WorkerRpcSystemdLifecycle:
             return evidence
         except Exception as exc:  # noqa: BLE001 - cleanup a partial start
             if worker_started:
-                self._best_effort_stop()
+                launched_pid = (
+                    self._launch_evidence.worker_pid if self._launch_evidence else None
+                )
+                self._stop_and_verify(launched_pid)
             self._started = False
             self._launch_evidence = None
             if isinstance(exc, WorkerRpcLifecycleError):
@@ -192,16 +201,30 @@ class WorkerRpcSystemdLifecycle:
             raise WorkerRpcLifecycleError("worker RPC identity changed during capture")
         return current
 
-    def _best_effort_stop(self) -> None:
-        with suppress(WorkerRpcLifecycleError):
-            self._run(("systemctl", "--user", "stop", self._worker_unit))
+    def _stop_and_verify(self, pid: int | None) -> None:
+        self._run(("systemctl", "--user", "stop", self._worker_unit))
+        output = self._run(
+            (
+                "systemctl",
+                "--user",
+                "show",
+                "--property=MainPID",
+                "--value",
+                self._worker_unit,
+            )
+        ).strip()
+        if output != "0":
+            raise WorkerRpcLifecycleError("worker RPC unit did not quiesce")
+        if pid is not None:
+            self._run(("test", "!", "-e", f"/proc/{pid}"))
 
     def stop(self) -> None:
         """Stop the remote worker unit without ever addressing a head unit."""
         if not self._started:
             return
         try:
-            self._run(("systemctl", "--user", "stop", self._worker_unit))
+            launched_pid = self._launch_evidence.worker_pid if self._launch_evidence else None
+            self._stop_and_verify(launched_pid)
         finally:
             self._started = False
             self._launch_evidence = None

@@ -33,6 +33,8 @@ class _Runner:
         self.digest = EXPECTED_RPC_SERVER_SHA256
         self.argv = config.worker_argv()
         self.commit = PINNED_COMMIT
+        self.start_ticks = 4242
+        self.stopped = False
         self.fail_readlink = False
 
     def __call__(self, argv: object) -> str:
@@ -40,13 +42,19 @@ class _Runner:
         self.calls.append(command)
         if self.fail_readlink and "readlink" in command:
             raise RuntimeError("sensitive remote detail")
+        if "stop" in command:
+            self.stopped = True
+            return ""
         if any("MainPID" in item for item in command):
-            return f"{self.pid}\n"
+            return "0\n" if self.stopped else f"{self.pid}\n"
         if "readlink" in command:
             return f"{self.config.worker_rpc_server_path}\n"
         if "sha256sum" in command:
-            return f"{self.digest}  {self.config.worker_rpc_server_path}\n"
-        if "cat" in command and any("/proc/" in item for item in command):
+            return f"{self.digest}  /proc/{self.pid}/exe\n"
+        if "cat" in command and any(item.endswith("/stat") for item in command):
+            fields = [str(self.pid), "(rpc)", "S", *("0" for _ in range(18))]
+            return " ".join([*fields, str(self.start_ticks)])
+        if "cat" in command and any(item.endswith("/cmdline") for item in command):
             return "\0".join(self.argv) + "\0"
         if "rev-parse" in command:
             return f"{self.commit}\n"
@@ -69,6 +77,7 @@ def test_starts_only_worker_and_returns_frozen_measured_evidence() -> None:
     evidence = lifecycle.start()
 
     assert evidence.worker_pid == 202
+    assert evidence.worker_start_ticks == 4242
     assert evidence.worker_argv == runner.config.worker_argv()
     assert evidence.worker_exe_sha256 == EXPECTED_RPC_SERVER_SHA256
     assert evidence.worker_git_commit == PINNED_COMMIT
@@ -80,11 +89,9 @@ def test_starts_only_worker_and_returns_frozen_measured_evidence() -> None:
         evidence.worker_pid = 303
 
     lifecycle.stop()
-    assert runner.calls[-1][-4:] == (
-        "systemctl",
-        "--user",
-        "stop",
-        WORKER_TRANSIENT_UNIT,
+    assert any(
+        call[-4:] == ("systemctl", "--user", "stop", WORKER_TRANSIENT_UNIT)
+        for call in runner.calls
     )
 
 
@@ -150,3 +157,19 @@ def test_stop_failure_clears_local_state_and_is_sanitized() -> None:
     assert lifecycle.launch_evidence is None
     with pytest.raises(WorkerRpcLifecycleError, match="not started"):
         lifecycle.remeasure_after_capture()
+
+
+def test_stop_fails_closed_when_main_pid_remains_live() -> None:
+    class _StubbornRunner(_Runner):
+        def __call__(self, argv: object) -> str:
+            command: tuple[str, ...] = tuple(argv)  # type: ignore[arg-type]
+            if "stop" in command:
+                self.calls.append(command)
+                return ""
+            return super().__call__(command)
+
+    runner = _StubbornRunner(_config())
+    lifecycle = _lifecycle(runner)
+    lifecycle.start()
+    with pytest.raises(WorkerRpcLifecycleError, match="did not quiesce"):
+        lifecycle.stop()
