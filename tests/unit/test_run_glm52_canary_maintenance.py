@@ -16,6 +16,7 @@ from model_atlas.ops.maintenance import (
     MaintenanceInterrupted,
     MaintenanceReceipt,
 )
+from model_atlas.runtime_artifact_handoff import load_verified_compression_handoff
 
 
 def _module() -> ModuleType:
@@ -205,6 +206,7 @@ def _compression_result(tmp_path: Path) -> tuple[Path, Path, str]:
                 "plan_id": "plan-1",
                 "recipe_sha256": "a" * 64,
                 "profile_id": "profile-1",
+                "profile_sha256": "c" * 64,
                 "recommendation_id": "recommendation-1",
                 "outputs": {
                     "run_id": "run-1",
@@ -253,12 +255,13 @@ def test_compression_result_mode_derives_exact_verified_artifact(
 ) -> None:
     module = _module()
     result, artifact, digest = _compression_result(tmp_path)
-    handoff = module._artifact_from_compression_result(result)
+    handoff = load_verified_compression_handoff(result)
     result_payload = json.loads(result.read_text(encoding="utf-8"))
     evidence = result_payload["runtime_artifact"]["evidence"]
     assert handoff.evidence_sha256 == evidence["sha256"]
     assert handoff.evidence_size_bytes == evidence["size_bytes"]
     assert handoff.evidence_relpath == evidence["relpath"]
+    assert handoff.producer_profile_sha256 == "c" * 64
     args = _args(tmp_path)
     args.compression_result = result
     args.artifact = None
@@ -292,6 +295,15 @@ def test_compression_result_mode_derives_exact_verified_artifact(
     assert "--producer-handoff-sha256" in payload
 
 
+def test_compression_handoff_rejects_malformed_profile_sha256(tmp_path: Path) -> None:
+    result, _artifact, _digest = _compression_result(tmp_path)
+    payload = json.loads(result.read_text(encoding="utf-8"))
+    payload["profile_sha256"] = "not-a-digest"
+    result.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="profile_sha256 is malformed"):
+        load_verified_compression_handoff(result)
+
+
 def test_dry_run_derives_canonical_plan_from_compression_result_without_maintenance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -313,9 +325,12 @@ def test_dry_run_derives_canonical_plan_from_compression_result_without_maintena
     assert preview["execute"] is False
     assert preview["artifact"] == str(artifact)
     assert preview["artifact_sha256"] == digest
-    assert preview["plan_sha256"] == module.build_base_canary_plan(
-        module.CandidateBinding.model_validate(preview["plan"]["candidate"])
-    ).canonical_sha256()
+    assert (
+        preview["plan_sha256"]
+        == module.build_base_canary_plan(
+            module.CandidateBinding.model_validate(preview["plan"]["candidate"])
+        ).canonical_sha256()
+    )
     assert preview["plan"]["candidate"]["producer_run_id"] == "run-1"
     assert preview["plan"]["candidate"]["producer_handoff_sha256"]
 
@@ -337,17 +352,15 @@ def test_supplied_canary_plan_hash_must_match_derived_plan(
 
 
 def test_compression_result_mode_rejects_drifted_artifact(tmp_path: Path) -> None:
-    module = _module()
     result, artifact, _digest = _compression_result(tmp_path)
     artifact.write_bytes(b"tampered")
     with pytest.raises(RuntimeError, match="bytes drifted"):
-        module._artifact_from_compression_result(result)
+        load_verified_compression_handoff(result)
 
 
 def test_evidence_cas_identity_changes_the_bound_handoff_digest(tmp_path: Path) -> None:
-    module = _module()
     result, artifact, _digest = _compression_result(tmp_path)
-    original = module._artifact_from_compression_result(result)
+    original = load_verified_compression_handoff(result)
     payload = json.loads(result.read_text(encoding="utf-8"))
     replacement_payload = b'{"replacement":true}'
     replacement_sha = hashlib.sha256(replacement_payload).hexdigest()
@@ -368,7 +381,7 @@ def test_evidence_cas_identity_changes_the_bound_handoff_digest(tmp_path: Path) 
         relpath=replacement_relpath,
     )
     result.write_text(json.dumps(payload), encoding="utf-8")
-    replaced = module._artifact_from_compression_result(result)
+    replaced = load_verified_compression_handoff(result)
     assert replaced.handoff_sha256 != original.handoff_sha256
 
 
@@ -416,7 +429,6 @@ def test_canary_passthrough_rejects_abbreviated_reviewed_lineage(
 
 
 def test_compression_result_rejects_symlinked_cas_ancestor(tmp_path: Path) -> None:
-    module = _module()
     result, artifact, _digest = _compression_result(tmp_path)
     run_root = artifact.parents[3]
     real_runs = tmp_path / "real-runs"
@@ -425,4 +437,4 @@ def test_compression_result_rejects_symlinked_cas_ancestor(tmp_path: Path) -> No
     run_root.rmdir()
     run_root.symlink_to(real_runs, target_is_directory=True)
     with pytest.raises(OSError):
-        module._artifact_from_compression_result(result)
+        load_verified_compression_handoff(result)
