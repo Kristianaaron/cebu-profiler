@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from model_atlas.atlas.hierarchy import build_hierarchy
@@ -26,6 +28,7 @@ from model_atlas.atlas.runtime import MiniMoE, build_mini_moe, forward
 from model_atlas.builder import build_derivative
 from model_atlas.compression import expert_response_curve, get_backend_registry
 from model_atlas.evaluation import detect_leakage, evaluate_heldout, promote_allowed
+from model_atlas.ops.maintenance_watch import read_events, render_maintenance_status
 from model_atlas.planning import SearchInputs, generate_candidates
 from model_atlas.registry.architectures import get_registry
 from model_atlas.schemas.evidence import EvidenceKind
@@ -33,6 +36,118 @@ from model_atlas.schemas.ontology import CapabilityLabel, SuccessState
 
 SEED = 0
 ARCH = get_registry().get("k3-mini")
+
+
+def _latest_maintenance_journal() -> Path | None:
+    """Resolve the most recent maintenance run's journal dir (optional).
+
+    Env ``ATLAS_MAINTENANCE_JOURNAL_DIR`` overrides; otherwise take the newest
+    ``controlplane_maintenance/*/`` run dir. Returns None when no run exists.
+    """
+    env = os.environ.get("ATLAS_MAINTENANCE_JOURNAL_DIR")
+    if env:
+        p = Path(env)
+        return p if p.is_dir() else None
+    base = Path("controlplane_maintenance")
+    if base.is_dir():
+        hits = sorted(
+            base.rglob("maintenance-events.jsonl"),
+            key=lambda pth: pth.stat().st_mtime,
+            reverse=True,
+        )
+        if hits:
+            return hits[0].parent
+    return None
+
+
+def _maintenance_payload() -> dict[str, Any]:
+    """Maintenance lifecycle status for the GUI (from the live event stream)."""
+    journal = _latest_maintenance_journal()
+    if journal is None:
+        return {"present": False}
+    path = journal / "maintenance-events.jsonl"
+    if not path.exists():
+        return {"present": False, "journal": str(journal)}
+    with open(path, encoding="utf-8") as fh:
+        raw = [ln for ln in fh]
+    events = read_events(path)
+    phases = ("drain", "produce", "restore", "maintenance")
+    current = next(
+        (p for p in reversed(phases) if any(e["phase"] == p for e in events)),
+        "idle",
+    )
+    released = sorted(
+        {e["service"] for e in events if e["phase"] == "drain" and e["status"] == "release"}
+    )
+    loaded = sorted(
+        {e["service"] for e in events if e["phase"] == "restore" and e["status"] == "load"}
+    )
+    cur = 0
+    total = 0
+    for e in events:
+        sc = e.get("shard_current")
+        st = e.get("shard_total")
+        if isinstance(sc, int):
+            cur = max(cur, sc)
+        if isinstance(st, int):
+            total = max(total, st)
+    produce = next(
+        (e.get("method") for e in events if e["phase"] == "produce" and e["status"] == "start"),
+        None,
+    )
+    done = next(
+        (e.get("detail") for e in events if e["phase"] == "maintenance" and e["status"] == "complete"),
+        None,
+    )
+
+    # Timing affordances: run/phase elapsed (live) + an honest remaining estimate.
+    now_epoch = datetime.now(UTC).timestamp()
+
+    def _ts_epoch(ts: object) -> float | None:
+        if not isinstance(ts, str):
+            return None
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+
+    started: list[float] = []
+    for e in events:
+        if (ts := _ts_epoch(e.get("ts"))) is not None:
+            started.append(ts)
+    run_started_epoch = min(started, default=now_epoch)
+    phase_starts: list[float] = []
+    for e in events:
+        if e.get("phase") == current and (ts := _ts_epoch(e.get("ts"))) is not None:
+            phase_starts.append(ts)
+    phase_start_epoch = min(phase_starts, default=run_started_epoch)
+    elapsed = max(0.0, now_epoch - run_started_epoch)
+    phase_elapsed = max(0.0, now_epoch - phase_start_epoch)
+    # Honest conservative total split (labeled estimate in the UI): drain ~1m,
+    # produce ~20m (width-slice/quant can vary), restore ~7m => ~28m.
+    phase_duration_s = {"drain": 60, "produce": 1200, "restore": 420, "maintenance": 60}
+    estimated_total = sum(phase_duration_s[p] for p in phases if p != "maintenance")
+    remaining = max(0.0, float(estimated_total) - elapsed)
+
+    return {
+        "present": True,
+        "journal": str(journal),
+        "phase": current,
+        "status": render_maintenance_status(raw),
+        "released": released,
+        "loaded": loaded,
+        "shard_current": cur,
+        "shard_total": total,
+        "produce_method": produce,
+        "result": done,
+        "run_started_epoch": round(run_started_epoch, 3),
+        "elapsed_seconds": int(elapsed),
+        "phase_elapsed_seconds": int(phase_elapsed),
+        "phase_remaining_seconds": int(max(0.0, phase_duration_s.get(current, 120) - phase_elapsed)),
+        "estimated_total_seconds": estimated_total,
+        "eta_remaining_seconds": int(remaining),
+        "phase_duration_s": phase_duration_s,
+    }
 
 
 # Lucide icon inner-SVG (viewBox 0 0 24 24) for each side-nav tab.
@@ -54,6 +169,7 @@ _ICONS: dict[str, str] = {
     "corpus": '<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>',
     "hierarchy": '<path d="M8 6h13M8 12h13M8 18h13"/><circle cx="4" cy="6" r="2"/><circle cx="4" cy="12" r="2"/><circle cx="4" cy="18" r="2"/>',
     "reality": '<path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><circle cx="12" cy="12" r="6"/>',
+    "maintenance": '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
 }
 
 
@@ -883,12 +999,16 @@ _TAB_TEMPLATE = """<div class="tab" data-tab="{id}"><svg viewBox="0 0 24 24" wid
 
 def render_dashboard(data: dict[str, Any]) -> str:
     """Return a self-contained interactive HTML page embedding measured data."""
+    data = {**data, "maintenance": _maintenance_payload()}
     payload = json.dumps(data).replace("</", "<\\/")
     cap3d_json = json.dumps(data.get("capability3d", {})).replace("</", "<\\/")
     nav: list[dict[str, Any]] = [
         {
             "section": "Overview",
-            "tabs": [{"id": "summary", "title": "Summary"}],
+            "tabs": [
+                {"id": "summary", "title": "Summary"},
+                {"id": "maintenance", "title": "Maintenance"},
+            ],
         },
         {
             "section": "Profiling",
@@ -1134,6 +1254,10 @@ def render_dashboard(data: dict[str, Any]) -> str:
 <main class="main">
  <div class="panel" id="panel-summary">
    <p>End-to-end parent→derivative Atlas over a genuine synthetic mini-MoE. Everything below is computed by the same measured code paths as the test suite. This is the <strong>Atlas Profile Platform</strong>: use <em>Profiling</em> to understand the model, <em>Quantization &amp; Fit</em> to shrink/score it, and the <strong>Eval Harness</strong> link (bottom of the nav) for independent benchmarking.</p>
+ </div>
+ <div class="panel" id="panel-maintenance">
+   <p class="note">Maintenance lifecycle: draining services → producing the derivative → restoring/loading DSV4 (with per-shard progress). Live if a run is active.</p>
+   <div id="maintenance-body"></div>
  </div>
  <div class="panel" id="panel-capability">
    <p class="note">Experts × layers saliency map: one dithered cube per scored <code>(layer, expert)</code> cell, capability labels run along the depth axis; brightness = measured saliency (per-label normalised).</p>
@@ -1687,6 +1811,48 @@ def render_dashboard(data: dict[str, Any]) -> str:
    t.classList.add('active');
    document.getElementById('panel-'+t.dataset.tab).classList.add('active');
  }}));
+ // ---- Maintenance lifecycle status (drain/produce/restore) ----
+ (function(){{
+   var M = DATA.maintenance || {{present:false}};
+   var body = document.getElementById('maintenance-body');
+   if(!body) return;
+   if(!M.present){{ body.innerHTML='<p class="note">No maintenance run recorded. Runs appear here live while draining.</p>'; return; }}
+   var phase = M.phase || 'idle';
+   var col = phase==='drain'?'#58a6ff':phase==='produce'?'#d29922':phase==='restore'?'#3fb950':phase==='maintenance'?'#a5d6ff':'#8a94a6';
+   function bar(cur,tot){{ if(!tot) return ''; var n=Math.min(24,Math.round(24*cur/tot)); var b=''; for(var i=0;i<24;i++) b+= i<n?'#':'.'; return '<div style="font-family:monospace;font-size:15px;color:'+col+'">['+b+'] '+cur+'/'+tot+' shards</div>'; }}
+   body.innerHTML =
+     '<h3 style="color:'+col+';margin:6px 0 8px">'+phase.toUpperCase()+'</h3>'+
+     '<p style="font-size:15px;margin:4px 0">'+esc(M.status||'')+'</p>'+
+     (M.released&&M.released.length?'<p style="margin:4px 0">Released: '+M.released.join(', ')+'</p>':'')+
+     (M.loaded&&M.loaded.length?'<p style="margin:4px 0">Loading/restored: '+M.loaded.join(', ')+'</p>':'')+
+     (M.shard_total?bar(M.shard_current||0,M.shard_total):'')+
+     (M.result?'<p class="note" style="margin:4px 0">'+esc(M.result)+'</p>':'');
+   // ---- time affordances: elapsed (live) + remaining (est.) ----
+   var est=M.estimated_total_seconds||1680, started=(M.run_started_epoch||0)*1000;
+   var dur=M.phase_duration_s||{{drain:60,produce:1200,restore:420}};
+   var split=['drain','produce','restore'].map(function(k){{return k+' ~'+Math.round((dur[k]||0)/60)+'m';}}).join(' · ');
+   function fmt(s){{ var m=Math.floor(s/60), r=Math.floor(s)%60; return m+':'+(r<10?'0':'')+r; }}
+   body.innerHTML += '<div id="mt-time" style="margin-top:10px;padding-top:8px;border-top:1px solid #262c38;font-family:monospace;font-size:14px">'+
+     '&#9202; elapsed <b id="mt-el">'+fmt(M.elapsed_seconds||0)+'</b>'+
+     (M.phase!=='maintenance'?' &nbsp; &#9203; remaining <b id="mt-left">'+fmt(M.eta_remaining_seconds||0)+'</b>':'')+
+     '<span class="note" style="margin-left:8px">(est. '+fmt(est)+' total)</span></div>'+
+     '<p class="note" style="margin:4px 0">expected: '+split+'</p>';
+   if(started){{ setInterval(function(){{
+       var sec=Math.max(0,(Date.now()-started)/1000);
+       var el=document.getElementById('mt-el'), lf=document.getElementById('mt-left');
+       if(el) el.textContent=fmt(sec);
+       if(lf) lf.textContent=fmt(Math.max(0,est-sec));
+     }},1000); }}
+   // floating pill so drain is obvious on any tab
+   if(phase==='drain'||phase==='produce'||phase==='restore'){{
+     var pill=document.createElement('div');
+     pill.style.cssText='position:fixed;top:14px;right:18px;z-index:60;background:#161a22;border:1px solid '+col+';color:'+col+';padding:8px 14px;border-radius:20px;font-family:monospace;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 4px 18px rgba(0,0,0,.4)';
+     pill.innerHTML='<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:'+col+';box-shadow:0 0 10px '+col+';margin-right:9px"></span>'+phase.toUpperCase()+' - DSV4 '+(phase==='drain'||phase==='restore'?'OFFLINE':'BUSY');
+     pill.onclick=function(){{ document.querySelector('[data-tab=maintenance]').click(); }};
+     document.body.appendChild(pill);
+   }}
+ }})();
+ function esc(s){{ var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }}
  document.querySelector('.tab').classList.add('active');
  document.getElementById('panel-summary').classList.add('active');
 </script></body></html>"""

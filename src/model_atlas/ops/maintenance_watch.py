@@ -88,7 +88,10 @@ def render_maintenance_status(raw: Iterable[str]) -> str:
 
     # Identify the furthest-progressed phase in stream order.
     order = ("drain", "produce", "restore", "maintenance")
-    current = next((p for p in order if any(r["phase"] == p for r in records)), "drain")
+    current = next(
+        (p for p in reversed(order) if any(r["phase"] == p for r in records)),
+        "drain",
+    )
 
     released = sorted(
         {r["service"] for r in records if r["phase"] == "drain" and r["status"] == "release"}
