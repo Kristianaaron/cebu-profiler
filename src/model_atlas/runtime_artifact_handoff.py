@@ -13,6 +13,10 @@ from typing import NamedTuple
 _COMPRESSION_METHOD = "llamacpp-gguf-mixed"
 _MAX_RESULT_BYTES = 16 * 1024 * 1024
 
+# Width-slice derivative is a directory packed to one deterministic bundle blob.
+_WIDTH_SLICE_METHOD = "atlas-nvfp4-width-slice"
+_WIDTH_SLICE_ARTIFACT = "model.safetensors.atlasbundle"
+
 
 def _required_string(payload: dict[str, object], key: str) -> str:
     value = payload.get(key)
@@ -162,15 +166,25 @@ class CompressionHandoff(NamedTuple):
     handoff_sha256: str
 
 
-def load_verified_compression_handoff(path: Path) -> CompressionHandoff:
-    """Load and byte-verify the reviewed compression model/evidence handoff."""
+def load_verified_compression_handoff(
+    path: Path,
+    *,
+    method: str = _COMPRESSION_METHOD,
+    artifact_name: str = "model.gguf",
+) -> CompressionHandoff:
+    """Load and byte-verify the reviewed compression model/evidence handoff.
+
+    ``method``/``artifact_name`` default to the GGUF producer; the width-slice
+    derivative (a packed safetensors bundle) is handled via
+    ``load_verified_width_slice_handoff``.
+    """
 
     payload = json.loads(_read_bounded_regular(path))
     if not isinstance(payload, dict):
         raise RuntimeError("compression result must be a JSON object")
     if payload.get("status") not in {"completed", "completed_with_warnings"}:
         raise RuntimeError("compression result is not successful")
-    if payload.get("method") != _COMPRESSION_METHOD:
+    if payload.get("method") != method:
         raise RuntimeError("compression result method is not the reviewed producer")
     if payload.get("runtime_claim") != "artifact_only_unvalidated":
         raise RuntimeError("compression result runtime claim is not artifact-only")
@@ -199,8 +213,8 @@ def load_verified_compression_handoff(path: Path) -> CompressionHandoff:
     if re.fullmatch(r"[0-9a-f]{64}", producer_profile_sha256) is None:
         raise RuntimeError("compression result profile_sha256 is malformed")
     if (
-        artifact.get("stage") != _COMPRESSION_METHOD
-        or artifact.get("logical_name") != "model.gguf"
+        artifact.get("stage") != method
+        or artifact.get("logical_name") != artifact_name
         or artifact.get("runtime_validated") is not False
         or not isinstance(raw_path, str)
         or not raw_path.startswith("/")
@@ -216,8 +230,8 @@ def load_verified_compression_handoff(path: Path) -> CompressionHandoff:
     evidence_size = artifact_evidence.get("size_bytes")
     evidence_relpath = artifact_evidence.get("relpath")
     if (
-        artifact_evidence.get("stage") != _COMPRESSION_METHOD
-        or artifact_evidence.get("logical_name") != f"{_COMPRESSION_METHOD}.evidence.json"
+        artifact_evidence.get("stage") != method
+        or artifact_evidence.get("logical_name") != f"{method}.evidence.json"
         or not isinstance(evidence_sha, str)
         or re.fullmatch(r"[0-9a-f]{64}", evidence_sha) is None
         or not isinstance(evidence_size, int)
@@ -251,8 +265,8 @@ def load_verified_compression_handoff(path: Path) -> CompressionHandoff:
         item
         for item in raw_outputs
         if isinstance(item, dict)
-        and item.get("stage") == _COMPRESSION_METHOD
-        and item.get("name") == "model.gguf"
+        and item.get("stage") == method
+        and item.get("name") == artifact_name
         and item.get("sha256") == sha256
         and item.get("size_bytes") == size
         and item.get("relpath") == relpath
@@ -261,8 +275,8 @@ def load_verified_compression_handoff(path: Path) -> CompressionHandoff:
         item
         for item in raw_outputs
         if isinstance(item, dict)
-        and item.get("stage") == _COMPRESSION_METHOD
-        and item.get("name") == f"{_COMPRESSION_METHOD}.evidence.json"
+        and item.get("stage") == method
+        and item.get("name") == f"{method}.evidence.json"
         and item.get("sha256") == evidence_sha
         and item.get("size_bytes") == evidence_size
         and item.get("relpath") == evidence_relpath
@@ -308,4 +322,13 @@ def load_verified_compression_handoff(path: Path) -> CompressionHandoff:
         producer_profile_sha256=producer_profile_sha256,
         producer_recommendation_id=producer_recommendation_id,
         handoff_sha256=hashlib.sha256(encoded).hexdigest(),
+    )
+
+
+def load_verified_width_slice_handoff(path: Path) -> CompressionHandoff:
+    """Byte-verify a width-slice bundle handoff (safetensors packed to blob)."""
+    return load_verified_compression_handoff(
+        path,
+        method=_WIDTH_SLICE_METHOD,
+        artifact_name=_WIDTH_SLICE_ARTIFACT,
     )
