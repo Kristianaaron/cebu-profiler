@@ -456,6 +456,45 @@ class MaintenanceCoordinator:
         if not self._record(action_id, target, requested=active, command=command):
             raise MaintenanceFailure(f"{action_id}:return_code")
 
+    def _emit(
+        self,
+        *,
+        phase: str,
+        status: str,
+        service: str | None = None,
+        method: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        """Append a typed maintenance-lifecycle event for live UX / observability.
+
+        Best-effort by design: a failure to write the diagnostics stream never
+        fails a maintenance run. Events carry phase+status and optional
+        service/method/detail, appended to ``maintenance-events.jsonl`` in the
+        journal dir so a UI or ``maintenance-watch`` can tail drain -> produce
+        -> restore in real time.
+        """
+        event: dict[str, object] = {
+            "ts": self.clock().isoformat(timespec="microseconds") + "Z",
+            "phase": phase,
+            "status": status,
+        }
+        if service is not None:
+            event["service"] = service
+        if method is not None:
+            event["method"] = method
+        if detail is not None:
+            event["detail"] = detail
+        try:
+            self.config.journal_dir.mkdir(parents=True, exist_ok=True)
+            path = self.config.journal_dir / "maintenance-events.jsonl"
+            encoded = (json.dumps(event, sort_keys=True) + "\n").encode("utf-8")
+            with open(path, "ab") as fh:
+                fh.write(encoded)
+                fh.flush()
+                os.fsync(fh.fileno())
+        except Exception:  # noqa: BLE001 — diagnostics never fail maintenance
+            pass
+
     def _acquire(self) -> None:
         # External dependency order is part of the safety contract.
         for key, unit in (
@@ -469,12 +508,14 @@ class MaintenanceCoordinator:
                 ["systemctl", "--user", "stop", unit],
                 active=self._states[key].active,
             )
+            self._emit(phase="drain", status="release", service=key)
         self._required(
             "stop_dsv4",
             str(self.config.dsv4_stop_script),
             [str(self.config.dsv4_stop_script)],
             active=self._states["dsv4"].active,
         )
+        self._emit(phase="drain", status="release", service="dsv4")
         self._preserve_and_stop_runtime(
             key="head_runtime",
             unit=self.config.head_runtime_unit,
@@ -500,6 +541,7 @@ class MaintenanceCoordinator:
         )
         if any(active):
             raise MaintenanceFailure("drain verification failed")
+        self._emit(phase="drain", status="complete", detail="all consumers quiesced")
 
     def _preserve_and_stop_runtime(
         self,
@@ -535,6 +577,7 @@ class MaintenanceCoordinator:
             stop_command = ["ssh", self.config.worker_ssh_target, *stop_command]
         self._record(f"stop_{key}", unit, requested=True, command=stop_command)
         self._runtime_drained.add(key)
+        self._emit(phase="drain", status="release", service=key)
 
     def _restore_action(
         self, key: str, action_id: str, target: str, command: Sequence[str]
@@ -549,12 +592,14 @@ class MaintenanceCoordinator:
             command=command,
         )
         self._restored.add(key)
+        self._emit(phase="restore", status="load", service=key)
 
     def restore(self) -> None:
         """Best-effort, idempotent rollback; every transition is attempted."""
         if self._restore_completed:
             return
         self._restoring = True
+        self._emit(phase="restore", status="start")
         try:
             # Experimental consumers are always drained head-first, then worker.
             # A payload may have started these exact transient units after the
@@ -638,6 +683,7 @@ class MaintenanceCoordinator:
                 == self._states["worker_rpc"].active,
             }
         self._restore_completed = True
+        self._emit(phase="restore", status="complete", detail="services restored")
 
     def run(
         self,
@@ -655,8 +701,17 @@ class MaintenanceCoordinator:
         self._snapshot()
         hashes = [self._hash_binary(path) for path in self.config.all_binary_paths()]
         try:
+            self._emit(phase="drain", status="start")
             self._acquire()
             self.verify_drained()
+            produce_method = (
+                Path(str(payload[0])).name
+                if payload
+                else "in-process-action"
+                if payload_action is not None
+                else None
+            )
+            self._emit(phase="produce", status="start", method=produce_method)
             if payload:
                 scope = payload_scope() if payload_scope is not None else nullcontext()
                 with scope:
@@ -699,6 +754,7 @@ class MaintenanceCoordinator:
                             evidence="callback_completed",
                         )
                     )
+            self._emit(phase="produce", status="complete")
         except ProcessGroupQuiescenceError as exc:
             failure = self._failure_label(exc)
             manual_intervention = True
@@ -718,6 +774,11 @@ class MaintenanceCoordinator:
 
         action_success = all(action.success for action in self._actions)
         evidence_success = all(self._restoration_evidence.values())
+        self._emit(
+            phase="maintenance",
+            status="complete",
+            detail=f"success={failure is None and action_success and evidence_success}",
+        )
         receipt = MaintenanceReceipt(
             run_id=run_id,
             dry_run=not self.execute,
