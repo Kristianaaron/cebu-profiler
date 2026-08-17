@@ -118,3 +118,60 @@ at compile/execute time, not silently.
 Publishing (`PublishRule`) requires all stages validated, `no_pruning`
 per-capability, `MEASURED` evidence minimum, runtime benchmarked, and
 repair/validated. Those are per-recipe; the plane never auto-publishes.
+
+## 8. Contribute a *method*, not just a backend (the catalog seam)
+
+A backend alone is not selectable — the recommendation layer only considers
+methods that have a `MethodSpec` in the catalog (`METHOD_CATALOG`). Since the
+catalog is core, new methods are contributed as **plugins** through the same
+plugin-dir mechanism, but with a `register_methods()` entry point.
+
+Set `ATLAS_METHOD_PLUGIN_DIR` to a directory of `*.py` modules. Each module may
+expose:
+
+```python
+# my_method.py  (one plugin = backend + method)
+from model_atlas.backend.contract import BackendRecord, CommandBackedAdapter
+from model_atlas.recommend.policy import (
+    CompressionIntent, MethodFamily, MethodSpec, StageEffectClass,
+)
+from model_atlas.recipe.schema import RecipeStatus
+
+def register_backends() -> dict[str, BackendRecord]:
+    return {
+        "my_method": BackendRecord(
+            backend_id="my_method", display_name="…", method_family="custom",
+            formats=("safetensors",), status=RecipeStatus.DISCOVERED,
+            version="unpinned", declared_capabilities=("pruning",),
+            availability_probe=lambda: (False, None, "not wired (fail closed)"),
+            adapter=CommandBackedAdapter(backend_id="my_method"),
+        ),
+    }
+
+def register_methods() -> dict[str, MethodSpec]:
+    return {
+        "my-method": MethodSpec(
+            "my-method", 900, MethodFamily.PRUNING, "my_method",
+            ("channel_saliency",), ("width-slice",),
+            (StageEffectClass.PRUNING,), (CompressionIntent.PRUNE_ONLY,),
+            "down", routing_dependent=False, provenance_ids=("my-method-v1",),
+        ),
+    }
+```
+
+Notes on the seam:
+
+* `MethodSpec(method, priority, family, backend_id, evidence_stages,
+  recipe_stage_ids, effect_classes, compatible_intents, memory_direction,
+  routing_dependent=False, planning_only=False, provenance_ids=())`.
+* `backend_id` must match a registered (builtin or plugin) backend for the
+  method to be executable.
+* Plugin methods are appended in **deterministic** order (sorted module, then
+  method id) and folded into `method_catalog_digest`, so two processes loading
+  the same plugin dir derive the same catalog and recommendation identity.
+* With `ATLAS_METHOD_PLUGIN_DIR` unset this is a no-op: the catalog is the
+  builtin set and the digest is unchanged — a third-party method never changes
+  core behavior until an operator opts in.
+* Backends and methods are independent contributions. A plugin may add a method
+  without a backend (it stays blocked until a backend exists), or a backend
+  without a new method (it powers an existing catalog method).
