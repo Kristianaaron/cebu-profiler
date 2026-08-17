@@ -28,6 +28,8 @@ CAPTURE_ADAPTER_VERSION = "atlas-llamacpp-capture-v1"
 _SHA256 = r"^[0-9a-f]{64}$"
 _PLAN_ID = r"^recipe-[0-9a-f]{24}$"
 _RUN_ID = r"^run-[0-9a-f]{24}$"
+_PROFILE_ID = r"^profile-[0-9a-f]{24}$"
+_RECOMMENDATION_ID = r"^rec-[0-9a-f]{24}$"
 _REVISION = r"^[0-9a-f]{40}$"
 _MAX_JSON_BYTES = 4 * 1024 * 1024
 _MAX_TOKENS_BYTES = 64 * 1024 * 1024
@@ -89,8 +91,13 @@ class PrecisionEvidence(_Frozen):
 class CaptureModelEvidence(_Frozen):
     schema_version: Literal[1]
     model_sha256: str = Field(pattern=_SHA256)
+    # For a sharded source this is its canonical recursive manifest digest.
     source_model_sha256: str | None = Field(default=None, pattern=_SHA256)
     profile_tokenizer_sha256: str = Field(pattern=_SHA256)
+    profile_id: str = Field(pattern=_PROFILE_ID)
+    profile_sha256: str = Field(pattern=_SHA256)
+    recommendation_id: str = Field(pattern=_RECOMMENDATION_ID)
+    compression_handoff_sha256: str = Field(pattern=_SHA256)
     producer_artifact_sha256: str = Field(pattern=_SHA256)
     recipe_sha256: str = Field(pattern=_SHA256)
     # These are Atlas' exact externally visible IDs, not full content digests.
