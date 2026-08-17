@@ -48,6 +48,8 @@ from model_atlas.controlplane.api import ControlPlane
 from model_atlas.jobs.artifacts import atomic_write_json
 from model_atlas.jobs.engine import JobEngine
 from model_atlas.jobs.schema import JobStatus
+from model_atlas.prune.planner import plan_uniform_width
+from model_atlas.prune.width_sizing import size_checkpoint_for_width
 from model_atlas.recipe.compiler import CompiledRecipe, canonical_json, sha256_hex
 from model_atlas.recipe.schema import (
     CalibrationIdentity,
@@ -58,7 +60,11 @@ from model_atlas.recipe.schema import (
     StageEffectClass,
 )
 from model_atlas.recipes import CompiledPlanArtifact
-from model_atlas.recipes.builtin import glm52_no_pruning_recipe, llamacpp_gguf_mixed_recipe
+from model_atlas.recipes.builtin import (
+    glm52_no_pruning_recipe,
+    llamacpp_gguf_mixed_recipe,
+    nvfp4_width_slice_optin_recipe,
+)
 from model_atlas.recommend.policy import (
     METHOD_CATALOG,
     METHOD_CATALOG_VERSION,
@@ -870,6 +876,59 @@ class RecommendationService:
                     "compute_arch": session.target.compute_arch,
                     "topology": session.target.topology,
                     "runtime_backend": "none",
+                }
+            )
+            recipe.constraints = recipe.constraints.model_copy(
+                update={"max_resident_gib": session.target.memory_target_gib}
+            )
+            return recipe
+
+        if "glm52_width_slice" in templates:
+            if len(templates) != 1 or len(selected_specs) != 1:
+                raise AuthError(
+                    409,
+                    "recipe_composition_conflict",
+                    "width-slice must be selected as the sole derivative recipe",
+                )
+            if session is None or binding is None:
+                raise AuthError(
+                    409,
+                    "profile_execution_identity_missing",
+                    "width-slice derivative requires source and tokenizer identity",
+                )
+            if session.intent not in (
+                CompressionIntent.PRUNE_ONLY,
+                CompressionIntent.HYBRID,
+            ):
+                raise AuthError(
+                    409,
+                    "recipe_composition_conflict",
+                    "width-slice is authorized only for prune/hybrid intent",
+                )
+            source = SourceIdentity(
+                source_id=binding.source_id,
+                checkpoint_path=binding.checkpoint_path,
+                checkpoint_revision=binding.checkpoint_revision,
+                sha256=dict(binding.source_sha256),
+                manifest_digest=binding.source_manifest_digest,
+            )
+            sizing = size_checkpoint_for_width(Path(binding.checkpoint_path))
+            width = plan_uniform_width(
+                expert_source_gib=sizing.expert_gib,
+                protected_gib=sizing.protected_gib,
+                target_gib=session.target.memory_target_gib,
+                full=sizing.full_width,
+            )
+            recipe = nvfp4_width_slice_optin_recipe(source, width=width)
+            recipe.calibration = recipe.calibration.model_copy(
+                update={"tokenizer_sha256": binding.tokenizer_hash}
+            )
+            recipe.hardware = recipe.hardware.model_copy(
+                update={
+                    "model_arch": session.target.hardware_model_arch,
+                    "compute_arch": session.target.compute_arch,
+                    "topology": session.target.topology,
+                    "runtime_backend": session.target.runtime_backend,
                 }
             )
             recipe.constraints = recipe.constraints.model_copy(

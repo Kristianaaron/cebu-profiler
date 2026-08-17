@@ -576,6 +576,16 @@ METHOD_CATALOG: tuple[MethodSpec, ...] = (
         provenance_ids=("llama.cpp", "glm52-nvfp4-quant-risk", "glm52-gguf-tensor-plan"),
         recipe_template="llamacpp_gguf_mixed",
     ),
+    MethodSpec(
+        "atlas-nvfp4-width-slice", 11, MethodFamily.PRUNING, "atlas_nvfp4_width_slice",
+        ("channel_saliency",), ("width-slice",),
+        (StageEffectClass.PRUNING,),
+        (CompressionIntent.PRUNE_ONLY, CompressionIntent.HYBRID),
+        "down",
+        routing_dependent=False,
+        provenance_ids=("frozen-channel-pruning-pipeline",),
+        recipe_template="glm52_width_slice",
+    ),
 )
 
 def validate_method_catalog(specs: tuple[MethodSpec, ...]) -> None:
@@ -595,8 +605,21 @@ def validate_method_catalog(specs: tuple[MethodSpec, ...]) -> None:
             and spec.compatible_intents
         ):
             raise ValueError(f"incomplete MethodSpec identity: {spec.method!r}")
-        if spec.recipe_template not in {"glm52_no_pruning", "llamacpp_gguf_mixed"}:
+        if spec.recipe_template not in {
+            "glm52_no_pruning",
+            "llamacpp_gguf_mixed",
+            "glm52_width_slice",
+        }:
             raise ValueError(f"unknown recipe template: {spec.method} -> {spec.recipe_template}")
+        if spec.recipe_template == "glm52_width_slice" and (
+            spec.backend_id != "atlas_nvfp4_width_slice"
+            or spec.family is not MethodFamily.PRUNING
+            or spec.recipe_stage_ids != ("width-slice",)
+            or spec.effect_classes != (StageEffectClass.PRUNING,)
+            or CompressionIntent.PRUNE_ONLY not in spec.compatible_intents
+            or spec.planning_only
+        ):
+            raise ValueError(f"width-slice template contract mismatch: {spec.method}")
         if spec.recipe_template == "llamacpp_gguf_mixed" and (
             spec.backend_id != "llamacpp_gguf_mixed"
             or spec.family is not MethodFamily.QUANTIZATION

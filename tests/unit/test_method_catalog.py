@@ -151,13 +151,11 @@ def test_unknown_and_pruning_looking_unknowns_fail_closed() -> None:
 
 def test_no_pruning_family_entry_without_pruning_effect_and_intent() -> None:
     """Contract item 4: any spec classified under the PRUNING family must
-    declare a PRUNING effect-class AND a pruning-compatible intent. (The frozen
-    v1 catalog has none, so no executable pruning MethodSpec exists today.)"""
+    declare a PRUNING effect-class AND a pruning-compatible intent. The width-
+    slice method is the one executable PRUNING-family entry and satisfies it."""
     pruning_specs = [s for s in METHOD_CATALOG if s.family is MethodFamily.PRUNING]
-    # No executable pruning MethodSpec in the current catalog.
-    assert pruning_specs == []
-    # But the invariant holds universally: a PRUNING-family spec, were one
-    # added, would be required to carry both markers.
+    assert {s.method for s in pruning_specs} == {"atlas-nvfp4-width-slice"}
+    # The invariant holds for every PRUNING-family spec (current + future).
     for spec in METHOD_CATALOG:
         if spec.family is MethodFamily.PRUNING:
             assert StageEffectClass.PRUNING in spec.effect_classes

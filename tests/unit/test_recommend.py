@@ -123,6 +123,7 @@ def test_deterministic_ranking_and_stable_ids():
         "kv-optimization",
     }
     assert {m.method for m in r1.blocked_methods} == {
+        "atlas-nvfp4-width-slice",
         "exl3-primary",
         "llamacpp-gguf-mixed",
         "llm-compressor",
@@ -385,7 +386,8 @@ def test_authorize_rejects_string_boolean_and_binds_intent(tmp_path: Path) -> No
 
 def test_catalog_has_no_implicit_pruning_classification() -> None:
     pruning = [spec for spec in METHOD_CATALOG if spec.family is MethodFamily.PRUNING]
-    assert pruning == []
+    # the width-slice method is the single explicit, effect-carrying pruning entry
+    assert [spec.method for spec in pruning] == ["atlas-nvfp4-width-slice"]
     forged = replace(
         method_spec("exl3-primary"),
         method="future-ultra-pruning",
@@ -748,7 +750,9 @@ def test_backend_unpinned_blocker():
 
 
 def test_pruning_requires_catalog_method_and_verified_backend():
-    """A backend alone never creates an implicit pruning recommendation."""
+    """Width-slice pruning is only executable via its cataloged MethodSpec +
+    verified backend AND channel_saliency evidence; an uncataloged backend alone
+    never creates an executable pruning method."""
     from model_atlas.backend.contract import BackendRecord
     from model_atlas.backend.registry import BackendRegistry
     from model_atlas.recipe.schema import RecipeStatus
@@ -761,11 +765,13 @@ def test_pruning_requires_catalog_method_and_verified_backend():
         allow_pruning=True,
         intent=CompressionIntent.PRUNE_ONLY,
     )
-    # default registry: no pruning capable+derivative+available backend
-    assert rec.no_pruning is True
+    # the cataloged width-slice pruning method + verified backend exist
+    assert rec.no_pruning is False
+    # but without channel_saliency evidence it is NOT executable (stays blocked)
+    assert all(m.method != "atlas-nvfp4-width-slice" for m in rec.methods)
+    assert any(m.method == "atlas-nvfp4-width-slice" for m in rec.blocked_methods)
 
-    # Even a verified backend cannot flip the policy without an explicit,
-    # digest-bound pruning MethodSpec/recipe template in the catalog.
+    # An unrelated, uncataloged backend cannot create an executable pruning method.
     prune = BackendRecord(
         backend_id="tenp_pruning_prod",
         display_name="TENP prod",
@@ -785,8 +791,37 @@ def test_pruning_requires_catalog_method_and_verified_backend():
         allow_pruning=True,
         intent=CompressionIntent.PRUNE_ONLY,
     )
-    assert rec2.no_pruning is True
-    assert not any("pruning" in m.method for m in rec2.methods)
+    # width-slice still the only cataloged pruning method; tenp stays absent
+    assert any(m.method == "atlas-nvfp4-width-slice" for m in rec2.blocked_methods)
+    assert "tenp_pruning_prod" not in {m.method for m in rec2.methods}
+    assert "tenp_pruning_prod" not in {m.method for m in rec2.blocked_methods}
+
+
+def test_width_slice_executable_when_channel_saliency_present():
+    """With channel_saliency evidence the width-slice method is recommended as
+    executable under PRUNE intent (not merely cataloged)."""
+    from dataclasses import replace
+
+    from model_atlas.recommend.policy import StageEvidence
+
+    prof = replace(
+        _full_profile(),
+        evidence={
+            **_full_profile().evidence,
+            "channel_saliency": StageEvidence("channel_saliency", "measured"),
+        },
+    )
+    pol = RecommendationPolicy(build_default_registry())
+    rec = pol.recommend(
+        prof,
+        RecTarget(),
+        allow_pruning=True,
+        intent=CompressionIntent.PRUNE_ONLY,
+    )
+    assert rec.no_pruning is False
+    assert rec.intent_satisfied is True
+    assert "atlas-nvfp4-width-slice" in {m.method for m in rec.methods}
+    assert all(m.method != "atlas-nvfp4-width-slice" for m in rec.blocked_methods)
 
 
 def test_routing_consistency_failure_downgrades_confidence():
