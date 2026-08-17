@@ -606,7 +606,17 @@ class MaintenanceCoordinator:
         stop_command = ["systemctl", "--user", "stop", unit]
         if remote:
             stop_command = ["ssh", self.config.worker_ssh_target, *stop_command]
-        self._record(f"stop_{key}", unit, requested=True, command=stop_command)
+        # Only issue the stop when the transient unit is currently active. If it
+        # is already inactive/not-found (a normal state before the payload brings
+        # up the canary), requesting a stop would return rc 5 (already stopped)
+        # and fail the whole transaction for no reason.
+        previously_active = self._unit_active(unit, remote=remote)
+        self._record(
+            f"stop_{key}", unit, requested=previously_active, command=stop_command
+        )
+        if not previously_active:
+            self._runtime_drained.add(key)
+            return
         self._runtime_drained.add(key)
         self._emit(phase="drain", status="release", service=key)
 
