@@ -20,7 +20,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.networks import HttpUrl
 
-EVAL_LAB_REVISION = "5ee2f7cc33627b6259c0b10100d84932e676f36c"
+EVAL_LAB_REVISION = "a20da6c6b9cbf872f7c083bffe66afde40c2c8f2"
 _SHA256 = r"^[0-9a-f]{64}$"
 _REVISION = r"^[0-9a-f]{40}$"
 
@@ -305,8 +305,8 @@ class HandoffBlocker(StrEnum):
 
 class EvalLabHandoff(_StrictFrozenModel):
     request_id: str = Field(pattern=_SHA256)
-    eval_lab_revision: Literal["5ee2f7cc33627b6259c0b10100d84932e676f36c"] = (
-        "5ee2f7cc33627b6259c0b10100d84932e676f36c"
+    eval_lab_revision: Literal["a20da6c6b9cbf872f7c083bffe66afde40c2c8f2"] = (
+        "a20da6c6b9cbf872f7c083bffe66afde40c2c8f2"
     )
     executable: bool
     blockers: list[HandoffBlocker] = Field(default_factory=list)
@@ -393,21 +393,18 @@ def _validate_cli_effective_config(request: EvalLabRequest) -> list[HandoffBlock
             raise ValueError(f"pinned suite task is absent from tasks_dir: {task_id}")
         selected.append(indexed[task_id])
 
-    # The pinned CLI supplies no sampling/seed options. DirectRunner therefore
-    # applies temperature=0, max_tokens=4096, and seed=None. Timeout is read
-    # from each task's execution section and a request-wide value is truthful
-    # only when every selected task has the same value.
-    if request.parameters.seed is not None:
-        raise ValueError("pinned Eval Lab CLI cannot apply request seed")
-    if request.parameters.temperature != 0.0:
-        raise ValueError("pinned Eval Lab CLI applies temperature=0.0")
-    if request.parameters.max_tokens != 4096:
-        raise ValueError("pinned Eval Lab CLI applies max_tokens=4096")
+    if request.parameters.seed is None:
+        raise ValueError("executable held-out evaluation requires an explicit seed")
     timeouts: set[float] = set()
+    blockers: list[HandoffBlocker] = []
     for task in selected:
+        if task.get("data_partition", "unset") != "held_out_evaluation":
+            blockers.append(HandoffBlocker.TASK_PARTITION_NOT_HELD_OUT)
         execution = task.get("execution") or {}
         if not isinstance(execution, Mapping):
             raise ValueError("Eval Lab task execution config must be a mapping")
+        if execution.get("runner") != "direct":
+            raise ValueError("held-out Eval Lab task must use the direct runner")
         timeout = execution.get("timeout_seconds", 300)
         if not isinstance(timeout, (int, float)):
             raise ValueError("Eval Lab task timeout must be numeric")
@@ -415,14 +412,7 @@ def _validate_cli_effective_config(request: EvalLabRequest) -> list[HandoffBlock
     if timeouts != {request.parameters.timeout_seconds}:
         raise ValueError("request timeout does not match every pinned task timeout")
 
-    # Although pinned defaults can be checked, the CLI has no request-wide
-    # seed/sampling/timeout flags and DirectRunner does not enforce the task
-    # timeout around the endpoint call. Do not label this argv executable until
-    # Eval Lab exposes and binds the complete requested parameter contract.
-    blockers = [HandoffBlocker.REQUEST_PARAMETERS_NOT_CLI_BOUND]
-    if any(task.get("data_partition", "unset") != "held_out_evaluation" for task in selected):
-        blockers.append(HandoffBlocker.TASK_PARTITION_NOT_HELD_OUT)
-    return blockers
+    return list(dict.fromkeys(blockers))
 
 
 class EvalLabAdapter:
@@ -471,6 +461,17 @@ class EvalLabAdapter:
             request.runs_root,
             "--db",
             request.db_path,
+            "--seed",
+            str(request.parameters.seed),
+            "--temperature",
+            str(request.parameters.temperature),
+            "--max-tokens",
+            str(request.parameters.max_tokens),
+            "--http-timeout-seconds",
+            str(request.parameters.timeout_seconds),
+            "--task-timeout-seconds",
+            str(request.parameters.timeout_seconds),
+            "--require-held-out",
             "--json",
         )
         return EvalLabHandoff(

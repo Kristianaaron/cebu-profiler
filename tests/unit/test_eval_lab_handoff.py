@@ -62,7 +62,7 @@ def _request(**changes: object) -> EvalLabRequest:
         "held_out": _heldout(),
         "tasks": ["arc_easy", "gsm8k"],
         "parameters": EvalParameters(
-            seed=None, temperature=0.0, max_tokens=4096, timeout_seconds=300.0
+            seed=0, temperature=0.0, max_tokens=4096, timeout_seconds=300.0
         ),
         "eval_lab_root": "/opt/eval-lab",
         "suite_ref": "/opt/eval-lab/configs/suites/atlas.yaml",
@@ -195,6 +195,7 @@ def _pinned_checkout(tmp_path: Path, *, held_out: bool = True) -> EvalLabRequest
             f"id: {name}\n"
             f"data_partition: {partition}\n"
             "execution:\n"
+            "  runner: direct\n"
             "  timeout_seconds: 300\n"
         )
     heldout_manifest = _heldout(
@@ -219,8 +220,8 @@ def test_adapter_emits_exact_pinned_cli_argv_and_validates_result(tmp_path: Path
 
     handoff = EvalLabAdapter("/opt/eval-lab/bin/eval-lab").emit_argv(request)
     assert handoff.eval_lab_revision == EVAL_LAB_REVISION
-    assert handoff.executable is False
-    assert handoff.blockers == [HandoffBlocker.REQUEST_PARAMETERS_NOT_CLI_BOUND]
+    assert handoff.executable is True
+    assert handoff.blockers == []
     assert handoff.argv == (
         "/opt/eval-lab/bin/eval-lab",
         "run",
@@ -238,6 +239,17 @@ def test_adapter_emits_exact_pinned_cli_argv_and_validates_result(tmp_path: Path
         request.runs_root,
         "--db",
         request.db_path,
+        "--seed",
+        "0",
+        "--temperature",
+        "0.0",
+        "--max-tokens",
+        "4096",
+        "--http-timeout-seconds",
+        "300.0",
+        "--task-timeout-seconds",
+        "300.0",
+        "--require-held-out",
         "--json",
     )
 
@@ -260,11 +272,11 @@ def test_adapter_emits_exact_pinned_cli_argv_and_validates_result(tmp_path: Path
 
 def test_handoff_fails_closed_on_cli_parameter_or_config_mismatch(tmp_path: Path) -> None:
     request = _pinned_checkout(tmp_path)
-    bad_parameters = request.model_dump(mode="json")
-    bad_parameters["request_id"] = None
-    bad_parameters["parameters"]["temperature"] = 0.7
-    with pytest.raises(ValueError, match="temperature=0.0"):
-        EvalLabAdapter().emit_argv(EvalLabRequest.model_validate(bad_parameters))
+    missing_seed = request.model_dump(mode="json")
+    missing_seed["request_id"] = None
+    missing_seed["parameters"]["seed"] = None
+    with pytest.raises(ValueError, match="explicit seed"):
+        EvalLabAdapter().emit_argv(EvalLabRequest.model_validate(missing_seed))
 
     bad_hash = request.model_dump(mode="json")
     bad_hash["request_id"] = None
@@ -278,10 +290,7 @@ def test_handoff_blocks_unproven_task_partition_and_wrong_git_head(tmp_path: Pat
     request = _pinned_checkout(tmp_path, held_out=False)
     handoff = EvalLabAdapter().emit_argv(request)
     assert handoff.executable is False
-    assert handoff.blockers == [
-        HandoffBlocker.REQUEST_PARAMETERS_NOT_CLI_BOUND,
-        HandoffBlocker.TASK_PARTITION_NOT_HELD_OUT,
-    ]
+    assert handoff.blockers == [HandoffBlocker.TASK_PARTITION_NOT_HELD_OUT]
 
     head = Path(request.eval_lab_root) / ".git" / "refs" / "heads" / "main"
     head.write_text(f"{'e' * 40}\n")
