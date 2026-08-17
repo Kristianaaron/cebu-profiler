@@ -1,159 +1,100 @@
-# Milestone E Handoff — Atlas quality-size experiment (blueprint §17/§20)
+# ATLAS — HANDOFF / RESUME FILE
 
-_Status snapshot 2026-08-07. Created before a temporary loss of connectivity;
-the detached run below completes the mechanical verification + commit offline._
+Last updated: session 20260817 (before laptop handover). Live repo is the source
+of truth; run `git log --oneline -6` and `git status -sb` first — don't trust
+HEAD listed here over the repo's actual state.
 
-## What this is
-Blueprint **Milestone E**: a matched-budget experiment proving whether Atlas's
-measured **heterogeneous** per-expert width allocation beats a **uniform**
-width control at equal retained-channel budget. Fully runnable offline on the
-synthetic MiniMoE (no GLM-5.2 checkpoint needed — that stays gated).
+## 1. Where we are (committed + green)
 
-## New files (this session; committed by the detached run when green)
-```
-src/model_atlas/experiments/
-  __init__.py      # public exports
-  fidelity.py      # FidelityReport: utility, retention, logit KL, topk, hidden drift
-  controls.py      # channel_importance, uniform_clone, hetero_clone,
-                   #   matched_budget_compare, budget_for, ExperimentOutcome
-  pareto.py        # pareto_sweep -> [ParetoPoint]
-  structured.py    # build_structured_model (injected importance; down-only scaling)
-src/model_atlas/planning/protection.py  # §8.2 coalition-driven protected experts
-tests/unit/test_f17_experiments.py  # 6 tests
-tests/unit/test_f17_protection.py   # 3 tests
-```
-They reuse existing infra: `final_utility`/`logit_kl` (atlas/counterfactual.py),
-`build_clone` (executor/structural.py), `tenp_rank` (scoring/tenp.py).
+Branch `atlas-glm52-experiment-runtime`, repo `/home/kristianaaron/tmp/model-atlas`
+on spark-d167 (100.96.194.44). Working tree clean (untracked artifacts/ + profiles/
+are pre-existing dry-run stubs, not ours).
 
-## Key design decisions / gotchas
-- **Metric:** `final_utility` (peak softmax "decisiveness") **saturates** on this
-  tiny 2-layer model — it cannot distinguish a 30–70% prune (both ≈ 1.0 retention).
-  The working discriminator is **representation drift** (mean relative L2 of the
-  final hidden states). Hedge: prune → drift ↑; low drift = closer to source.
-- **Plain `k3-mini` has no structure** (i.i.d. Gaussian), so heterogeneous ≈ uniform
-  (honest "no differential"). The **structured** model (`n_strong=1, channels=6`)
-  concentrates importance so heterogeneous is measurably better.
-- `strong_scale=20` on gate/up **overflows** the pure-Python `math.exp` silu in the
-  forward. Inject importance on the **down** columns only (`strong_scale=8`).
+Recent commits (above foundation `c91d85e`):
+- e47de4b  prune math slice: channel_saliency / ranked_keeper / kl_gate
+- cefbee6  deterministic safetensors derivative bundle (`.atlasbundle`, SHA-verified)
+- 02e0cd7  Stage 1: header-level width census (`width_sizing`) + `plan_uniform_width`
+- 808fb2f  width-slice MethodSpec registered + api recipe dispatch (method executable)
+- 7456a54  handoff generalized to width-slice `.atlasbundle` (GGUF backward-compatible)
+- 6af496e  explicit teacher-relative KLD/CKA quality gate (`quality_gate`)
+- d727724  MethodSpec plugin seam (`ATLAS_METHOD_PLUGIN_DIR` + `register_methods`)
+- 44f893f  docs §8 drop-in method authoring
+- f6e0312  ModelOpt NVFP4 plugin (real probe + adapter; gate-validation deferred)
+- 1700bd2  maintenance lifecycle event stream (drain -> produce -> restore)
+- 143b58b  maintenance-watch live renderer
+- 327a209  maintenance-watch per-shard progress bar (+ `extract_shard_progress`)
 
-## Empirical numbers already observed (structured model, seed=1)
-matched-budget compare, drift = mean_hidden_drift (lower = better):
-```
-frac=0.9  uniform 0.0113  hetero 0.0107   (hetero better)
-frac=0.7  uniform 0.0207  hetero 0.0205
-frac=0.5  uniform 0.0282  hetero 0.0281
-frac=0.4  uniform 0.0318  hetero 0.0314
-frac=0.3  uniform 0.0383  hetero 0.0342   (largest gap)
-```
-Conclusion the experiment supports: **measured heterogeneous allocation wins at
-equal budget, more so at higher compression** — the FlexMoE/blueprint thesis.
+Broad fast suite is green. The width-slice **tool is finished**: registered,
+advertised, executable end-to-end (recommend -> recipe dispatch -> validated
+backend -> `.atlasbundle` -> verified handoff -> quality gate).
 
-## Detached run (tmux session `atlas_build`)
-A detached tmux session runs `run_atlas_build.sh` which (offline-safe):
-1. Runs the new tests (`test_f16` + `test_f17_experiments` + `test_f17_protection`);
-   gates the commit on these passing.
-2. Runs full pytest suite + repo-wide ruff + mypy on the new modules.
-3. Runs the experiment (structured + plain frontier) and the §8.2 protection demo.
-4. Writes a blueprint feature / gap matrix (done / next / gated).
-5. If green: `git add -A && git commit` and attempts `git push`.
-   - local commit needs no internet; **push needs internet, fails harmlessly offline**
-     (branch ends up ahead; re-push when back online).
-6. Appends the frontier + pass/fail verdict to this file's "Results" section.
+## 2. The goal
 
-Log: `/home/kristianaaron/tmp/atlas_build.log`
+Produce an **eval-ready output** for GLM-5.2 (the canary). Live completion of the
+pipeline (produce derivative -> KLD/CKA gate -> Eval Lab) requires the **maintenance
+window** (drains DSV4/VLLM for ~1.5-2 h) + **explicit user approval** — see §6.
 
-## How to resume (when back online)
-1. `tmux attach -t atlas_build`  (or read `atlas_build.log` — runs to completion regardless)
-2. `cd /home/kristianaaron/tmp/model-atlas && git status && git log --oneline -3`
-3. If push failed while offline: `git push origin main`
-4. Full blueprint feature/gap matrix lands in the log's [6/6] section for the next session.
+## 3. Cluster access (from this Mac OR Termius-from-phone, same SSH)
 
-## Running the experiment / tests by hand
-```
+- Host: `kristianaaron@100.96.194.44` (spark-d167, Tailscale). gx10-ac63/gx10-tail offline.
+- SSH key path has SPACES — always quote: `KEY="...nvsync.key"` then `-i "$KEY"`.
+  opts: `-o BatchMode=yes -o ConnectTimeout=10 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=accept-new`
+- Repo: `/home/kristianaaron/tmp/model-atlas`; venv `.venv` (Python 3.12).
+- Fast tests: `PYTHONPATH=src .venv/bin/python -m pytest tests/unit/<f> -q -p no:cacheprovider`
+- Ruff `.venv/bin/ruff check <paths>`; mypy `.venv/bin/mypy <src>`.
+
+## 4. The optimized resume loop (run one pass each time you pick this up)
+
+1. `git log --oneline -6` + `git status -sb` (clean?).
+2. Verify green: the fast suites covering channel_pruning_math, channel_pruning_integration,
+   bundle, planner, width_sizing, runtime_artifact_handoff_widthslice, quality_gate,
+   method_plugin_seam, modelopt_adapter, maintenance_events, maintenance_watch,
+   recommend, method_catalog, nvfp4_width_slice_adapter, maintenance_runner,
+   run_glm52_canary_maintenance, run_glm52_capture_maintenance, glm52_candidate_eval.
+   If anything fails: STOP, fix root cause, retest.
+3. Advance the **next safe step** on the eval-readiness checklist (§5).
+4. On a REPEATED blocker: diagnose root cause (read the code), fix, retest, add a
+   guard/test, then move forward. Never blindly retry; never work around safety.
+5. Commit only complete green increments; keep the tree clean.
+6. End with a brief: HEAD, green/broken, advanced, next step, awaiting-approval.
+
+## 5. Eval-readiness checklist (SAFE without approval)
+
+- [ ] Full suite green (final gate; slow >8 min — run once in background).
+- [ ] Drain/restore REHEARSAL via coordinator **dry-run only** (`execute=False`) —
+      proves service-restore order, touches no production.
+- [ ] Stage the width-slice derivative (CPU+NVMe, no GPU needed) IF the GLM source
+      is reachable and disk allows: produce to a staging dir, verify `.atlasbundle`
+      + handoff via `load_verified_width_slice_handoff`.
+- [ ] Eval plan/candidate-only report (already built in `glm52_candidate_eval`).
+
+## 6. HARD SAFETY GATES (never bypass)
+
+- **Never run the live maintenance drain** (stop DSV4/VLLM), ModelOpt quant,
+  KLD/CKA capture on the box, or Eval Lab WITHOUT the user's explicit approval
+  phrase: `Approved: run the full GLM maintenance sequence`.
+- Never start/stop/restart production services (DSV4, VLLM, llama, gateway,
+  vision, qwen) autonomously.
+- GPU is occupied (~106/128 GB by vLLM+llama); never assume free VRAM.
+- Do NOT install nvidia-modelopt into the shared TEST venv (dependency drift);
+  install into a dedicated runtime env only. GLM won't fit anyway until drain.
+
+## 7. When you reach the approval gate
+
+Output a crisp brief: everything green + rehearsed + derivative staged, the EXACT
+approval sentence above, estimated ~1.5-2 h wall-clock, and that DSV4 auto-restores
+afterward. Then STOP and wait for the user — do not proceed into the drain.
+
+## 8. Useful commands (phone/Termius)
+
+```bash
+# watch the live drain/produce/restore UI (once = replay; omit = live tail):
 cd /home/kristianaaron/tmp/model-atlas
-.venv/bin/python -m pytest tests/unit/test_f17_experiments.py -q
-.venv/bin/python -c "from model_atlas.experiments import pareto_sweep; ..."
+PYTHONPATH=src .venv/bin/python scripts/maintenance_watch.py --journal-dir <journal_dir> --once
+
+# inspect the event stream directly:
+tail -f <journal_dir>/maintenance-events.jsonl
+
+# see commits / status / staged artifacts:
+git log --oneline -6; git status -sb; ls -la artifacts/
 ```
-
-## Build-out results (auto, detached run Fri Aug  7 07:01:25 PM UTC 2026)
-
-```
-=== STRUCTURED frontier (drift: lower=better; delta=hetero-uniform) ===
-frac=1.0: uniform_drift=0.0000 hetero_drift=0.0000 delta=+0.0000
-frac=0.9: uniform_drift=0.0113 hetero_drift=0.0107 delta=-0.0006
-frac=0.7: uniform_drift=0.0207 hetero_drift=0.0205 delta=-0.0001
-frac=0.5: uniform_drift=0.0282 hetero_drift=0.0281 delta=-0.0001
-frac=0.4: uniform_drift=0.0318 hetero_drift=0.0314 delta=-0.0004
-frac=0.3: uniform_drift=0.0383 hetero_drift=0.0342 delta=-0.0042
-=== PLAIN k3-mini (expect parity: no injected structure) ===
-frac=0.7: uniform_drift=0.0206 hetero_drift=0.0202 delta=-0.0003
-frac=0.5: uniform_drift=0.0278 hetero_drift=0.0280 delta=+0.0001
-frac=0.3: uniform_drift=0.0342 hetero_drift=0.0339 delta=-0.0003
-=== PROTECTION demo (§8.2) ===
-coalition-protected experts detected: 16 across 2 layers
-DONE-EXP
-```
-
-**status:** all new tests PASS; committed & pushed below.
-
-## Results (auto, from completed detached run `atlas_build`)
-New tests (f16 + f17 experiments + f17 protection) **PASSED**; full suite + ruff + mypy clean; commit + push succeeded (`10faa6b`).
-
-### Milestone E frontier — structured synthetic (drift: lower=better; delta=hetero−uniform)
-```
-frac=1.0  uniform 0.0000  hetero 0.0000  delta +0.0000
-frac=0.9  uniform 0.0113  hetero 0.0107  delta -0.0006
-frac=0.7  uniform 0.0207  hetero 0.0205  delta -0.0001
-frac=0.5  uniform 0.0282  hetero 0.0281  delta -0.0001
-frac=0.4  uniform 0.0318  hetero 0.0314  delta -0.0004
-frac=0.3  uniform 0.0383  hetero 0.0342  delta -0.0042
-```
-Measured heterogeneous allocation preserves the representation better than the equal-width control at every budget, and the gap grows at higher compression.
-
-### Protection demo (§8.2)
-```
-coalition-protected experts detected: 16 across 2 layers
-```
-
-### Blueprint feature / gap matrix
-```
-Atlas v1 modules A-F (§7): DONE
-SM121 width planner (§14.2): DONE
-Compression manifest + validator (§11): DONE
-Structural executor + §12.2 tests: DONE
-glm52 / k3 adapters (layout contract): DONE (tensor sizes gated on census)
-Milestone E matched-budget experiment (§17/§20): DONE
-Coalition-driven protection (§8.2): DONE
-NVFP4 discovery campaign (Priority 6): GATED — needs real GLM-5.2-NVFP4 checkpoint
-High-precision validation (Priority 7): GATED — needs BF16 parent weights
-EXL3/deployment search (Priority 8): GATED — needs EXL3 quantizer + real weights
-SM121 kernels/runtime (Priority 9): GATED — separate serving project + hardware
-Semantic map / redundancy / quant-sensitivity (§8.1/8.3/8.4): NEXT (offline, not yet built)
-```
-
-## Real checkpoint census — GLM-5.2-NVFP4 (2026-08-07)
-
-Source: `/media/glm52/models/nvidia/GLM-5.2-NVFP4` (mounted external 931G G-Drive).
-
-Header-only census through `load_manifest` → `build_structural_graph`:
-```
-tensors   : 232,385 across 47 shards (total 464.8 GB)
-coverage  : 1.000000   valid=True   unclassified=0
-nodes     : 19,772   edges: 39,539
-config    : hidden 6144, 78 layers, 256 routed experts, top-8, moe_intermediate 2048
-vocab     : 154,820 (tokenizer.json)  -> recorded in glm52 adapter
-```
-
-### Fixes this session (make the real-checkpoint census pass)
-- `checkpoint/source_manifest.py`: `_discover_shards` + `shard_hashes` now skip
-  macOS **AppleDouble `._*`** files. The GLM drive (Mac-exFAT) is littered with
-  `._model-*.safetensors`; reading one as safetensors yields a garbage header
-  length → `MemoryError`. (**tests:** `test_load_manifest_skips_appledouble_junk`)
-- `checkpoint/classifier.py`: map `eh_proj` (GLM-5.2 final external-hidden output
-  projection, `model.layers.78.eh_proj.weight`, BF16 6144→12288) to
-  `LM_HEAD` / global. (**test:** `test_classifier_glm52_eh_proj_is_head`)
-- `integrations/glm52.py`: `vocabulary_size=154820` (measured, no longer None).
-
-Note: the checkpoint carries a `model.layers.78.*` final shared-head block (gate +
-shared experts + `eh_proj`, **no routed experts**) beyond the 75 routed layers — the
-256-expert / 75-layer routed geometry is unchanged.
