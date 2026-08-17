@@ -26,6 +26,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 LLAMA_CPP_CAPTURE_COMMIT = "4df29be4f4c3673f428170fda944a5b19f743bb8"
 CAPTURE_ADAPTER_VERSION = "atlas-llamacpp-capture-v1"
 _SHA256 = r"^[0-9a-f]{64}$"
+_PLAN_ID = r"^recipe-[0-9a-f]{24}$"
+_RUN_ID = r"^run-[0-9a-f]{24}$"
 _REVISION = r"^[0-9a-f]{40}$"
 _MAX_JSON_BYTES = 4 * 1024 * 1024
 _MAX_TOKENS_BYTES = 64 * 1024 * 1024
@@ -91,8 +93,10 @@ class CaptureModelEvidence(_Frozen):
     profile_tokenizer_sha256: str = Field(pattern=_SHA256)
     producer_artifact_sha256: str = Field(pattern=_SHA256)
     recipe_sha256: str = Field(pattern=_SHA256)
-    plan_id: str = Field(pattern=_SHA256)
-    run_id: str = Field(pattern=_SHA256)
+    # These are Atlas' exact externally visible IDs, not full content digests.
+    # The full recipe digest is carried separately in ``recipe_sha256``.
+    plan_id: str = Field(pattern=_PLAN_ID)
+    run_id: str = Field(pattern=_RUN_ID)
     evidence_kind: Literal["measured"]
 
 

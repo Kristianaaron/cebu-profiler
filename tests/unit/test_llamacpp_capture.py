@@ -15,6 +15,7 @@ from model_atlas.evaluation.capture_metrics import (
 )
 from model_atlas.evaluation.llamacpp_capture import (
     LLAMA_CPP_CAPTURE_COMMIT,
+    CaptureModelEvidence,
     CaptureRequest,
     CaptureRole,
     CaptureToolIdentity,
@@ -30,6 +31,29 @@ from model_atlas.evaluation.llamacpp_capture import (
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def test_capture_model_evidence_preserves_exact_atlas_ids() -> None:
+    payload = {
+        "schema_version": 1,
+        "model_sha256": "1" * 64,
+        "source_model_sha256": "2" * 64,
+        "profile_tokenizer_sha256": "3" * 64,
+        "producer_artifact_sha256": "4" * 64,
+        "recipe_sha256": "5" * 64,
+        "plan_id": "recipe-" + "6" * 24,
+        "run_id": "run-" + "7" * 24,
+        "evidence_kind": "measured",
+    }
+    evidence = CaptureModelEvidence.model_validate(payload)
+    assert evidence.plan_id == payload["plan_id"]
+    assert evidence.run_id == payload["run_id"]
+
+    for field in ("plan_id", "run_id"):
+        malformed = dict(payload)
+        malformed[field] = "8" * 64
+        with pytest.raises(ValueError):
+            CaptureModelEvidence.model_validate(malformed)
 
 
 def _common_argv(model: Path) -> tuple[str, ...]:
@@ -79,8 +103,8 @@ def _request(tmp_path: Path, output: Path, tokens: Path) -> CaptureRequest:
                 "profile_tokenizer_sha256": _sha(b"bounded-tokenizer"),
                 "producer_artifact_sha256": "6" * 64,
                 "recipe_sha256": "7" * 64,
-                "plan_id": "8" * 64,
-                "run_id": "9" * 64,
+                "plan_id": "recipe-" + "8" * 24,
+                "run_id": "run-" + "9" * 24,
                 "evidence_kind": "measured",
             }
         )
