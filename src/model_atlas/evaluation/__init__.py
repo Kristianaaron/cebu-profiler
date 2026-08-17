@@ -51,8 +51,18 @@ from model_atlas.evaluation.glm52_candidate_eval import (
     CandidateEvalResult,
     CandidateEvalTaskEvidence,
     build_candidate_eval_plan,
+    build_glm52_candidate_eval_plan,
     build_task_evidence,
+    gguf_embedded_template_identity,
     parse_candidate_eval_runs,
+)
+from model_atlas.evaluation.glm52_candidate_eval_driver import (
+    CandidateEvalExecutionError,
+    CandidateEvalExecutionResult,
+    CandidateEvalExecutor,
+    EvalLabCommandResult,
+    SubprocessEvalLabRunner,
+    SystemdRuntimeQuiescenceVerifier,
 )
 from model_atlas.evaluation.heldout import (
     HeldOutReport,
@@ -141,8 +151,17 @@ __all__ = [
     "CandidateEvalResult",
     "CandidateEvalTaskEvidence",
     "build_candidate_eval_plan",
+    "build_glm52_candidate_eval_plan",
     "build_task_evidence",
+    "gguf_embedded_template_identity",
     "parse_candidate_eval_runs",
+    # concrete candidate evaluation execution
+    "CandidateEvalExecutionError",
+    "CandidateEvalExecutionResult",
+    "CandidateEvalExecutor",
+    "EvalLabCommandResult",
+    "SubprocessEvalLabRunner",
+    "SystemdRuntimeQuiescenceVerifier",
     # forced-token llama.cpp capture
     "CAPTURE_ADAPTER_VERSION",
     "LLAMA_CPP_CAPTURE_COMMIT",
