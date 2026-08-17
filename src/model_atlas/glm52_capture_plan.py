@@ -15,7 +15,6 @@ from model_atlas.evaluation.llamacpp_capture import (
     CaptureRequest,
     CaptureRole,
     CaptureToolIdentity,
-    canonical_capture_runtime_argv,
     capture_runtime_argv_sha256,
 )
 
@@ -135,8 +134,11 @@ def build_glm52_capture_plan(
 ) -> Glm52CapturePlan:
     """Build the exact candidate + same-model identity-control plan."""
 
-    if not work_root.is_absolute() or work_root != work_root.resolve(strict=True):
-        raise ValueError("capture work root must be an existing canonical absolute directory")
+    if not work_root.is_absolute():
+        raise ValueError("capture work root must be absolute")
+    canonical_work_root = work_root.parent.resolve(strict=True) / work_root.name
+    if work_root != canonical_work_root or work_root.is_symlink():
+        raise ValueError("capture work root must be a canonical non-symlink path")
     canonical_model = model_path.resolve(strict=True)
     canonical_tokenizer = profile_tokenizer_path.resolve(strict=True)
     evidence = CaptureModelEvidence(
@@ -158,7 +160,7 @@ def build_glm52_capture_plan(
         evidence.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
     ).encode()
     evidence_sha = hashlib.sha256(evidence_bytes).hexdigest()
-    evidence_path = work_root / "model-artifact-evidence.json"
+    evidence_path = canonical_work_root / "model-artifact-evidence.json"
     common_argv = _common_argv(canonical_model)
     tool = CaptureToolIdentity(
         binary_path=str(CAPTURE_BINARY),
@@ -169,13 +171,18 @@ def build_glm52_capture_plan(
     )
 
     def request(role: CaptureRole, output_name: str) -> CaptureRequest:
-        output = work_root / output_name
-        normalized = canonical_capture_runtime_argv(
-            tool_path=str(CAPTURE_BINARY),
-            common_argv=common_argv,
-            forced_tokens_path=str(FORCED_TOKENS),
-            output_dir=str(output),
-            layers=CAPTURE_LAYERS,
+        output = canonical_work_root / output_name
+        # This is the exact value returned by canonical_capture_runtime_argv
+        # once the execution wrapper has securely created canonical_work_root.
+        normalized = (
+            str(CAPTURE_BINARY),
+            *common_argv,
+            "--tokens-jsonl",
+            str(FORCED_TOKENS),
+            "--out-dir",
+            str(output),
+            "--layers",
+            ",".join(str(layer) for layer in CAPTURE_LAYERS),
         )
         return CaptureRequest(
             model_id="glm52-mixed-gguf",
