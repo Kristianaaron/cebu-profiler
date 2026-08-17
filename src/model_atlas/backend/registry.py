@@ -32,6 +32,7 @@ from model_atlas.backend.contract import (
     module_present,
 )
 from model_atlas.backend.llamacpp_gguf import build_llamacpp_gguf_record
+from model_atlas.backend.modelopt_adapter import ModelOptNvfp4Adapter, probe_modelopt
 from model_atlas.backend.nvfp4_width_slice import AtlasNvfp4WidthSliceAdapter
 from model_atlas.recipe.schema import RecipeStage, RecipeStatus
 
@@ -415,9 +416,9 @@ def _builtin_records() -> dict[str, BackendRecord]:
         declared_capabilities=(_HYBRID_PREFIX + "fp8_e4m3+modelopt_nvfp4",),
         supported_formats=(),
         fail_closed=True,
-        availability_probe=_probe_never,  # placeholder probe: fail closed until wired
+        availability_probe=probe_modelopt,  # truthful: avail iff modelopt importable
         parameters=(ParameterSpec("group_size", "int", "NVFP4 block/group size", default="16"),),
-        adapter=CommandBackedAdapter(backend_id="modelopt_nvfp4"),
+        adapter=ModelOptNvfp4Adapter(),
     )
     llm_compressor = BackendRecord(
         backend_id="llm_compressor",
