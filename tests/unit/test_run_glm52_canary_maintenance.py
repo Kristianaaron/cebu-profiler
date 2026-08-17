@@ -253,6 +253,12 @@ def test_compression_result_mode_derives_exact_verified_artifact(
 ) -> None:
     module = _module()
     result, artifact, digest = _compression_result(tmp_path)
+    handoff = module._artifact_from_compression_result(result)
+    result_payload = json.loads(result.read_text(encoding="utf-8"))
+    evidence = result_payload["runtime_artifact"]["evidence"]
+    assert handoff.evidence_sha256 == evidence["sha256"]
+    assert handoff.evidence_size_bytes == evidence["size_bytes"]
+    assert handoff.evidence_relpath == evidence["relpath"]
     args = _args(tmp_path)
     args.compression_result = result
     args.artifact = None

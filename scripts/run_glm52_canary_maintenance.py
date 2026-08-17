@@ -177,6 +177,9 @@ class _CompressionHandoff(NamedTuple):
     artifact_path: str
     artifact_sha256: str
     artifact_size_bytes: int
+    evidence_sha256: str
+    evidence_size_bytes: int
+    evidence_relpath: str
     producer_run_id: str
     producer_plan_id: str
     producer_recipe_sha256: str
@@ -315,6 +318,9 @@ def _artifact_from_compression_result(path: Path) -> _CompressionHandoff:
         artifact_path=str(artifact_path),
         artifact_sha256=measured_sha,
         artifact_size_bytes=measured_size,
+        evidence_sha256=evidence_sha,
+        evidence_size_bytes=evidence_size,
+        evidence_relpath=evidence_relpath,
         producer_run_id=producer_run_id,
         producer_plan_id=producer_plan_id,
         producer_recipe_sha256=producer_recipe_sha256,
