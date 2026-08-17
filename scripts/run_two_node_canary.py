@@ -32,6 +32,7 @@ from model_atlas.runtime_canary_driver import (
     LoopbackHttpTransport,
     SystemdUserRuntimeLifecycle,
 )
+from model_atlas.runtime_canary_handoff import publish_runtime_canary_handoff
 from model_atlas.telemetry_python import TelemetryPythonConfig, verify_telemetry_python
 from model_atlas.two_node_canary_executor import (
     JsonlEvidenceStore,
@@ -64,6 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--producer-recommendation-id")
     parser.add_argument("--producer-handoff-sha256")
     parser.add_argument("--evidence", required=True, type=Path)
+    parser.add_argument("--result", type=Path)
     parser.add_argument(
         "--telemetry-probe",
         type=Path,
@@ -147,10 +149,11 @@ def main() -> int:
         or not args.disk_device
         or not args.telemetry_python_sha256
         or args.maintenance_lease is None
+        or args.result is None
     ):
         raise RuntimeError(
-            "--rdma-interface, --disk-device, --telemetry-python-sha256, and "
-            "--maintenance-lease are required with --execute"
+            "--rdma-interface, --disk-device, --telemetry-python-sha256, "
+            "--maintenance-lease, and --result are required with --execute"
         )
     # Re-probe live production/transient state at the execution boundary.  A
     # valid lease alone never permits a canary while a consumer is still active.
@@ -221,7 +224,13 @@ def main() -> int:
         telemetry=telemetry,
         evidence=JsonlEvidenceStore(args.evidence),
     ).execute(plan)
-    print(result.receipt.model_dump_json())
+    handoff = publish_runtime_canary_handoff(
+        args.result,
+        plan=plan,
+        execution=result,
+        evidence_path=args.evidence,
+    )
+    print(handoff.model_dump_json())
     return 0 if result.receipt.runtime_claim_validated else 1
 
 

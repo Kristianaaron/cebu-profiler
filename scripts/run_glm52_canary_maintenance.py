@@ -25,12 +25,15 @@ from model_atlas.ops.maintenance import (
     restore_signal_traps,
 )
 from model_atlas.runtime_artifact_handoff import load_verified_compression_handoff
+from model_atlas.runtime_canary_handoff import load_verified_runtime_canary_handoff
 
 _RESERVED_CANARY_OPTIONS = {
     "--execute",
     "--maintenance-lease",
     "--artifact",
     "--artifact-sha256",
+    "--evidence",
+    "--result",
     "--producer-run-id",
     "--producer-plan-id",
     "--producer-recipe-sha256",
@@ -49,6 +52,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--journal-dir", type=Path, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--lease", type=Path, required=True)
+    parser.add_argument("--evidence", type=Path, required=True)
+    parser.add_argument("--canary-result", type=Path, required=True)
     parser.add_argument("--plan-sha256")
     parser.add_argument("--compression-result", type=Path)
     parser.add_argument("--artifact")
@@ -131,6 +136,8 @@ def main() -> int:
                     "plan": plan.model_dump(mode="json"),
                     "head_argv": runtime_config.head_argv(),
                     "worker_argv": runtime_config.worker_argv(),
+                    "evidence": str(args.evidence),
+                    "canary_result": str(args.canary_result),
                 },
                 sort_keys=True,
             )
@@ -147,6 +154,10 @@ def main() -> int:
         artifact,
         "--artifact-sha256",
         artifact_sha256,
+        "--evidence",
+        str(args.evidence),
+        "--result",
+        str(args.canary_result),
         *(
             (
                 "--producer-run-id",
@@ -192,6 +203,12 @@ def main() -> int:
         )
     finally:
         restore_signal_traps(previous)
+    if receipt.success:
+        load_verified_runtime_canary_handoff(
+            args.canary_result,
+            expected_plan=plan,
+            require_evaluation_ready=True,
+        )
     print(receipt.model_dump_json())
     return 0 if receipt.success else 1
 

@@ -43,6 +43,8 @@ def _args(tmp_path: Path) -> Namespace:
         journal_dir=tmp_path / "journal",
         receipt=tmp_path / "receipt.json",
         lease=tmp_path / "lease.json",
+        evidence=tmp_path / "canary-evidence.jsonl",
+        canary_result=tmp_path / "canary-result.json",
         plan_sha256=None,
         compression_result=None,
         artifact="/artifacts/glm52.gguf",
@@ -103,6 +105,11 @@ def test_main_installs_traps_around_fake_coordinator_only(
             )
 
     monkeypatch.setattr(module, "MaintenanceCoordinator", _Coordinator)
+    monkeypatch.setattr(
+        module,
+        "load_verified_runtime_canary_handoff",
+        lambda *_args, **_kwargs: object(),
+    )
     assert module.main() == 0
     assert calls == ["init", "run", "lease-live", "restore"]
 
@@ -148,6 +155,7 @@ def test_direct_canary_rejects_minted_lease_when_live_drain_probe_finds_service(
         producer_recommendation_id=None,
         producer_handoff_sha256=None,
         evidence=tmp_path / "evidence.jsonl",
+        result=tmp_path / "result.json",
         telemetry_probe=Path("/scripts/probe.py"),
         rdma_interface="ib0",
         disk_device="nvme0n1",
@@ -284,6 +292,11 @@ def test_compression_result_mode_derives_exact_verified_artifact(
             )
 
     monkeypatch.setattr(module, "MaintenanceCoordinator", _Coordinator)
+    monkeypatch.setattr(
+        module,
+        "load_verified_runtime_canary_handoff",
+        lambda *_args, **_kwargs: object(),
+    )
     assert module.main() == 0
     payload = seen["payload"]
     assert isinstance(payload, tuple)
@@ -293,6 +306,8 @@ def test_compression_result_mode_derives_exact_verified_artifact(
     assert payload[payload.index("--producer-plan-id") + 1] == "plan-1"
     assert payload[payload.index("--producer-recipe-sha256") + 1] == "a" * 64
     assert "--producer-handoff-sha256" in payload
+    assert payload[payload.index("--evidence") + 1] == str(args.evidence)
+    assert payload[payload.index("--result") + 1] == str(args.canary_result)
 
 
 def test_compression_handoff_rejects_malformed_profile_sha256(tmp_path: Path) -> None:
