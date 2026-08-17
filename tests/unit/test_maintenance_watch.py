@@ -1,7 +1,12 @@
 import json
 from pathlib import Path
 
-from model_atlas.ops.maintenance_watch import read_events, render_maintenance_status
+from model_atlas.ops.maintenance_watch import (
+    extract_shard_progress,
+    read_events,
+    render_maintenance_status,
+    shard_bar,
+)
 
 
 def _line(phase: str, status: str, **extra: object) -> str:
@@ -66,3 +71,34 @@ def test_read_events_parses_and_skips_garbage(tmp_path: Path) -> None:
 
 def test_read_events_missing_file(tmp_path: Path) -> None:
     assert read_events(tmp_path / "nope.jsonl") == []
+
+
+def test_shard_bar_renders_current_total() -> None:
+    bar = shard_bar(12, 24)
+    assert "12/24 shards" in bar
+    assert "[" in bar and "]" in bar
+
+
+def test_shard_bar_full() -> None:
+    assert shard_bar(24, 24) == "[########################] 24/24 shards"
+
+
+def test_extract_shard_progress_vllm_line() -> None:
+    line = "Loading safetensors checkpoint shards: 40%|████        | 23/57 [00:12<00:00, 4.62it/s]"
+    assert extract_shard_progress(line) == (23, 57)
+
+
+def test_extract_shard_progress_absent() -> None:
+    assert extract_shard_progress("model weights loaded") is None
+
+
+def test_render_restore_shows_shard_bar() -> None:
+    lines = [
+        _line("restore", "start"),
+        _line("restore", "load", service="dsv4"),
+        _line("restore", "shard_loaded", shard_current=23, shard_total=57),
+    ]
+    status = render_maintenance_status(lines)
+    assert "Restoring / loading services" in status
+    assert "23/57 shards" in status
+    assert "[" in status and "]" in status

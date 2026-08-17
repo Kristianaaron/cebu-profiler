@@ -11,6 +11,8 @@ from model_atlas.ops.maintenance import MaintenanceCoordinator
 
 def _events(cfg) -> list[dict[str, object]]:
     path: Path = cfg.journal_dir / "maintenance-events.jsonl"
+    if not path.exists():
+        return []
     lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
     return [json.loads(ln) for ln in lines]
 
@@ -80,3 +82,44 @@ def test_events_emitted_even_in_dry_run(tmp_path: Path) -> None:
     cfg = config(tmp_path)
     MaintenanceCoordinator(cfg, runner).run(["operator-command"])  # dry-run
     assert _events(cfg)
+
+
+def test_shard_plan_emitted_when_shards_known(tmp_path: Path) -> None:
+    runner = FakeRunner(active=set(ALL_PRODUCTION))
+    cfg = config(tmp_path).model_copy(update={"dsv4_model_shards": 57})
+    MaintenanceCoordinator(cfg, runner, execute=True).run()
+    plans = [
+        e for e in _events(cfg)
+        if e["phase"] == "restore" and e["status"] == "shard_plan"
+    ]
+    assert plans
+    assert plans[0].get("service") == "dsv4"
+    assert plans[0].get("shard_total") == 57
+
+
+def test_report_shard_progress_emits_loaded(tmp_path: Path) -> None:
+    runner = FakeRunner(active=set(ALL_PRODUCTION))
+    cfg = config(tmp_path)
+    coordinator = MaintenanceCoordinator(cfg, runner, execute=True)
+    coordinator.report_shard_progress(
+        "Loading safetensors checkpoint shards: 40%|#### | 23/57"
+    )
+    loaded = [
+        e for e in _events(cfg)
+        if e["phase"] == "restore" and e["status"] == "shard_loaded"
+    ]
+    assert loaded
+    assert loaded[0].get("shard_current") == 23
+    assert loaded[0].get("shard_total") == 57
+
+
+def test_report_shard_progress_ignores_no_progress(tmp_path: Path) -> None:
+    runner = FakeRunner(active=set(ALL_PRODUCTION))
+    cfg = config(tmp_path)
+    coordinator = MaintenanceCoordinator(cfg, runner, execute=True)
+    coordinator.report_shard_progress("model weights loaded")
+    loaded = [
+        e for e in _events(cfg)
+        if e["phase"] == "restore" and e["status"] == "shard_loaded"
+    ]
+    assert loaded == []

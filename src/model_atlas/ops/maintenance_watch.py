@@ -12,6 +12,7 @@ restoring/loading).
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,12 @@ PHASE_LABEL = {
     "maintenance": "Maintenance",
 }
 
+_BAR_WIDTH = 24
+
+
+def _int_values(records: Iterable[dict[str, Any]], key: str) -> Iterable[int]:
+    return (int(r[key]) for r in records if isinstance(r.get(key), int))
+
 
 def _latest(records: Iterable[dict[str, Any]], phase: str, status: str) -> dict[str, Any] | None:
     found = None
@@ -30,6 +37,36 @@ def _latest(records: Iterable[dict[str, Any]], phase: str, status: str) -> dict[
         if rec.get("phase") == phase and rec.get("status") == status:
             found = rec
     return found
+
+
+def shard_bar(current: int, total: int) -> str:
+    """Render a terminal-style progress bar like ``[##########........] 12/24``."""
+    if total <= 0 or current < 0:
+        return f"0/{total} shards"
+    filled = _BAR_WIDTH if current >= total else (current * _BAR_WIDTH) // total
+    bar = "#" * filled + "." * (_BAR_WIDTH - filled)
+    return f"[{bar}] {current}/{total} shards"
+
+
+_SHARD_RE = re.compile(
+    r"(?i)(shard|checkpoint|safetensors).{0,40}?(\d+)\s*(?:/|of)\s*(\d+)"
+)
+
+
+def extract_shard_progress(text: str) -> tuple[int, int] | None:
+    """Pull the latest ``current/total`` shard progress from vLLM-style output.
+
+    Mirrors the terminal loading line a runtime prints per weight shard, e.g.
+    ``Loading safetensors checkpoint shards: 40%|████        | 23/57`` →
+    ``(23, 57)``. Returns ``None`` when no shard progress is present.
+    """
+    latest: tuple[int, int] | None = None
+    for match in _SHARD_RE.finditer(text):
+        current = int(match.group(2))
+        total = int(match.group(3))
+        if total > 0 and 0 <= current <= total:
+            latest = (current, total)
+    return latest
 
 
 def render_maintenance_status(raw: Iterable[str]) -> str:
@@ -70,6 +107,16 @@ def render_maintenance_status(raw: Iterable[str]) -> str:
         parts.append(f"{(produce or {}).get('method', '?')} {suffix}")
     elif current == "restore":
         parts.append(f"loaded: {', '.join(loaded) or '(working…)'}")
+        shard_events = [
+            r
+            for r in records
+            if r["phase"] == "restore" and r["status"] == "shard_loaded"
+        ]
+        if shard_events:
+            total = max(_int_values(shard_events, "shard_total"), default=0)
+            cur = max(_int_values(shard_events, "shard_current"), default=0)
+            if total > 0:
+                parts.append(shard_bar(cur, total))
     elif done is not None:
         detail = str(done.get("detail", ""))
         parts.append(f"result: {detail}")
@@ -97,4 +144,10 @@ def _try_json(line: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-__all__ = ["PHASE_LABEL", "read_events", "render_maintenance_status"]
+__all__ = [
+    "PHASE_LABEL",
+    "extract_shard_progress",
+    "read_events",
+    "render_maintenance_status",
+    "shard_bar",
+]

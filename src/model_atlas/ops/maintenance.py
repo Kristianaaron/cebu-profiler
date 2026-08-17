@@ -25,6 +25,7 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from model_atlas.canary_constants import HEAD_TRANSIENT_UNIT, WORKER_TRANSIENT_UNIT
+from model_atlas.ops.maintenance_watch import extract_shard_progress
 
 
 def _now() -> datetime:
@@ -298,6 +299,10 @@ class MaintenanceConfig(BaseModel):
     binary_paths: tuple[Path, ...] = ()
     journal_dir: Path
     receipt_path: Path
+    # Optional shard count for the DSV4 model being restored, so the live UX can
+    # show a real "N / M shards" progress bar. When unset, no shard events are
+    # emitted (honest: the coordinator does not know the model layout).
+    dsv4_model_shards: int | None = None
 
     def all_binary_paths(self) -> tuple[Path, ...]:
         return (self.dsv4_stop_script, self.dsv4_start_script, *self.binary_paths)
@@ -464,6 +469,8 @@ class MaintenanceCoordinator:
         service: str | None = None,
         method: str | None = None,
         detail: str | None = None,
+        shard_current: int | None = None,
+        shard_total: int | None = None,
     ) -> None:
         """Append a typed maintenance-lifecycle event for live UX / observability.
 
@@ -484,6 +491,10 @@ class MaintenanceCoordinator:
             event["method"] = method
         if detail is not None:
             event["detail"] = detail
+        if shard_current is not None:
+            event["shard_current"] = shard_current
+        if shard_total is not None:
+            event["shard_total"] = shard_total
         try:
             self.config.journal_dir.mkdir(parents=True, exist_ok=True)
             path = self.config.journal_dir / "maintenance-events.jsonl"
@@ -494,6 +505,24 @@ class MaintenanceCoordinator:
                 os.fsync(fh.fileno())
         except Exception:  # noqa: BLE001 — diagnostics never fail maintenance
             pass
+
+    def report_shard_progress(self, text: str) -> None:
+        """Feed model-loader output to emit per-shard progress events.
+
+        Only emits when a real ``N/M`` shard-progress line is present (honest:
+        never fabricates loading progress). Used by a call site that tails the
+        restored model's own loader output.
+        """
+        progress = extract_shard_progress(text)
+        if progress is not None:
+            current, total = progress
+            self._emit(
+                phase="restore",
+                status="shard_loaded",
+                service="dsv4",
+                shard_current=current,
+                shard_total=total,
+            )
 
     def _acquire(self) -> None:
         # External dependency order is part of the safety contract.
@@ -654,6 +683,13 @@ class MaintenanceCoordinator:
                 str(self.config.dsv4_start_script),
                 [str(self.config.dsv4_start_script)],
             )
+            if self.config.dsv4_model_shards:
+                self._emit(
+                    phase="restore",
+                    status="shard_plan",
+                    service="dsv4",
+                    shard_total=self.config.dsv4_model_shards,
+                )
             for key, unit in (
                 ("qwen", self.config.qwen_unit),
                 ("vision_adapter", self.config.vision_adapter_unit),
