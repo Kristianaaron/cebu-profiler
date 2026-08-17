@@ -355,7 +355,9 @@ class MaintenanceCoordinator:
         result = self._command(command)
         if result.returncode == 0:
             return True
-        if result.returncode == 3:
+        # 3 = inactive; 4 = unknown/not-found. A unit that does not exist is
+        # genuinely not running, so it is not a consumer to drain or restore.
+        if result.returncode in (3, 4):
             return False
         raise MaintenanceFailure("unit liveness is unknown")
 

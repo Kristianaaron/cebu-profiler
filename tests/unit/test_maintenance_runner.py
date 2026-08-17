@@ -447,11 +447,10 @@ def test_unknown_liveness_fails_closed_before_scope(
             inner = self._inner(command)
             if kind == "ssh" and command[:1] == ("ssh",):
                 return CommandResult(returncode=returncode, stdout=stdout)
-            if kind == "dbus" and inner[:4] == (
-                "systemctl",
-                "--user",
-                "is-active",
-                "--quiet",
+            if (
+                kind == "dbus"
+                and inner[:4] == ("systemctl", "--user", "is-active", "--quiet")
+                and inner[4] not in {HEAD_TRANSIENT_UNIT, WORKER_TRANSIENT_UNIT}
             ):
                 return CommandResult(returncode=returncode, stdout=stdout)
             if kind.startswith("docker") and inner[:3] == ("docker", "inspect", "--format"):
@@ -463,6 +462,39 @@ def test_unknown_liveness_fails_closed_before_scope(
             ["operator-command"], payload_scope=scope
         )
     assert entered == []
+
+
+def test_missing_transient_units_are_treated_as_inactive_not_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # rc=4 (not-found) on a transient runtime unit is a normal, expected state:
+    # the optional two-spark canary is only brought up during execution. It must
+    # be treated as inactive (drained) rather than an unknown/liveness failure.
+    entered: list[str] = []
+    state = {"hit": False}
+
+    class KnownRunner(FakeRunner):
+        def run(self, argv: Sequence[str]) -> CommandResult:
+            command = tuple(argv)
+            inner = self._inner(command)
+            if (
+                inner[:4] == ("systemctl", "--user", "is-active", "--quiet")
+                and inner[4] in {HEAD_TRANSIENT_UNIT, WORKER_TRANSIENT_UNIT}
+            ):
+                state["hit"] = True
+                return CommandResult(returncode=4, stdout="")
+            return super().run(argv)
+
+    @contextmanager
+    def scope():  # type: ignore[no-untyped-def]
+        entered.append("entered")
+        yield
+
+    MaintenanceCoordinator(config(tmp_path), KnownRunner(), execute=True).run(
+        ["operator-command"], payload_scope=scope
+    )
+    assert state["hit"] is True
+    assert entered == ["entered"]
 
 
 def test_persistent_payload_group_skips_restoration_and_marks_manual_intervention(
