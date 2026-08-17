@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 from argparse import Namespace
 from contextlib import contextmanager
@@ -118,6 +119,33 @@ def _authorization() -> dict[str, str]:
     }
 
 
+def _artifact_result() -> dict[str, object]:
+    return {
+        "path": "/verified/model.gguf",
+        "sha256": "c" * 64,
+        "size_bytes": 1,
+        "stage": "llamacpp-gguf-mixed",
+        "logical_name": "model.gguf",
+        "relpath": "objects/cc/model.gguf",
+        "runtime_validated": False,
+    }
+
+
+def _evidence_ref(run_dir: Path) -> dict[str, object]:
+    payload = b"{}"
+    digest = hashlib.sha256(payload).hexdigest()
+    path = run_dir / "objects" / digest[:2] / f"{digest}.blob"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    return {
+        "stage": "llamacpp-gguf-mixed",
+        "name": "llamacpp-gguf-mixed.evidence.json",
+        "sha256": digest,
+        "size_bytes": len(payload),
+        "relpath": str(path.relative_to(run_dir)),
+    }
+
+
 def _stub_profile(
     module: ModuleType,
     args: Namespace,
@@ -184,6 +212,10 @@ def test_payload_rechecks_drain_recipe_and_reaches_terminal_result(
 
     monkeypatch.setattr(module, "MaintenanceCoordinator", _Coordinator)
     monkeypatch.setattr(module, "_preview", lambda _args: (service, _authorization(), _preview()))
+    monkeypatch.setattr(
+        module, "_verified_runtime_artifact", lambda *_a: (_artifact_result(), object())
+    )
+    monkeypatch.setattr(module, "_reverify_runtime_artifact", lambda _pin: None)
     monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
     assert module._run_payload(args) == 0
     assert events == ["lease", "drained"]
@@ -314,6 +346,10 @@ def test_payload_resumes_matching_recoverable_run_instead_of_restarting(
 
     monkeypatch.setattr(module, "MaintenanceCoordinator", _Coordinator)
     monkeypatch.setattr(module, "_preview", lambda _args: (service, _authorization(), _preview()))
+    monkeypatch.setattr(
+        module, "_verified_runtime_artifact", lambda *_a: (_artifact_result(), object())
+    )
+    monkeypatch.setattr(module, "_reverify_runtime_artifact", lambda _pin: None)
     assert module._run_payload(args) == 0
     assert plane.resumed
     assert not service.started
@@ -410,3 +446,152 @@ def test_post_preview_identity_failure_still_shuts_service(
     with pytest.raises(RuntimeError, match="authorization identity drifted"):
         module._run_payload(args)
     assert service.shutdown_called
+
+
+def test_completed_output_handoff_resolves_and_rehashes_exact_cas_blob(tmp_path: Path) -> None:
+    module = _module()
+    run_dir = tmp_path / "runs" / "run-1"
+    payload = b"bounded-gguf"
+    digest = hashlib.sha256(payload).hexdigest()
+    blob = run_dir / "objects" / digest[:2] / f"{digest}.blob"
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(payload)
+    evidence = _evidence_ref(run_dir)
+    service = SimpleNamespace(
+        plane=SimpleNamespace(engine_for=lambda _run_id: SimpleNamespace(run_dir=run_dir))
+    )
+    outputs = {
+        "run_id": "run-1",
+        "outputs": [
+            evidence,
+            {
+                "stage": "llamacpp-gguf-mixed",
+                "name": "model.gguf",
+                "sha256": digest,
+                "size_bytes": len(payload),
+                "relpath": str(blob.relative_to(run_dir)),
+            },
+        ],
+    }
+    handoff, pin = module._verified_runtime_artifact(service, "run-1", outputs)
+    assert handoff == {
+        "path": str(blob.resolve()),
+        "sha256": digest,
+        "size_bytes": len(payload),
+        "stage": "llamacpp-gguf-mixed",
+        "logical_name": "model.gguf",
+        "relpath": str(blob.relative_to(run_dir)),
+        "runtime_validated": False,
+        "evidence": {
+            "stage": "llamacpp-gguf-mixed",
+            "logical_name": "llamacpp-gguf-mixed.evidence.json",
+            "sha256": evidence["sha256"],
+            "size_bytes": evidence["size_bytes"],
+            "relpath": evidence["relpath"],
+        },
+    }
+    module._reverify_runtime_artifact(pin)
+
+
+@pytest.mark.parametrize(
+    ("relpath", "sha256", "size", "message"),
+    [
+        ("../outside.gguf", "a" * 64, 1, "escapes"),
+        (f"objects/00/{'0' * 64}.blob", "0" * 64, 12, "identity differs"),
+    ],
+)
+def test_completed_output_handoff_fails_closed_on_escape_or_identity_drift(
+    tmp_path: Path,
+    relpath: str,
+    sha256: str,
+    size: int,
+    message: str,
+) -> None:
+    module = _module()
+    run_dir = tmp_path / "runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    blob = run_dir / relpath
+    if ".." not in blob.parts:
+        blob.parent.mkdir(parents=True)
+        blob.write_bytes(b"bounded-gguf")
+    service = SimpleNamespace(
+        plane=SimpleNamespace(engine_for=lambda _run_id: SimpleNamespace(run_dir=run_dir))
+    )
+    outputs = {
+        "run_id": "run-1",
+        "outputs": [
+            _evidence_ref(run_dir),
+            {
+                "stage": "llamacpp-gguf-mixed",
+                "name": "model.gguf",
+                "sha256": sha256,
+                "size_bytes": size,
+                "relpath": relpath,
+            },
+        ],
+    }
+    with pytest.raises(RuntimeError, match=message):
+        module._verified_runtime_artifact(service, "run-1", outputs)
+
+
+def test_completed_output_handoff_rejects_symlinked_cas_ancestor(tmp_path: Path) -> None:
+    module = _module()
+    payload = b"bounded-gguf"
+    digest = hashlib.sha256(payload).hexdigest()
+    real_runs = tmp_path / "real-runs"
+    real_blob = real_runs / "run-1" / "objects" / digest[:2] / f"{digest}.blob"
+    real_blob.parent.mkdir(parents=True)
+    real_blob.write_bytes(payload)
+    linked_runs = tmp_path / "runs"
+    linked_runs.symlink_to(real_runs, target_is_directory=True)
+    run_dir = linked_runs / "run-1"
+    service = SimpleNamespace(
+        plane=SimpleNamespace(engine_for=lambda _run_id: SimpleNamespace(run_dir=run_dir))
+    )
+    outputs = {
+        "run_id": "run-1",
+        "outputs": [
+            _evidence_ref(real_runs / "run-1"),
+            {
+                "stage": "llamacpp-gguf-mixed",
+                "name": "model.gguf",
+                "sha256": digest,
+                "size_bytes": len(payload),
+                "relpath": f"objects/{digest[:2]}/{digest}.blob",
+            },
+        ],
+    }
+    with pytest.raises(OSError):
+        module._verified_runtime_artifact(service, "run-1", outputs)
+
+
+def test_result_is_removed_if_artifact_drifts_during_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    args = _args(tmp_path, execute=True, payload=True)
+    args.expected_profile_sha256 = _stub_profile(module, args, monkeypatch)
+    service = _Service(["completed"])
+    monkeypatch.setattr(module, "require_active_lease", lambda *_a, **_k: None)
+
+    class _Coordinator:
+        def __init__(self, *_a: object, **_k: object) -> None:
+            pass
+
+        @staticmethod
+        def verify_drained() -> None:
+            pass
+
+    monkeypatch.setattr(module, "MaintenanceCoordinator", _Coordinator)
+    monkeypatch.setattr(module, "_preview", lambda _args: (service, _authorization(), _preview()))
+    monkeypatch.setattr(
+        module, "_verified_runtime_artifact", lambda *_a: (_artifact_result(), object())
+    )
+    monkeypatch.setattr(
+        module,
+        "_reverify_runtime_artifact",
+        lambda _pin: (_ for _ in ()).throw(RuntimeError("drifted during publication")),
+    )
+    with pytest.raises(RuntimeError, match="drifted during publication"):
+        module._run_payload(args)
+    assert not args.result.exists()

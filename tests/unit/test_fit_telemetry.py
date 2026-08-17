@@ -41,6 +41,29 @@ def _candidate() -> CandidateBinding:
     )
 
 
+def test_candidate_producer_lineage_is_all_or_none_and_plan_bound() -> None:
+    base = _candidate()
+    with pytest.raises(ValidationError, match="producer lineage"):
+        CandidateBinding.model_validate(
+            {**base.model_dump(mode="json"), "producer_run_id": "run-1"}
+        )
+    bound = CandidateBinding.model_validate(
+        {
+            **base.model_dump(mode="json"),
+            "producer_run_id": "run-1",
+            "producer_plan_id": "plan-1",
+            "producer_recipe_sha256": SHA_A,
+            "producer_profile_id": "profile-1",
+            "producer_recommendation_id": "recommendation-1",
+            "producer_handoff_sha256": SHA_B,
+        }
+    )
+    assert (
+        build_base_canary_plan(bound).canonical_sha256()
+        != build_base_canary_plan(base).canonical_sha256()
+    )
+
+
 def _sample(
     node: NodeRole,
     *,
@@ -288,9 +311,7 @@ def test_stop_thresholds(
 
 
 def test_no_measured_claim_without_both_nodes() -> None:
-    summary = derive_fit_summary(
-        _single_step_plan(), [_sample(NodeRole.HEAD)], [_observation()]
-    )
+    summary = derive_fit_summary(_single_step_plan(), [_sample(NodeRole.HEAD)], [_observation()])
     assert not summary.both_nodes_measured
     assert not summary.fitted
     assert summary.stop_reason is StopReason.MISSING_NODE

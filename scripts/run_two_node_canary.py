@@ -51,12 +51,18 @@ class _ArgvRunner:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument(
         "--execute", action="store_true", help="perform the real canary; default is dry-run"
     )
     parser.add_argument("--artifact", required=True, type=Path)
     parser.add_argument("--artifact-sha256", required=True)
+    parser.add_argument("--producer-run-id")
+    parser.add_argument("--producer-plan-id")
+    parser.add_argument("--producer-recipe-sha256")
+    parser.add_argument("--producer-profile-id")
+    parser.add_argument("--producer-recommendation-id")
+    parser.add_argument("--producer-handoff-sha256")
     parser.add_argument("--evidence", required=True, type=Path)
     parser.add_argument(
         "--telemetry-probe",
@@ -114,6 +120,12 @@ def main() -> int:
             worker_rpc_server_sha256="6b448f515e4f674c99c37ce20fd82bde9cbb28c0b2bd1fd9b0e16db3ee81ce76",
             head_argv=config.head_argv(),
             worker_argv=config.worker_argv(),
+            producer_run_id=args.producer_run_id,
+            producer_plan_id=args.producer_plan_id,
+            producer_recipe_sha256=args.producer_recipe_sha256,
+            producer_profile_id=args.producer_profile_id,
+            producer_recommendation_id=args.producer_recommendation_id,
+            producer_handoff_sha256=args.producer_handoff_sha256,
         )
     )
     if not args.execute:
@@ -123,6 +135,7 @@ def main() -> int:
                     "execute": False,
                     "head_argv": config.head_argv(),
                     "worker_argv": config.worker_argv(),
+                    "plan_sha256": plan.canonical_sha256(),
                     "plan": plan.model_dump(mode="json"),
                 },
                 sort_keys=True,

@@ -200,22 +200,30 @@ class TwoNodeTelemetryCollector:
             "--context-tokens",
             str(context_tokens),
         )
-        head_probe = self._probe_argv + (
-            "--node",
-            NodeRole.HEAD,
-            "--process-role",
-            ProcessRole.SERVER,
-            "--pid",
-            str(head_server_pid),
-        ) + common
-        worker_probe = self._probe_argv + (
-            "--node",
-            NodeRole.WORKER,
-            "--process-role",
-            ProcessRole.RPC,
-            "--pid",
-            str(worker_rpc_pid),
-        ) + common
+        head_probe = (
+            self._probe_argv
+            + (
+                "--node",
+                NodeRole.HEAD,
+                "--process-role",
+                ProcessRole.SERVER,
+                "--pid",
+                str(head_server_pid),
+            )
+            + common
+        )
+        worker_probe = (
+            self._probe_argv
+            + (
+                "--node",
+                NodeRole.WORKER,
+                "--process-role",
+                ProcessRole.RPC,
+                "--pid",
+                str(worker_rpc_pid),
+            )
+            + common
+        )
         return (
             TelemetryCommandSpec(
                 node=NodeRole.HEAD,
@@ -289,6 +297,12 @@ class CandidateBinding(BaseModel):
     worker_rpc_server_sha256: str = Field(pattern=_SHA256_PATTERN)
     head_argv: tuple[str, ...]
     worker_argv: tuple[str, ...]
+    producer_run_id: str | None = Field(default=None, min_length=1)
+    producer_plan_id: str | None = Field(default=None, min_length=1)
+    producer_recipe_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
+    producer_profile_id: str | None = Field(default=None, min_length=1)
+    producer_recommendation_id: str | None = Field(default=None, min_length=1)
+    producer_handoff_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
 
     @model_validator(mode="after")
     def exact_argv_required(self) -> CandidateBinding:
@@ -298,6 +312,18 @@ class CandidateBinding(BaseModel):
             raise ValueError("both exact runtime argv lists are required")
         if any(not item for item in self.head_argv + self.worker_argv):
             raise ValueError("runtime argv may not contain empty elements")
+        producer = (
+            self.producer_run_id,
+            self.producer_plan_id,
+            self.producer_recipe_sha256,
+            self.producer_profile_id,
+            self.producer_recommendation_id,
+            self.producer_handoff_sha256,
+        )
+        if any(value is not None for value in producer) and not all(
+            value is not None for value in producer
+        ):
+            raise ValueError("producer lineage must be supplied as one complete binding")
         return self
 
 
@@ -495,25 +521,20 @@ def derive_fit_summary(
             stop = StopReason.INCOMPLETE_EVIDENCE
             break
         observation = observations[index]
-        if (
-            observation.step_id != step.step_id
-            or observation.context_tokens != step.context_tokens
-        ):
+        if observation.step_id != step.step_id or observation.context_tokens != step.context_tokens:
             complete = False
             stop = StopReason.INCOMPLETE_EVIDENCE
             break
         step_rows = [
             sample
             for sample in samples
-            if sample.phase_id == step.step_id
-            and sample.context_tokens == step.context_tokens
+            if sample.phase_id == step.step_id and sample.context_tokens == step.context_tokens
         ]
         grouped: dict[str, list[TelemetrySample]] = {}
         for sample in step_rows:
             grouped.setdefault(sample.sample_set_id, []).append(sample)
         paired = len(grouped) >= 2 and all(
-            len(rows) == 2
-            and {row.node for row in rows} == {NodeRole.HEAD, NodeRole.WORKER}
+            len(rows) == 2 and {row.node for row in rows} == {NodeRole.HEAD, NodeRole.WORKER}
             for rows in grouped.values()
         )
         if not paired:
@@ -532,8 +553,7 @@ def derive_fit_summary(
         if observation.oom_detected:
             stop = StopReason.OOM
         elif any(
-            summary.new_pswpin_pages or summary.new_pswpout_pages
-            for summary in step_summaries
+            summary.new_pswpin_pages or summary.new_pswpout_pages for summary in step_summaries
         ):
             stop = StopReason.SWAP_ACTIVITY
         elif "RPC0" not in observation.observed_devices:
@@ -555,8 +575,7 @@ def derive_fit_summary(
         stop = StopReason.INCOMPLETE_EVIDENCE
 
     rows_by_node = {
-        node: [sample for sample in processed_rows if sample.node is node]
-        for node in NodeRole
+        node: [sample for sample in processed_rows if sample.node is node] for node in NodeRole
     }
     node_summaries = tuple(
         _node_summary(node, rows_by_node[node]) for node in NodeRole if rows_by_node[node]
@@ -564,11 +583,7 @@ def derive_fit_summary(
     both_nodes = both_nodes and len(node_summaries) == 2
     last = accepted[-1] if accepted else None
     load = next(
-        (
-            item.load_duration_seconds
-            for item in accepted
-            if item.load_duration_seconds is not None
-        ),
+        (item.load_duration_seconds for item in accepted if item.load_duration_seconds is not None),
         None,
     )
     throughput = next(
@@ -579,8 +594,10 @@ def derive_fit_summary(
         ),
         None,
     )
-    measured = both_nodes and bool(processed_rows) and all(
-        sample.evidence_kind is EvidenceKind.MEASURED for sample in processed_rows
+    measured = (
+        both_nodes
+        and bool(processed_rows)
+        and all(sample.evidence_kind is EvidenceKind.MEASURED for sample in processed_rows)
     )
     return FitSummary(
         plan_sha256=plan.canonical_sha256(),
