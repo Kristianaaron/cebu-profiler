@@ -46,8 +46,25 @@ class ActiveMaintenanceLease(BaseModel):
 class ActiveLeaseHandle:
     path: Path
     descriptor: int
+    parent_descriptor: int
     device: int
     inode: int
+
+
+def _open_parent(path: Path) -> int:
+    if not path.is_absolute() or path.name in {"", ".", ".."}:
+        raise CanaryLeaseError("maintenance lease path is invalid")
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open("/", flags)
+    try:
+        for component in path.parent.parts[1:]:
+            following = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = following
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def _process_start_ticks(pid: int) -> int:
@@ -70,9 +87,13 @@ def write_active_lease(
     """Create and exclusively lock authority for the live coordinator lifetime."""
     if not path.is_absolute():
         raise ValueError("maintenance lease path must be absolute")
-    path.parent.mkdir(parents=True, exist_ok=True)
+    parent = _open_parent(path)
     flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags, 0o600)
+    try:
+        descriptor = os.open(path.name, flags, 0o600, dir_fd=parent)
+    except BaseException:
+        os.close(parent)
+        raise
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         now = datetime.now(UTC)
@@ -93,10 +114,16 @@ def write_active_lease(
             raise CanaryLeaseError("incomplete maintenance lease write")
         os.fsync(descriptor)
         stat = os.fstat(descriptor)
-        return ActiveLeaseHandle(path, descriptor, stat.st_dev, stat.st_ino)
+        os.fsync(parent)
+        return ActiveLeaseHandle(path, descriptor, parent, stat.st_dev, stat.st_ino)
     except BaseException:
         os.close(descriptor)
-        path.unlink(missing_ok=True)
+        try:
+            os.unlink(path.name, dir_fd=parent)
+            os.fsync(parent)
+        except FileNotFoundError:
+            pass
+        os.close(parent)
         raise
 
 
@@ -110,8 +137,14 @@ def require_active_lease(
     if not path.is_absolute() or path.is_symlink():
         raise CanaryLeaseError("maintenance lease path is invalid")
     descriptor = -1
+    parent = -1
     try:
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        parent = _open_parent(path)
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent,
+        )
         stat = os.fstat(descriptor)
         if stat.st_mode & 0o077:
             raise CanaryLeaseError("maintenance lease permissions are unsafe")
@@ -132,6 +165,8 @@ def require_active_lease(
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+        if parent >= 0:
+            os.close(parent)
     if lease.binding != binding:
         raise CanaryLeaseError("maintenance lease binding mismatch")
     coordinator = os.getppid() if expected_coordinator_pid is None else expected_coordinator_pid
@@ -149,14 +184,20 @@ def require_active_lease(
 def remove_active_lease(handle: ActiveLeaseHandle) -> None:
     """Remove only the same locked inode created by this coordinator."""
     try:
-        stat = handle.path.stat()
+        stat = os.stat(
+            handle.path.name,
+            dir_fd=handle.parent_descriptor,
+            follow_symlinks=False,
+        )
         if (stat.st_dev, stat.st_ino) != (handle.device, handle.inode):
             raise CanaryLeaseError("maintenance lease inode changed")
-        handle.path.unlink()
+        os.unlink(handle.path.name, dir_fd=handle.parent_descriptor)
+        os.fsync(handle.parent_descriptor)
     except OSError as exc:
         raise CanaryLeaseError("maintenance lease cleanup failed") from exc
     finally:
         os.close(handle.descriptor)
+        os.close(handle.parent_descriptor)
 
 
 @contextmanager

@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import signal
 import subprocess
 import time
@@ -28,6 +29,50 @@ from model_atlas.canary_constants import HEAD_TRANSIENT_UNIT, WORKER_TRANSIENT_U
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _publish_json_exclusive(path: Path, encoded: bytes) -> None:
+    if not path.is_absolute() or path.name in {"", ".", ".."}:
+        raise MaintenanceFailure("maintenance receipt path is invalid")
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    parent = os.open("/", flags)
+    temporary = f".{path.name}.{secrets.token_hex(12)}.tmp"
+    descriptor = -1
+    try:
+        for component in path.parent.parts[1:]:
+            following = os.open(component, flags, dir_fd=parent)
+            os.close(parent)
+            parent = following
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=parent,
+        )
+        view = memoryview(encoded)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise MaintenanceFailure("maintenance receipt write failed")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.link(temporary, path.name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+        os.fsync(parent)
+        os.unlink(temporary, dir_fd=parent)
+        os.fsync(parent)
+    except BaseException:
+        try:
+            os.unlink(temporary, dir_fd=parent)
+            os.fsync(parent)
+        except OSError:
+            pass
+        raise
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent)
 
 
 class CommandResult(BaseModel):
@@ -531,17 +576,13 @@ class MaintenanceCoordinator:
             if self.execute:
                 try:
                     runtime_active = self._unit_active(self.config.head_runtime_unit)
-                    worker_active = self._unit_active(
-                        self.config.worker_rpc_unit, remote=True
-                    )
+                    worker_active = self._unit_active(self.config.worker_rpc_unit, remote=True)
                 except BaseException as exc:
                     raise ProcessGroupQuiescenceError(
                         "experimental runtime quiescence is unknown"
                     ) from exc
                 if runtime_active or worker_active:
-                    raise ProcessGroupQuiescenceError(
-                        "experimental runtime did not quiesce"
-                    )
+                    raise ProcessGroupQuiescenceError("experimental runtime did not quiesce")
             # Restore a pre-existing runtime in dependency order: worker first.
             self._restore_action(
                 "worker_rpc",
@@ -603,7 +644,10 @@ class MaintenanceCoordinator:
         payload: Sequence[str] | None = None,
         *,
         payload_scope: Callable[[], AbstractContextManager[None]] | None = None,
+        payload_action: Callable[[], None] | None = None,
     ) -> MaintenanceReceipt:
+        if payload is not None and payload_action is not None:
+            raise ValueError("payload command and in-process action are mutually exclusive")
         started = self.clock()
         run_id = f"maintenance-{started.strftime('%Y%m%dT%H%M%S.%fZ')}"
         failure: str | None = None
@@ -623,6 +667,38 @@ class MaintenanceCoordinator:
                         command=list(payload),
                     ):
                         raise MaintenanceFailure("operator_payload:return_code")
+            elif payload_action is not None:
+                scope = payload_scope() if payload_scope is not None else nullcontext()
+                with scope:
+                    action_started = self.clock()
+                    try:
+                        payload_action()
+                    except BaseException:
+                        self._actions.append(
+                            ActionReceipt(
+                                action_id="operator_payload",
+                                target="in_process_operator_payload",
+                                requested=True,
+                                executed=True,
+                                success=False,
+                                started_at=action_started,
+                                finished_at=self.clock(),
+                                evidence="callback_failed",
+                            )
+                        )
+                        raise
+                    self._actions.append(
+                        ActionReceipt(
+                            action_id="operator_payload",
+                            target="in_process_operator_payload",
+                            requested=True,
+                            executed=True,
+                            success=True,
+                            started_at=action_started,
+                            finished_at=self.clock(),
+                            evidence="callback_completed",
+                        )
+                    )
         except ProcessGroupQuiescenceError as exc:
             failure = self._failure_label(exc)
             manual_intervention = True
@@ -655,10 +731,10 @@ class MaintenanceCoordinator:
             success=failure is None and action_success and evidence_success,
             failure=failure,
         )
-        self.config.receipt_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.config.receipt_path.with_suffix(self.config.receipt_path.suffix + ".tmp")
-        temporary.write_text(receipt.model_dump_json(indent=2), encoding="utf-8")
-        os.replace(temporary, self.config.receipt_path)
+        _publish_json_exclusive(
+            self.config.receipt_path,
+            receipt.model_dump_json(indent=2).encode("utf-8"),
+        )
         return receipt
 
     @staticmethod

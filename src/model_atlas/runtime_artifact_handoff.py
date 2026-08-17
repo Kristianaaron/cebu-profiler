@@ -22,8 +22,13 @@ def _required_string(payload: dict[str, object], key: str) -> str:
 
 
 def _read_bounded_regular(path: Path, limit: int = _MAX_RESULT_BYTES) -> bytes:
+    parent = _open_directory_chain(path.parent)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-    descriptor = os.open(path, flags)
+    try:
+        descriptor = os.open(path.name, flags, dir_fd=parent)
+    except BaseException:
+        os.close(parent)
+        raise
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
@@ -59,6 +64,7 @@ def _read_bounded_regular(path: Path, limit: int = _MAX_RESULT_BYTES) -> bytes:
         return payload
     finally:
         os.close(descriptor)
+        os.close(parent)
 
 
 def _open_directory_chain(path: Path) -> int:
