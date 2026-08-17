@@ -45,6 +45,15 @@ from model_atlas.evaluation.eval_lab import (
     canonical_directory_sha256,
     eval_lab_output_layout,
 )
+from model_atlas.evaluation.glm52_candidate_eval import (
+    CandidateEvalError,
+    CandidateEvalPlan,
+    CandidateEvalResult,
+    CandidateEvalTaskEvidence,
+    build_candidate_eval_plan,
+    build_task_evidence,
+    parse_candidate_eval_runs,
+)
 from model_atlas.evaluation.heldout import (
     HeldOutReport,
     LabelRetention,
@@ -126,6 +135,14 @@ __all__ = [
     "EvalLabAdapter",
     "eval_lab_output_layout",
     "canonical_directory_sha256",
+    # candidate-only actual-run evidence parsing
+    "CandidateEvalError",
+    "CandidateEvalPlan",
+    "CandidateEvalResult",
+    "CandidateEvalTaskEvidence",
+    "build_candidate_eval_plan",
+    "build_task_evidence",
+    "parse_candidate_eval_runs",
     # forced-token llama.cpp capture
     "CAPTURE_ADAPTER_VERSION",
     "LLAMA_CPP_CAPTURE_COMMIT",
