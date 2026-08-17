@@ -13,20 +13,28 @@ import json
 import math
 import os
 import stat
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
+import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic.networks import HttpUrl
 
 from model_atlas.evaluation.eval_lab import (
+    EVAL_LAB_REVISION,
     CandidateTaskReport,
     DataPartition,
+    EndpointConfigIdentity,
+    EndpointTransport,
     EvalLabAdapter,
     EvalLabRequest,
     EvalParameters,
+    FrozenHeldOutManifest,
     PerformanceReport,
     TaskScore,
     TeacherRelativeBlocker,
+    canonical_directory_sha256,
 )
 from model_atlas.runtime_artifact_handoff import CompressionHandoff
 from model_atlas.runtime_canary_handoff import RuntimeCanaryHandoff
@@ -34,6 +42,25 @@ from model_atlas.runtime_canary_handoff import RuntimeCanaryHandoff
 _MAX_RUN_FILE_BYTES = 4 * 1024 * 1024
 _SHA256 = r"^[0-9a-f]{64}$"
 _RUN_ID = r"^[0-9a-f]{12}$"
+
+GLM52_EVAL_LAB_ROOT = Path("/home/kristianaaron/tmp/eval-lab")
+GLM52_EVAL_LAB_SUITE = Path("configs/suites/atlas-glm52-heldout.yaml")
+GLM52_EVAL_LAB_TASKS = Path("tasks/atlas_glm52_heldout")
+GLM52_EVAL_ENDPOINT = HttpUrl("http://127.0.0.1:8892/v1")
+GLM52_EVAL_MODEL = "glm52-mixed-gguf"
+GLM52_EVAL_SEED = 17
+GLM52_EVAL_TEMPERATURE = 0.0
+GLM52_EVAL_MAX_TOKENS = 96
+GLM52_EVAL_TIMEOUT_SECONDS = 300.0
+
+_GGUF_TEMPLATE_TRANSPORT_ENVELOPE = {
+    "identity_kind": "gguf_embedded_chat_template_transport_v1",
+    "gguf_metadata_key": "tokenizer.chat_template",
+    "transport": "openai_compatible",
+    "endpoint_path": "/v1/chat/completions",
+    "message_envelope": {"required_fields": ["role", "content"]},
+    "tools": "disabled",
+}
 
 
 class CandidateEvalError(RuntimeError):
@@ -97,6 +124,131 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(_read_bounded_regular(path)).hexdigest()
 
 
+def _require_sha256(value: str, label: str) -> str:
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise CandidateEvalError(f"{label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _require_symlink_free(path: Path, *, require_directory: bool = False) -> Path:
+    if not path.is_absolute():
+        raise CandidateEvalError("pinned evaluation paths must be absolute")
+    current = Path(path.anchor)
+    for component in path.parts[1:]:
+        current /= component
+        if current.is_symlink():
+            raise CandidateEvalError("pinned evaluation paths must not traverse symlinks")
+    if require_directory and not path.is_dir():
+        raise CandidateEvalError("pinned evaluation directory does not exist")
+    if path.resolve() != path:
+        raise CandidateEvalError("pinned evaluation paths must be canonical")
+    return path
+
+
+def _load_yaml(path: Path, label: str) -> Mapping[str, Any]:
+    try:
+        payload = yaml.safe_load(_read_bounded_regular(path))
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise CandidateEvalError(f"{label} is not valid YAML") from exc
+    if not isinstance(payload, Mapping):
+        raise CandidateEvalError(f"{label} must be a YAML mapping")
+    return payload
+
+
+def _task_index(tasks_root: Path) -> dict[str, tuple[Path, Mapping[str, Any]]]:
+    indexed: dict[str, tuple[Path, Mapping[str, Any]]] = {}
+    entries = sorted(tasks_root.rglob("*"))
+    if any(path.is_symlink() for path in entries):
+        raise CandidateEvalError("Eval Lab task tree must not contain symlinks")
+    for path in entries:
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise CandidateEvalError("Eval Lab task tree may contain only regular files")
+        if path.name != "task.yaml":
+            continue
+        payload = _load_yaml(path, "Eval Lab task definition")
+        task_id = payload.get("id")
+        if not isinstance(task_id, str) or not task_id:
+            raise CandidateEvalError("Eval Lab task definition lacks an id")
+        if task_id in indexed:
+            raise CandidateEvalError(f"duplicate Eval Lab task id: {task_id}")
+        indexed[task_id] = (path, payload)
+    return indexed
+
+
+def _suite_task_order(suite: Mapping[str, Any]) -> tuple[str, ...]:
+    references = suite.get("tasks")
+    if not isinstance(references, list) or not references:
+        raise CandidateEvalError("Eval Lab suite must contain tasks")
+    ordered: list[str] = []
+    for reference in references:
+        if not isinstance(reference, Mapping) or not isinstance(reference.get("task_id"), str):
+            raise CandidateEvalError("Eval Lab suite contains an invalid task reference")
+        repetitions = reference.get("repetitions", 1)
+        if not isinstance(repetitions, int) or isinstance(repetitions, bool) or repetitions != 1:
+            raise CandidateEvalError("GLM held-out suite requires one execution per unique task")
+        ordered.append(reference["task_id"])
+    if len(ordered) != len(set(ordered)):
+        raise CandidateEvalError("GLM held-out suite task ids must be unique")
+    return tuple(ordered)
+
+
+def _selected_corpus_sha256(
+    tasks_root: Path,
+    ordered: tuple[str, ...],
+    indexed: Mapping[str, tuple[Path, Mapping[str, Any]]],
+) -> str:
+    """Hash ordered held-out payload files, excluding task configuration YAML.
+
+    The task-tree hash binds configuration and all files.  This second identity
+    separately binds the bytes presented to the model (prompts, attachments,
+    and fixtures) and their task-relative names in suite execution order.
+    """
+
+    digest = hashlib.sha256()
+    payload_files = 0
+    for task_id in ordered:
+        task_path, _ = indexed[task_id]
+        task_root = task_path.parent
+        files = sorted(path for path in task_root.rglob("*") if path.is_file())
+        for path in files:
+            if path == task_path:
+                continue
+            if path.is_symlink():
+                raise CandidateEvalError("Eval Lab corpus must not contain symlinks")
+            relative = path.relative_to(tasks_root).as_posix().encode("utf-8")
+            task_bytes = task_id.encode("utf-8")
+            digest.update(len(task_bytes).to_bytes(8, "big"))
+            digest.update(task_bytes)
+            digest.update(len(relative).to_bytes(8, "big"))
+            digest.update(relative)
+            digest.update(bytes.fromhex(_sha256(path)))
+            payload_files += 1
+    if payload_files == 0:
+        raise CandidateEvalError("Eval Lab held-out corpus contains no payload files")
+    return digest.hexdigest()
+
+
+def gguf_embedded_template_identity(candidate_artifact_sha256: str) -> str:
+    """Bind template semantics without pretending the template is a sidecar.
+
+    The compression handoff's artifact digest covers every GGUF byte, including
+    ``tokenizer.chat_template``.  Hashing that digest with Atlas's fixed
+    OpenAI-compatible message envelope therefore identifies both the embedded
+    template and the transport semantics used to invoke it.  This is not a
+    claim that the raw template text was independently extracted.
+    """
+
+    artifact_sha256 = _require_sha256(candidate_artifact_sha256, "candidate artifact SHA")
+    return _canonical_digest(
+        {
+            "candidate_artifact_sha256": artifact_sha256,
+            "transport_envelope": _GGUF_TEMPLATE_TRANSPORT_ENVELOPE,
+        }
+    )
+
+
 def _finite_number(value: object, label: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise CandidateEvalError(f"{label} must be numeric")
@@ -118,11 +270,13 @@ class CandidateEvalPlan(_Frozen):
     compression_handoff_sha256: str = Field(pattern=_SHA256)
     runtime_canary_handoff_sha256: str = Field(pattern=_SHA256)
     runtime_canary_plan_sha256: str = Field(pattern=_SHA256)
+    runtime_config_sha256: str = Field(pattern=_SHA256)
     candidate_artifact_path: str = Field(pattern=r"^/")
     candidate_artifact_sha256: str = Field(pattern=_SHA256)
     eval_lab_revision: Literal["a20da6c6b9cbf872f7c083bffe66afde40c2c8f2"] = (
         "a20da6c6b9cbf872f7c083bffe66afde40c2c8f2"
     )
+    eval_lab_executable_sha256: str = Field(pattern=_SHA256)
     held_out_manifest_id: str = Field(pattern=_SHA256)
     task_suite_sha256: str = Field(pattern=_SHA256)
     task_definitions_sha256: str = Field(pattern=_SHA256)
@@ -155,8 +309,22 @@ class CandidateEvalPlan(_Frozen):
             or self.candidate_artifact_sha256 != self.eval_request.candidate_artifact_sha256
         ):
             raise ValueError("candidate evaluation artifact differs from request")
+        if self.runtime_config_sha256 != self.eval_request.endpoint.config_sha256:
+            raise ValueError("candidate endpoint config differs from runtime canary")
         if not self.argv or any(not item for item in self.argv):
             raise ValueError("candidate evaluation argv contains an empty item")
+        try:
+            executable = Path(self.argv[0])
+            if (
+                not executable.is_absolute()
+                or _sha256(executable) != self.eval_lab_executable_sha256
+            ):
+                raise ValueError("candidate evaluation executable identity changed")
+            emitted = EvalLabAdapter(executable=str(executable)).emit_argv(self.eval_request)
+        except CandidateEvalError as exc:
+            raise ValueError("candidate evaluation executable identity changed") from exc
+        if not emitted.executable or emitted.blockers or emitted.argv != self.argv:
+            raise ValueError("candidate evaluation argv differs from the pinned request")
         expected = _canonical_digest(self.identity_payload())
         if self.plan_sha256 is not None and self.plan_sha256 != expected:
             raise ValueError("candidate evaluation plan digest differs from canonical content")
@@ -232,6 +400,8 @@ def build_candidate_eval_plan(
     )
     if not expected_lineage:
         raise CandidateEvalError("runtime canary lineage differs from compression handoff")
+    if eval_request.endpoint.config_sha256 != candidate.runtime_config_sha256:
+        raise CandidateEvalError("Eval Lab endpoint config differs from runtime canary")
     if (
         eval_request.candidate_artifact_path != compression_handoff.artifact_path
         or eval_request.candidate_artifact_sha256 != compression_handoff.artifact_sha256
@@ -247,8 +417,10 @@ def build_candidate_eval_plan(
         compression_handoff_sha256=compression_handoff.handoff_sha256,
         runtime_canary_handoff_sha256=runtime_canary_handoff.handoff_sha256,
         runtime_canary_plan_sha256=runtime_canary_handoff.plan.canonical_sha256(),
+        runtime_config_sha256=candidate.runtime_config_sha256,
         candidate_artifact_path=compression_handoff.artifact_path,
         candidate_artifact_sha256=compression_handoff.artifact_sha256,
+        eval_lab_executable_sha256=_sha256(Path(emitted.argv[0])),
         held_out_manifest_id=eval_request.held_out.manifest_id,
         task_suite_sha256=eval_request.held_out.task_suite_sha256,
         task_definitions_sha256=eval_request.held_out.task_definitions_sha256,
@@ -257,6 +429,85 @@ def build_candidate_eval_plan(
         parameters=eval_request.parameters,
         eval_request=eval_request,
         argv=emitted.argv,
+    )
+
+
+def build_glm52_candidate_eval_plan(
+    *,
+    compression_handoff: CompressionHandoff,
+    runtime_canary_handoff: RuntimeCanaryHandoff,
+    eval_output_root: Path,
+    verified_tokenizer_sha256: str,
+) -> CandidateEvalPlan:
+    """Build the production-default, filesystem-only GLM candidate plan.
+
+    ``eval_output_root`` is an explicit operation boundary.  This function
+    reads and hashes pinned inputs but creates no directories and runs no
+    process; the later operator owns endpoint startup and Eval Lab execution.
+    """
+
+    tokenizer_sha256 = _require_sha256(verified_tokenizer_sha256, "verified tokenizer SHA")
+    eval_lab_root = _require_symlink_free(GLM52_EVAL_LAB_ROOT, require_directory=True)
+    suite_path = eval_lab_root / GLM52_EVAL_LAB_SUITE
+    tasks_root = _require_symlink_free(eval_lab_root / GLM52_EVAL_LAB_TASKS, require_directory=True)
+    executable = eval_lab_root / ".venv" / "bin" / "eval-lab"
+    _require_symlink_free(executable)
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise CandidateEvalError("pinned Eval Lab executable is absent or not executable")
+    suite = _load_yaml(suite_path, "Eval Lab suite")
+    suite_id = suite.get("id")
+    if suite_id != "suite.atlas-glm52-heldout.001":
+        raise CandidateEvalError("Eval Lab suite id differs from the pinned GLM suite")
+    ordered = _suite_task_order(suite)
+    indexed = _task_index(tasks_root)
+    missing = set(ordered) - set(indexed)
+    if missing:
+        raise CandidateEvalError("Eval Lab suite references missing held-out tasks")
+    task_tree_sha256 = canonical_directory_sha256(tasks_root)
+    corpus_sha256 = _selected_corpus_sha256(tasks_root, ordered, indexed)
+
+    operation_root = _require_symlink_free(eval_output_root, require_directory=True)
+    request = EvalLabRequest(
+        candidate_artifact_path=compression_handoff.artifact_path,
+        candidate_artifact_sha256=compression_handoff.artifact_sha256,
+        endpoint=EndpointConfigIdentity(
+            endpoint_id="glm52-mixed-gguf-loopback-8892",
+            transport=EndpointTransport.OPENAI_COMPATIBLE,
+            endpoint_url=GLM52_EVAL_ENDPOINT,
+            config_sha256=runtime_canary_handoff.plan.candidate.runtime_config_sha256,
+        ),
+        held_out=FrozenHeldOutManifest(
+            data_partition=DataPartition.HELD_OUT_EVALUATION,
+            task_suite_id=str(suite_id),
+            task_suite_revision=EVAL_LAB_REVISION,
+            task_suite_sha256=_sha256(suite_path),
+            task_definitions_sha256=task_tree_sha256,
+            tracked_task_ids=list(ordered),
+            corpus_sha256=corpus_sha256,
+            tokenizer_sha256=tokenizer_sha256,
+            template_sha256=gguf_embedded_template_identity(compression_handoff.artifact_sha256),
+            evaluation_sample_ids=list(ordered),
+        ),
+        tasks=list(ordered),
+        parameters=EvalParameters(
+            seed=GLM52_EVAL_SEED,
+            temperature=GLM52_EVAL_TEMPERATURE,
+            max_tokens=GLM52_EVAL_MAX_TOKENS,
+            timeout_seconds=GLM52_EVAL_TIMEOUT_SECONDS,
+        ),
+        eval_lab_root=str(eval_lab_root),
+        suite_ref=str(suite_path),
+        tasks_dir=str(tasks_root),
+        runs_root=str(operation_root / "runs"),
+        db_path=str(operation_root / "runstore.db"),
+        model_id=GLM52_EVAL_MODEL,
+        model_name=GLM52_EVAL_MODEL,
+    )
+    return build_candidate_eval_plan(
+        compression_handoff=compression_handoff,
+        runtime_canary_handoff=runtime_canary_handoff,
+        eval_request=request,
+        adapter=EvalLabAdapter(executable=str(executable)),
     )
 
 
@@ -418,6 +669,8 @@ __all__ = [
     "CandidateEvalResult",
     "CandidateEvalTaskEvidence",
     "build_candidate_eval_plan",
+    "build_glm52_candidate_eval_plan",
     "build_task_evidence",
+    "gguf_embedded_template_identity",
     "parse_candidate_eval_runs",
 ]

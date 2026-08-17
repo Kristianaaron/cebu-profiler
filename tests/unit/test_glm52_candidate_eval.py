@@ -5,7 +5,9 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
+from model_atlas.evaluation import glm52_candidate_eval as candidate_eval_module
 from model_atlas.evaluation.eval_lab import (
     DataPartition,
     EndpointConfigIdentity,
@@ -19,7 +21,9 @@ from model_atlas.evaluation.eval_lab import (
 from model_atlas.evaluation.glm52_candidate_eval import (
     CandidateEvalError,
     build_candidate_eval_plan,
+    build_glm52_candidate_eval_plan,
     build_task_evidence,
+    gguf_embedded_template_identity,
     parse_candidate_eval_runs,
 )
 from model_atlas.fit_telemetry import (
@@ -131,6 +135,10 @@ def _request(tmp_path: Path, compression: CompressionHandoff) -> EvalLabRequest:
     (root / ".git" / "refs" / "heads" / "main").write_text(
         "a20da6c6b9cbf872f7c083bffe66afde40c2c8f2\n"
     )
+    executable = root / ".venv" / "bin" / "eval-lab"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
     suite.parent.mkdir(parents=True)
     suite.write_text("tasks:\n  - task_id: synthetic.math\n  - task_id: synthetic.logic\n")
     tasks.mkdir()
@@ -159,7 +167,7 @@ def _request(tmp_path: Path, compression: CompressionHandoff) -> EvalLabRequest:
             endpoint_id="candidate",
             transport=EndpointTransport.OPENAI_COMPATIBLE,
             endpoint_url="http://127.0.0.1:8080/v1",
-            config_sha256="1" * 64,
+            config_sha256="8" * 64,
         ),
         held_out=held_out,
         tasks=["synthetic.math", "synthetic.logic"],
@@ -172,6 +180,10 @@ def _request(tmp_path: Path, compression: CompressionHandoff) -> EvalLabRequest:
         model_id="glm52-candidate",
         model_name="glm52-candidate",
     )
+
+
+def _adapter(request: EvalLabRequest) -> EvalLabAdapter:
+    return EvalLabAdapter(executable=str(Path(request.eval_lab_root) / ".venv/bin/eval-lab"))
 
 
 def _run(request: EvalLabRequest, task_id: str, run_id: str) -> Path:
@@ -204,7 +216,7 @@ def test_plan_binds_verified_lineage_and_exact_argv(tmp_path: Path) -> None:
         compression_handoff=compression,
         runtime_canary_handoff=_canary(compression),
         eval_request=request,
-        adapter=EvalLabAdapter(executable="fake-eval-lab"),
+        adapter=_adapter(request),
     )
     assert plan.compression_handoff_sha256 == compression.handoff_sha256
     assert plan.held_out_manifest_id == request.held_out.manifest_id
@@ -212,7 +224,7 @@ def test_plan_binds_verified_lineage_and_exact_argv(tmp_path: Path) -> None:
     assert plan.tokenizer_sha256 == request.held_out.tokenizer_sha256
     assert plan.parameters == request.parameters
     assert plan.argv == (
-        "fake-eval-lab",
+        str(Path(request.eval_lab_root) / ".venv/bin/eval-lab"),
         "run",
         "suite",
         request.suite_ref,
@@ -250,7 +262,7 @@ def test_parser_requires_current_evidence_and_frozen_manifest(tmp_path: Path) ->
         compression_handoff=compression,
         runtime_canary_handoff=_canary(compression),
         eval_request=request,
-        adapter=EvalLabAdapter(),
+        adapter=_adapter(request),
     )
     evidence = tuple(
         build_task_evidence(task, _run(request, task, run_id))
@@ -273,7 +285,7 @@ def test_plan_rejects_unverified_or_mismatched_handoffs(tmp_path: Path) -> None:
             compression_handoff=compression,
             runtime_canary_handoff=_canary(compression),
             eval_request=request.model_copy(update={"candidate_artifact_sha256": "0" * 64}),
-            adapter=EvalLabAdapter(),
+            adapter=_adapter(request),
         )
     with pytest.raises(CandidateEvalError, match="not evaluation-ready"):
         build_candidate_eval_plan(
@@ -282,5 +294,157 @@ def test_plan_rejects_unverified_or_mismatched_handoffs(tmp_path: Path) -> None:
                 update={"validated_for_evaluation": False}
             ),
             eval_request=request,
-            adapter=EvalLabAdapter(),
+            adapter=_adapter(request),
+        )
+
+
+def _real_default_checkout(tmp_path: Path) -> Path:
+    root = (tmp_path / "eval-lab").resolve()
+    (root / ".git" / "refs" / "heads").mkdir(parents=True)
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (root / ".git" / "refs" / "heads" / "main").write_text(
+        "a20da6c6b9cbf872f7c083bffe66afde40c2c8f2\n"
+    )
+    executable = root / ".venv" / "bin" / "eval-lab"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
+    suite = root / "configs" / "suites" / "atlas-glm52-heldout.yaml"
+    suite.parent.mkdir(parents=True)
+    suite.write_text(
+        "id: suite.atlas-glm52-heldout.001\n"
+        "tasks:\n"
+        "  - task_id: atlas.math\n"
+        "  - task_id: atlas.reasoning\n"
+    )
+    tasks = root / "tasks" / "atlas_glm52_heldout"
+    for directory, task_id, prompt in (
+        ("math", "atlas.math", "What is 2 + 3?\n"),
+        ("reasoning", "atlas.reasoning", "Reply with A.\n"),
+    ):
+        task_root = tasks / directory
+        task_root.mkdir(parents=True)
+        (task_root / "task.yaml").write_text(
+            f"id: {task_id}\n"
+            "data_partition: held_out_evaluation\n"
+            "execution:\n  runner: direct\n  timeout_seconds: 300\n"
+        )
+        (task_root / "prompt.md").write_text(prompt)
+    return root
+
+
+def test_real_default_builder_derives_all_identities_from_fake_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _real_default_checkout(tmp_path)
+    operation_root = (tmp_path / "operation").resolve()
+    operation_root.mkdir()
+    monkeypatch.setattr(candidate_eval_module, "GLM52_EVAL_LAB_ROOT", root)
+    compression = _compression()
+
+    plan = build_glm52_candidate_eval_plan(
+        compression_handoff=compression,
+        runtime_canary_handoff=_canary(compression),
+        eval_output_root=operation_root,
+        verified_tokenizer_sha256="e" * 64,
+    )
+
+    assert plan.eval_request.tasks == ["atlas.math", "atlas.reasoning"]
+    assert str(plan.eval_request.endpoint.endpoint_url) == "http://127.0.0.1:8892/v1"
+    assert plan.eval_request.endpoint.config_sha256 == "8" * 64
+    assert plan.eval_request.parameters == EvalParameters(
+        seed=17, temperature=0.0, max_tokens=96, timeout_seconds=300
+    )
+    assert plan.eval_request.model_id == plan.eval_request.model_name == "glm52-mixed-gguf"
+    assert plan.eval_request.runs_root == str(operation_root / "runs")
+    assert plan.eval_request.db_path == str(operation_root / "runstore.db")
+    assert plan.template_sha256 == gguf_embedded_template_identity("a" * 64)
+    assert plan.argv[0] == str(root / ".venv/bin/eval-lab")
+    assert plan.plan_sha256 is not None
+
+
+def test_real_default_builder_fails_closed_on_revision_and_content_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _real_default_checkout(tmp_path)
+    operation_root = (tmp_path / "operation").resolve()
+    operation_root.mkdir()
+    monkeypatch.setattr(candidate_eval_module, "GLM52_EVAL_LAB_ROOT", root)
+    compression = _compression()
+    canary = _canary(compression)
+
+    (root / ".git/refs/heads/main").write_text("0" * 40 + "\n")
+    with pytest.raises(ValueError, match="pinned revision"):
+        build_glm52_candidate_eval_plan(
+            compression_handoff=compression,
+            runtime_canary_handoff=canary,
+            eval_output_root=operation_root,
+            verified_tokenizer_sha256="e" * 64,
+        )
+    (root / ".git/refs/heads/main").write_text("a20da6c6b9cbf872f7c083bffe66afde40c2c8f2\n")
+    plan = build_glm52_candidate_eval_plan(
+        compression_handoff=compression,
+        runtime_canary_handoff=canary,
+        eval_output_root=operation_root,
+        verified_tokenizer_sha256="e" * 64,
+    )
+    (root / "tasks/atlas_glm52_heldout/math/prompt.md").write_text("changed\n")
+    with pytest.raises(ValidationError, match="tasks tree does not match"):
+        type(plan).model_validate(plan.model_dump(mode="json"))
+
+
+def test_real_default_builder_rejects_symlink_output_and_executable_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _real_default_checkout(tmp_path)
+    operation_root = (tmp_path / "operation").resolve()
+    operation_root.mkdir()
+    linked_operation = tmp_path / "linked-operation"
+    linked_operation.symlink_to(operation_root, target_is_directory=True)
+    monkeypatch.setattr(candidate_eval_module, "GLM52_EVAL_LAB_ROOT", root)
+    compression = _compression()
+    canary = _canary(compression)
+
+    with pytest.raises(CandidateEvalError, match="must not traverse symlinks"):
+        build_glm52_candidate_eval_plan(
+            compression_handoff=compression,
+            runtime_canary_handoff=canary,
+            eval_output_root=linked_operation,
+            verified_tokenizer_sha256="e" * 64,
+        )
+    plan = build_glm52_candidate_eval_plan(
+        compression_handoff=compression,
+        runtime_canary_handoff=canary,
+        eval_output_root=operation_root,
+        verified_tokenizer_sha256="e" * 64,
+    )
+    (root / ".venv/bin/eval-lab").write_text("#!/bin/sh\nexit 1\n")
+    with pytest.raises(ValidationError, match="executable identity changed"):
+        type(plan).model_validate(plan.model_dump(mode="json"))
+
+
+def test_plan_validation_rejects_forged_argv_and_endpoint_binding(tmp_path: Path) -> None:
+    compression = _compression()
+    request = _request(tmp_path, compression)
+    plan = build_candidate_eval_plan(
+        compression_handoff=compression,
+        runtime_canary_handoff=_canary(compression),
+        eval_request=request,
+        adapter=_adapter(request),
+    )
+    payload = plan.model_dump(mode="json")
+    payload["plan_sha256"] = None
+    payload["argv"] = [*plan.argv, "--forged"]
+    with pytest.raises(ValidationError, match="argv differs"):
+        type(plan).model_validate(payload)
+
+    mismatched_request = request.model_copy(
+        update={"endpoint": request.endpoint.model_copy(update={"config_sha256": "0" * 64})}
+    )
+    with pytest.raises(CandidateEvalError, match="endpoint config differs"):
+        build_candidate_eval_plan(
+            compression_handoff=compression,
+            runtime_canary_handoff=_canary(compression),
+            eval_request=mismatched_request,
+            adapter=_adapter(request),
         )
