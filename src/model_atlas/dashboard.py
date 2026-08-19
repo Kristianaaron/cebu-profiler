@@ -1888,6 +1888,12 @@ def render_dashboard(data: dict[str, Any]) -> str:
    function esc(s){{var d=document.createElement('div');d.textContent=s;return d.innerHTML;}}
    function orderIndex(p){{return ['drain','produce','restore','maintenance'].indexOf(p);}}
    var back=document.getElementById('mt-backdrop'), pill=null;
+   // DEBUG: prove the modal JS runs even if other page scripts throw.
+   try {
+     var dbgEl = document.createElement('div'); dbgEl.id='mt-debug';
+     dbgEl.style.cssText='position:fixed;bottom:6px;left:10px;z-index:120;color:#0f0;font:11px monospace';
+     dbgEl.textContent='modal-live-loaded'; (document.body||document).appendChild(dbgEl);
+   } catch(e){}
    function showReset(){{
      document.getElementById('mt-phase').textContent='Maintenance';
      document.getElementById('mt-sub').textContent='No maintenance window running.';
