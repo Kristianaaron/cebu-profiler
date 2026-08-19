@@ -1944,6 +1944,9 @@ def render_dashboard(data: dict[str, Any]) -> str:
        }}
        pill.style.borderColor=col(ph);
        pill.innerHTML='<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:'+col(ph)+';box-shadow:0 0 10px '+col(ph)+';margin-right:9px"></span>'+ph.toUpperCase()+' - DSV4 '+(ph==='restore'?'LOADING':'OFFLINE/BUSY');
+       // auto-open the full maintenance modal when the window is active: it
+       // must KICK IN as an overlay, never open a separate tab.
+       back.style.display='flex';
      }} else if(pill){{ pill.remove(); pill=null; }}
    }}
    document.getElementById('mt-close').addEventListener('click',function(){{ back.style.display='none'; }});
