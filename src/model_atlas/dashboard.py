@@ -1253,7 +1253,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
       .im-modal{{background:#1b1b1b;border:1px solid #2e2e2e;border-radius:10px;max-width:680px;width:100%;padding:24px 26px;color:#dcdcdc;font-family:'Inter',ui-sans-serif,system-ui,sans-serif;box-shadow:0 16px 48px rgba(0,0,0,.55)}}
       .im-modal h2{{margin:0 0 10px;font-size:16px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;letter-spacing:-0.01em}}
       .im-bar{{height:12px;border-radius:4px;background:#262626;overflow:hidden;border:1px solid #353535;margin:14px 0 6px}}
-      .im-bar>div{{height:100%;width:0%;background:#58a6ff;transition:width .5s}}
+      .im-bar>div{{height:100%;width:0%;background:#f4f4f5;transition:width .5s}}
       .im-meta{{display:flex;justify-content:space-between;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;color:#979797;margin-bottom:14px}}
       .im-step{{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #2e2e2e;font-size:14px;color:#dcdcdc}}
       .im-step:last-child{{border-bottom:none}}
