@@ -1837,6 +1837,11 @@ def render_dashboard(data: dict[str, Any]) -> str:
    var M = DATA.maintenance || {{present:false}};
    var body = document.getElementById('maintenance-body');
    if(!body) return;
+   // Failsafe: always auto-open the modal + inline summary whenever a window is active.
+   var mb=document.getElementById('mt-backdrop');
+   if(M && M.present && mb && ['drain','produce','restore'].indexOf(M.phase)>=0){{
+     mb.style.display='flex';
+   }}
    if(!M.present){{ body.innerHTML='<p class="note">No maintenance run recorded. Runs appear here live while draining.</p>'; return; }}
    var phase = M.phase || 'idle';
    var col = phase==='drain'?'#58a6ff':phase==='produce'?'#d29922':phase==='restore'?'#3fb950':phase==='maintenance'?'#a5d6ff':'#8a94a6';
