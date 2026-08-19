@@ -1268,7 +1268,75 @@ def render_dashboard(data: dict[str, Any]) -> str:
  .cap3d-panel .p-tier.good{{color:#c6cdd8}}
  .cap3d-panel .p-tier.moderate{{color:#b08e6b}}
  .cap3d-panel .p-tier.weak{{color:#d0686b}}
-</style></head><body>
+</style></head>    <body>
+    <!-- Isolated maintenance modal (runs before heavy chart scripts) -->
+    <style>
+      .im-backdrop{{position:fixed;inset:0;background:rgba(6,9,14,.72);z-index:9998;display:none;align-items:center;justify-content:center;padding:22px}}
+      .im-modal{{background:#10141c;border:1px solid #2b3443;border-radius:16px;max-width:680px;width:100%;padding:24px 26px;color:#e9edf3;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;box-shadow:0 18px 60px rgba(0,0,0,.6)}}
+      .im-modal h2{{margin:0 0 10px;font-size:17px}}
+      .im-bar{{height:12px;border-radius:7px;background:#1a212d;overflow:hidden;border:1px solid #2b3443;margin:14px 0 6px}}
+      .im-bar>div{{height:100%;width:0%;background:linear-gradient(90deg,#58a6ff,#79c0ff);transition:width .5s}}
+      .im-meta{{display:flex;justify-content:space-between;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;color:#9aa4b2;margin-bottom:14px}}
+      .im-step{{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #1d2430;font-size:14px}}
+      .im-step:last-child{{border-bottom:none}}
+      .im-dot{{width:10px;height:10px;border-radius:50%;background:#2b3443;flex:0 0 auto}}
+      .im-dot.on{{background:#58a6ff;box-shadow:0 0 10px #58a6ff}}
+      .im-dot.done{{background:#3fb950}}
+      .im-tag{{display:inline-block;background:#1a212d;border:1px solid #2b3443;border-radius:14px;padding:3px 10px;font-size:12px;color:#c6d0e0;margin:2px 4px 2px 0}}
+      .im-time{{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;color:#9aa4b2;margin-top:12px}}
+    </style>
+    <div class="im-backdrop" id="im-backdrop"><div class="im-modal">
+      <h2>Maintenance <span id="im-chip" style="font-size:13px;color:#7c8798"></span></h2>
+      <div id="im-status" style="color:#9aa4b2;font-size:13px;margin-bottom:4px">No window running.</div>
+      <div class="im-bar"><div id="im-fill"></div></div>
+      <div class="im-meta"><span id="im-shards"></span><span id="im-time"></span></div>
+      <div class="im-step"><span class="im-dot" id="im-s-drain"></span>1 &middot; Drain</div>
+      <div class="im-step"><span class="im-dot" id="im-s-produce"></span>2 &middot; Produce</div>
+      <div class="im-step"><span class="im-dot" id="im-s-restore"></span>3 &middot; Restore / reload</div>
+      <div id="im-resume" class="im-time"></div>
+    </div></div>
+    <script>
+    (function(){{
+      var BACK=document.getElementById('im-backdrop');
+      function fmt(s){{s=Math.max(0,Math.floor(s||0));var m=Math.floor(s/60),r=s%60;return m+':'+(r<10?'0':'')+r;}}
+      function col(p){{return p==='drain'?'#58a6ff':p==='produce'?'#d29922':p==='restore'?'#3fb950':p==='maintenance'?'#3fb950':'#7c8798';}}
+      function step(k,ph){{
+        var o=['drain','produce','restore','maintenance'].indexOf(ph);
+        var ik=['drain','produce','restore'].indexOf(k);
+        var el=document.getElementById('im-s-'+k);
+        el.className='im-dot'+(ph===k?' on':(o>ik?' done':''));
+      }}
+      function render(M){{
+        var ph=(M&&M.phase)||'idle';
+        var active=ph==='drain'||ph==='produce'||ph==='restore';
+        if(!(M&&M.present)||(!active&&ph!=='maintenance')){{ BACK.style.display='none'; return; }}
+        BACK.style.display='flex';
+        var c=col(ph);
+        document.getElementById('im-chip').textContent=ph.toUpperCase();
+        document.getElementById('im-chip').style.color=c;
+        document.getElementById('im-status').textContent=M.status||(M.phase_label||ph);
+        var tot=M.shard_total||0;
+        if(ph==='restore'||ph==='maintenance'){{
+          var pct=tot?Math.round(100*(M.shard_current||0)/tot):(ph==='maintenance'?100:0);
+          document.getElementById('im-fill').style.width=Math.min(100,Math.max(0,pct))+'%';
+          document.getElementById('im-shards').textContent=tot?('DSV4 shards '+(M.shard_current||0)+'/'+tot+' ('+pct+'%)'):'';
+        }} else {{
+          document.getElementById('im-fill').style.width='0%';
+          document.getElementById('im-shards').textContent='';
+        }}
+        document.getElementById('im-time').textContent='elapsed '+fmt(M.elapsed_seconds)+(active?' &middot; remaining '+fmt(M.phase_remaining_seconds):'');
+        step('drain',ph); step('produce',ph); step('restore',ph);
+        var rs=''; if(M.loaded&&M.loaded.length) rs+='Resumed: '+M.loaded.join(', ');
+        if(M.result){{ var dv=(M.result||'').split('success=')[1]; rs+=(rs?' &middot; ':'')+'success='+dv; }}
+        document.getElementById('im-resume').innerHTML=rs||'';
+      }}
+      (function poll(){{
+        if(location.protocol.indexOf('http')!==0) return;
+        fetch('/api/status',{{cache:'no-store'}}).then(function(r){{return r.json();}})
+          .then(render).catch(function(){{}}).then(function(){{setTimeout(poll,2000);}});
+      }})();
+    }})();
+    </script>
 <div class="layout">
 <nav class="side">{tab_html}</nav>
 <div class="col">
