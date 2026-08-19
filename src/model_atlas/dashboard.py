@@ -1837,11 +1837,6 @@ def render_dashboard(data: dict[str, Any]) -> str:
    var M = DATA.maintenance || {{present:false}};
    var body = document.getElementById('maintenance-body');
    if(!body) return;
-   // Failsafe: always auto-open the modal + inline summary whenever a window is active.
-   var mb=document.getElementById('mt-backdrop');
-   if(M && M.present && mb && ['drain','produce','restore'].indexOf(M.phase)>=0){{
-     mb.style.display='flex';
-   }}
    if(!M.present){{ body.innerHTML='<p class="note">No maintenance run recorded. Runs appear here live while draining.</p>'; return; }}
    var phase = M.phase || 'idle';
    var col = phase==='drain'?'#58a6ff':phase==='produce'?'#d29922':phase==='restore'?'#3fb950':phase==='maintenance'?'#a5d6ff':'#8a94a6';
@@ -1888,12 +1883,6 @@ def render_dashboard(data: dict[str, Any]) -> str:
    function esc(s){{var d=document.createElement('div');d.textContent=s;return d.innerHTML;}}
    function orderIndex(p){{return ['drain','produce','restore','maintenance'].indexOf(p);}}
    var back=document.getElementById('mt-backdrop'), pill=null;
-   // DEBUG: prove the modal JS runs even if other page scripts throw.
-   try {
-     var dbgEl = document.createElement('div'); dbgEl.id='mt-debug';
-     dbgEl.style.cssText='position:fixed;bottom:6px;left:10px;z-index:120;color:#0f0;font:11px monospace';
-     dbgEl.textContent='modal-live-loaded'; (document.body||document).appendChild(dbgEl);
-   } catch(e){}
    function showReset(){{
      document.getElementById('mt-phase').textContent='Maintenance';
      document.getElementById('mt-sub').textContent='No maintenance window running.';
