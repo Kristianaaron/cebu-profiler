@@ -183,6 +183,7 @@ def main() -> int:
         receipt_path=args.receipt,
         head_runtime_unit=HEAD_TRANSIENT_UNIT,
         worker_rpc_unit=WORKER_TRANSIENT_UNIT,
+        dsv4_model_shards=48,
     )
     previous = install_signal_traps()
     try:
