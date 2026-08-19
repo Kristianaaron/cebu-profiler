@@ -1072,28 +1072,6 @@ def render_dashboard(data: dict[str, Any]) -> str:
  nav.side .tab:hover{{background:#262626}}
  nav.side .tab.active{{color:#dfdfdf;background:#262626}}
  main.main{{flex:1;padding:22px 26px}}
- .panel{{display:none}} .panel.active{{display:block}}
- /* maintenance modal (overlay) */
- .mt-backdrop{{position:fixed;inset:0;background:rgba(6,9,14,.68);z-index:90;display:flex;align-items:center;justify-content:center;padding:24px}}
- .mt-modal{{background:#10141c;border:1px solid #2b3443;border-radius:16px;max-width:680px;width:100%;padding:24px 26px;box-shadow:0 18px 60px rgba(0,0,0,.55);position:relative;z-index:91}}
- .mt-modal h2{{margin:0 0 14px;font-size:17px;letter-spacing:.3px}}
- .mt-close{{position:absolute;top:14px;right:16px;background:none;border:none;color:#7c8798;font-size:20px;cursor:pointer;line-height:1}}
- .mt-close:hover{{color:#fff}}
- .mt-chip{{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:8px}}
- .mt-step{{display:flex;align-items:center;gap:14px;padding:10px 0;border-bottom:1px solid #1d2430}}
- .mt-step:last-child{{border-bottom:none}}
- .mt-spin{{width:28px;height:28px;border:3px solid rgba(255,255,255,.12);border-top-color:#58a6ff;border-radius:50%;animation:mtspin 1s linear infinite;flex:0 0 auto;visibility:hidden}}
- .mt-spin.on{{visibility:visible}}
- .mt-spin.done{{animation:none;border-color:#3fb950;visibility:visible;color:#3fb950}}
- @keyframes mtspin{{to{{transform:rotate(360deg)}}}}
- .mt-lbl{{font-size:14.5px;font-weight:600}}
- .mt-sub{{color:#7c8798;font-size:12.5px;margin-top:2px}}
- .mt-bar{{height:12px;border-radius:7px;background:#1a212d;overflow:hidden;border:1px solid #2b3443;margin:16px 0 6px}}
- .mt-bar>div{{height:100%;width:0%;background:linear-gradient(90deg,#58a6ff,#79c0ff);transition:width .5s}}
- .mt-time{{display:flex;justify-content:space-between;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;color:#7c8798}}
- .mt-tags{{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}}
- .mt-tag{{background:#1a212d;border:1px solid #2b3443;border-radius:16px;padding:3px 10px;font-size:12px;color:#c6d0e0}}
- .mt-note{{color:#7c8798;font-size:12px;margin-top:8px}}
  table{{border-collapse:collapse;width:100%;font-size:13px;margin-top:8px}}
  th,td{{text-align:left;padding:6px 10px;border-bottom:1px solid #2b2b2b}}
  th{{color:#979797;font-weight:600}}
@@ -1944,118 +1922,8 @@ def render_dashboard(data: dict[str, Any]) -> str:
  function esc(s){{ var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }}
  document.querySelector('.tab').classList.add('active');
 
- // ---- Maintenance MODAL (live overlay) ----
- (function(){{
-   function col(p){{return p==='drain'?'#58a6ff':p==='produce'?'#d29922':p==='restore'?'#3fb950':p==='maintenance'?'#3fb950':'#7c8798';}}
-   function fmt(s){{s=Math.max(0,Math.floor(s||0));var m=Math.floor(s/60),r=s%60;return m+':'+(r<10?'0':'')+r;}}
-   function esc(s){{var d=document.createElement('div');d.textContent=s;return d.innerHTML;}}
-   function orderIndex(p){{return ['drain','produce','restore','maintenance'].indexOf(p);}}
-   var back=document.getElementById('mt-backdrop'), pill=null;
-   function showReset(){{
-     document.getElementById('mt-phase').textContent='Maintenance';
-     document.getElementById('mt-sub').textContent='No maintenance window running.';
-     document.getElementById('mt-chip').style.background='#7c8798';
-     document.getElementById('mt-fill').style.width='0%';
-     document.getElementById('mt-shards').textContent='';
-     document.getElementById('mt-time').textContent='';
-     document.getElementById('mt-resume').style.display='none';
-     ['drain','produce','restore'].forEach(function(k){{
-       document.getElementById('mt-sp-'+k).className='mt-spin';
-       document.getElementById('mt-sub-'+k).style.color='';
-     }});
-   }}
-   function step(k,label,cur){{
-     var sp=document.getElementById('mt-sp-'+k), sub=document.getElementById('mt-sub-'+k);
-     sp.className='mt-spin'; sp.classList.remove('done','on');
-     if(cur===k){{ sp.classList.add('on'); sub.style.color='#58a6ff'; }}
-     else if(orderIndex(cur)>orderIndex(k)){{ sp.classList.add('done'); sub.style.color='#3fb950'; }}
-     else {{ sub.style.color=''; }}
-   }}
-   function render(){{
-     var M=(typeof LIVE!=="undefined"&&LIVE)?LIVE:(DATA.maintenance||{{present:false}});
-     if(!M.present){{ showReset(); if(pill){{pill.remove();pill=null;}} return; }}
-     var ph=M.phase||'idle', active=['drain','produce','restore'].indexOf(ph)>=0;
-     document.getElementById('mt-chip').style.background=col(ph);
-     document.getElementById('mt-phase').textContent=
-       (ph==='idle'?'Maintenance':(ph.charAt(0).toUpperCase()+ph.slice(1))+(ph==='maintenance'?' \u00b7 complete':''));
-     document.getElementById('mt-sub').textContent=M.status||(M.phase_label||ph);
-     var tot=M.shard_total||0;
-     if(ph==='restore'||ph==='maintenance'){{
-       var pct=tot?Math.round(100*M.shard_current/tot):(ph==='maintenance'?100:0);
-       document.getElementById('mt-fill').style.width=Math.min(100,Math.max(0,pct))+'%';
-       document.getElementById('mt-shards').textContent=tot?('DSV4 shards '+M.shard_current+'/'+tot+' ('+pct+'%)'):'';
-     }} else {{
-       document.getElementById('mt-fill').style.width='0%';
-       document.getElementById('mt-shards').textContent='';
-     }}
-     document.getElementById('mt-time').textContent=
-       'elapsed '+fmt(M.elapsed_seconds)+(active?' \u00b7 remaining '+fmt(M.phase_remaining_seconds):'');
-     step('drain','1 \u00b7 Drain',ph);
-     step('produce','2 \u00b7 Produce',ph);
-     step('restore','3 \u00b7 Restore',ph);
-     if(M.produce_method){{ document.getElementById('mt-sub-produce').textContent='method '+M.produce_method; }}
-     if(M.released&&M.released.length){{ document.getElementById('mt-sub-drain').textContent='released: '+M.released.join(', '); }}
-     if(ph==='restore'&&M.loaded&&M.loaded.length){{ document.getElementById('mt-sub-restore').textContent='loaded: '+M.loaded.join(', '); }}
-     var rs=document.getElementById('mt-resume');
-     if(M.result||ph==='restore'){{
-       rs.style.display='block';
-       var tags=(M.loaded&&M.loaded.length?M.loaded:['DSV4']);
-       document.getElementById('mt-resume-tags').innerHTML=tags.map(function(s){{return '<span class="mt-tag">'+esc(s)+'</span>';}}).join('');
-       document.getElementById('mt-resume-shards').textContent=tot?('DSV4 '+M.shard_current+'/'+tot+' shards loaded.'):'';
-     }} else {{ rs.style.display='none'; }}
-     if(active){{
-       if(!pill){{
-         pill=document.createElement('div'); pill.id='mt-pill';
-         pill.style.cssText='position:fixed;top:14px;right:18px;z-index:95;background:#10141c;border:1px solid '+col(ph)+';color:#e9edf3;padding:8px 14px;border-radius:20px;font-family:monospace;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 4px 18px rgba(0,0,0,.4)';
-         pill.onclick=function(){{ back.style.display='flex'; }};
-         document.body.appendChild(pill);
-       }}
-       pill.style.borderColor=col(ph);
-       pill.innerHTML='<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:'+col(ph)+';box-shadow:0 0 10px '+col(ph)+';margin-right:9px"></span>'+ph.toUpperCase()+' - DSV4 '+(ph==='restore'?'LOADING':'OFFLINE/BUSY');
-       // auto-open the full maintenance modal when the window is active: it
-       // must KICK IN as an overlay, never open a separate tab.
-       back.style.display='flex';
-     }} else if(pill){{ pill.remove(); pill=null; }}
-   }}
-   document.getElementById('mt-close').addEventListener('click',function(){{ back.style.display='none'; }});
-   document.getElementById('mt-backdrop').addEventListener('click',function(e){{ if(e.target===back) back.style.display='none'; }});
-   render();
-   setInterval(render,2000);
- }})();
-   // live tail over the tunnel: poll /api/status when available
-   var LIVE=null;
-   (function poll(){{
-     if(location.protocol.indexOf('http')!==0){{ return; }}  // file:// has no API
-     fetch('/api/status',{{cache:'no-store'}}).then(function(r){{return r.json();}})
-       .then(function(j){{ LIVE=j; render(LIVE); }})
-       .catch(function(){{ /* watcher offline; keep snapshot */ }})
-       .then(function(){{ setTimeout(poll,2000); }});
-   }})();
-
- document.getElementById('panel-summary').classList.add('active');
+  document.getElementById('panel-summary').classList.add('active');
 </script>
-<div class="mt-backdrop" id="mt-backdrop" style="display:none">
-  <div class="mt-modal">
-    <button class="mt-close" id="mt-close" title="Close">&times;</button>
-    <h2><span class="mt-chip" id="mt-chip" style="background:#7c8798"></span><span id="mt-phase">Maintenance</span></h2>
-    <div class="mt-note" id="mt-sub">No maintenance window running.</div>
-    <div class="mt-bar"><div id="mt-fill"></div></div>
-    <div class="mt-time"><span id="mt-shards"></span><span id="mt-time"></span></div>
-
-    <div class="mt-step"><span class="mt-spin" id="mt-sp-drain"></span>
-      <div><div class="mt-lbl">1 &middot; Drain</div><div class="mt-sub" id="mt-sub-drain">release 4 services + DSV4</div></div></div>
-    <div class="mt-step"><span class="mt-spin" id="mt-sp-produce"></span>
-      <div><div class="mt-lbl">2 &middot; Produce</div><div class="mt-sub" id="mt-sub-produce">derivative / capture / KLD</div></div></div>
-    <div class="mt-step"><span class="mt-spin" id="mt-sp-restore"></span>
-      <div><div class="mt-lbl">3 &middot; Restore</div><div class="mt-sub" id="mt-sub-restore">reload DSV4 + prior services</div></div></div>
-
-    <div id="mt-resume" style="display:none">
-      <div class="mt-lbl" style="margin-top:14px">Resumed what was running before</div>
-      <div class="mt-tags" id="mt-resume-tags"></div>
-      <div class="mt-note" id="mt-resume-shards"></div>
-    </div>
-  </div>
-</div>
 </body></html>"""
 
 
