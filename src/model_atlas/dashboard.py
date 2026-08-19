@@ -1922,9 +1922,9 @@ def render_dashboard(data: dict[str, Any]) -> str:
      }}
      document.getElementById('mt-time').textContent=
        'elapsed '+fmt(M.elapsed_seconds)+(active?' \u00b7 remaining '+fmt(M.phase_remaining_seconds):'');
-     step('drain','1 \u00b7 Drain');
-     step('produce','2 \u00b7 Produce');
-     step('restore','3 \u00b7 Restore');
+     step('drain','1 \u00b7 Drain',ph);
+     step('produce','2 \u00b7 Produce',ph);
+     step('restore','3 \u00b7 Restore',ph);
      if(M.produce_method){{ document.getElementById('mt-sub-produce').textContent='method '+M.produce_method; }}
      if(M.released&&M.released.length){{ document.getElementById('mt-sub-drain').textContent='released: '+M.released.join(', '); }}
      if(ph==='restore'&&M.loaded&&M.loaded.length){{ document.getElementById('mt-sub-restore').textContent='loaded: '+M.loaded.join(', '); }}
