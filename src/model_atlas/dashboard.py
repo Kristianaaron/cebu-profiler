@@ -1904,7 +1904,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
      else {{ sub.style.color=''; }}
    }}
    function render(){{
-     var M=DATA.maintenance||{{present:false}};
+     var M=(typeof LIVE!=="undefined"&&LIVE)?LIVE:(DATA.maintenance||{{present:false}});
      if(!M.present){{ showReset(); if(pill){{pill.remove();pill=null;}} return; }}
      var ph=M.phase||'idle', active=['drain','produce','restore'].indexOf(ph)>=0;
      document.getElementById('mt-chip').style.background=col(ph);
@@ -1951,6 +1951,16 @@ def render_dashboard(data: dict[str, Any]) -> str:
    render();
    setInterval(render,2000);
  }})();
+   // live tail over the tunnel: poll /api/status when available
+   var LIVE=null;
+   (function poll(){{
+     if(location.protocol.indexOf('http')!==0){{ return; }}  // file:// has no API
+     fetch('/api/status',{{cache:'no-store'}}).then(function(r){{return r.json();}})
+       .then(function(j){{ LIVE=j; render(LIVE); }})
+       .catch(function(){{ /* watcher offline; keep snapshot */ }})
+       .then(function(){{ setTimeout(poll,2000); }});
+   }})();
+
  document.getElementById('panel-summary').classList.add('active');
 </script>
 <div class="mt-backdrop" id="mt-backdrop" style="display:none">
