@@ -1896,11 +1896,11 @@ def render_dashboard(data: dict[str, Any]) -> str:
        document.getElementById('mt-sub-'+k).style.color='';
      }});
    }}
-   function step(k,label){{
+   function step(k,label,cur){{
      var sp=document.getElementById('mt-sp-'+k), sub=document.getElementById('mt-sub-'+k);
      sp.className='mt-spin'; sp.classList.remove('done','on');
-     if(ph===k){{ sp.classList.add('on'); sub.style.color='#58a6ff'; }}
-     else if(orderIndex(ph)>orderIndex(k)){{ sp.classList.add('done'); sub.style.color='#3fb950'; }}
+     if(cur===k){{ sp.classList.add('on'); sub.style.color='#58a6ff'; }}
+     else if(orderIndex(cur)>orderIndex(k)){{ sp.classList.add('done'); sub.style.color='#3fb950'; }}
      else {{ sub.style.color=''; }}
    }}
    function render(){{
