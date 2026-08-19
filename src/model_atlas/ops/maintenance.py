@@ -226,6 +226,47 @@ class SubprocessCommandRunner:
         returncode = process.wait()
         return CommandResult(returncode=returncode, stdout=stdout)
 
+    def run_streaming(
+        self, argv: Sequence[str], on_line: Callable[[str], None]
+    ) -> CommandResult:
+        """Run argv, calling ``on_line`` with each non-empty stdout line as it
+        appears (used to stream the restored model's loader shard progress).
+
+        Same group-reaping safety contract as :meth:`run` for interrupts.
+        """
+        process = self._process_factory(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        lines: list[str] = []
+        try:
+            assert process.stdout is not None
+            for raw in process.stdout:
+                line = raw.rstrip()
+                if not line:
+                    continue
+                lines.append(line)
+                try:
+                    on_line(line)
+                except BaseException:
+                    pass  # a progress sink must never break the restore
+            stdout = "\n".join(lines)
+        except BaseException:
+            try:
+                self._reap_group(process)
+            except ProcessGroupQuiescenceError:
+                raise
+            except BaseException as exc:
+                raise ProcessGroupQuiescenceError(
+                    "payload process group cleanup could not be proven"
+                ) from exc
+            raise
+        returncode = process.wait()
+        return CommandResult(returncode=returncode, stdout=stdout)
+
 
 class BinaryHash(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -635,6 +676,55 @@ class MaintenanceCoordinator:
         self._restored.add(key)
         self._emit(phase="restore", status="load", service=key)
 
+    def _restore_dsv4(self) -> None:
+        """Restore DSV4, streaming its loader output for live shard progress.
+
+        Records the same action receipt as any restore (audit unchanged). When
+        shard progress is configured, executing, and the runner supports
+        streaming, uses ``run_streaming`` so vLLM's per-shard load lines emit a
+        live ``N/M`` bar. Best-effort: a streaming failure never fails restore.
+        """
+        if "dsv4" in self._restored:
+            return
+        previously_active = self._states["dsv4"].active
+        argv = [str(self.config.dsv4_start_script)]
+        start = self.clock()
+        success = True
+        evidence = "return_code=0"
+        streamed = False
+        if self.execute and previously_active:
+            if self.config.dsv4_model_shards and hasattr(self.runner, "run_streaming"):
+                try:
+                    result = self.runner.run_streaming(argv, self.report_shard_progress)
+                    self.report_shard_progress(result.stdout or "")
+                    success = result.returncode == 0
+                    evidence = "return_code=0" if success else f"return_code={result.returncode}"
+                    streamed = True
+                except BaseException as exc:
+                    if isinstance(exc, ProcessGroupQuiescenceError):
+                        raise
+                    success = False
+                    evidence = f"exception_type={type(exc).__name__}"
+            if not streamed:
+                result = self._command(argv)
+                success = result.returncode == 0
+                evidence = "return_code=0" if success else f"return_code={result.returncode}"
+        self._restored.add("dsv4")
+        self._actions.append(
+            ActionReceipt(
+                action_id="restore_dsv4",
+                target=str(self.config.dsv4_start_script),
+                requested=previously_active,
+                executed=bool(self.execute and previously_active),
+                success=success if previously_active else True,
+                started_at=start,
+                finished_at=self.clock(),
+                evidence=evidence,
+            )
+        )
+        if previously_active or not self.execute:
+            self._emit(phase="restore", status="load", service="dsv4")
+
     def restore(self) -> None:
         """Best-effort, idempotent rollback; every transition is attempted."""
         if self._restore_completed:
@@ -689,12 +779,7 @@ class MaintenanceCoordinator:
                 self.config.head_runtime_unit,
                 ["systemctl", "--user", "start", self.config.head_runtime_unit],
             )
-            self._restore_action(
-                "dsv4",
-                "restore_dsv4",
-                str(self.config.dsv4_start_script),
-                [str(self.config.dsv4_start_script)],
-            )
+            self._restore_dsv4()
             if self.config.dsv4_model_shards:
                 self._emit(
                     phase="restore",
