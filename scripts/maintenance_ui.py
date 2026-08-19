@@ -62,7 +62,21 @@ def _ts(ts: object) -> float | None:
         return None
 
 
-def _status(journal: Path) -> dict:
+def _resolve_journal(journal_arg: Path) -> Path:
+    """Resolve the journal dir: use the arg directly if it already holds
+    maintenance-events.jsonl, else the newest subdir that does."""
+    if (journal_arg / "maintenance-events.jsonl").exists():
+        return journal_arg
+    hits = sorted(
+        (p.parent for p in journal_arg.rglob("maintenance-events.jsonl")),
+        key=lambda p: (p / "maintenance-events.jsonl").stat().st_mtime,
+        reverse=True,
+    )
+    return hits[0] if hits else journal_arg
+
+
+def _status(journal_arg: Path) -> dict:
+    journal = _resolve_journal(journal_arg)
     events = _read_events(journal / "maintenance-events.jsonl")
     now = datetime.now(UTC).timestamp()
 
