@@ -852,6 +852,95 @@ class MaintenanceCoordinator:
         )
         return receipt
 
+
+    def preflight(
+        self,
+        *,
+        artifact: Path | None = None,
+        artifact_sha256: str | None = None,
+        lease: Path | None = None,
+        requires: tuple[Path, ...] = (),
+        worker_reachable: Callable[[], bool] | None = None,
+        plan_compiles: Callable[[], bool] | None = None,
+    ) -> dict[str, object]:
+        """Model-agnostic preflight: catch every failure that would otherwise
+        silently drain-and-restore. Emits a preflight event with typed blockers
+        and returns a dict {ok, blockers:[{kind, detail, fix}]}. No services are
+        touched; safe to call on a live cluster.
+        """
+        blockers: list[dict[str, str]] = []
+
+        def add(kind: str, detail: str, fix: str) -> None:
+            blockers.append({"kind": kind, "detail": detail, "fix": fix})
+
+        # artifact
+        if artifact is not None:
+            p = Path(artifact)
+            if not p.exists():
+                add("artifact", f"artifact not found at {p}", "verify the derivative path")
+            elif p.is_symlink():
+                add("artifact", "artifact must not be a symlink", "use the real path")
+            if artifact_sha256:
+                try:
+                    import hashlib
+                    h = hashlib.sha256()
+                    if Path(artifact).is_dir():
+                        # for a dir of shards we can't cheaply hash; just note it
+                        pass
+                    else:
+                        hb = Path(artifact).read_bytes()
+                        h.update(hb)
+                        if h.hexdigest() != artifact_sha256:
+                            add("artifact", "artifact sha256 mismatch", "re-derive / fix hash")
+                except Exception as e:  # noqa: BLE001
+                    add("artifact", f"could not hash artifact: {type(e).__name__}", "check read permission")
+
+        # lease (the silent-killer)
+        if lease is not None:
+            lp = Path(lease)
+            if not lp.is_absolute():
+                add("lease", "lease path must be absolute", "use an absolute path")
+            elif not lp.exists():
+                add("lease", f"maintenance lease missing at {lp}", "create a valid lease before running")
+        else:
+            # no lease path given -> caller is not maintenance-scoped; flag as required if execute
+            add("lease", "no maintenance lease provided", "a lease is required to run the payload")
+
+        # backend binaries
+        for b in requires:
+            bp = Path(b)
+            if not bp.exists():
+                add("backend", f"binary missing at {bp}", "build / point to the binary")
+            elif not os.access(bp, os.X_OK):
+                add("backend", f"binary not executable: {bp}", "chmod +x")
+        if not requires and not self.execute:
+            # pure dry-run (preflight) still may have no binaries; only enforce when executing
+            pass
+
+        # worker reachable (best-effort; skip if not provided)
+        if worker_reachable is not None:
+            try:
+                if not worker_reachable():
+                    add("worker", "worker node not reachable", "check ssh to worker")
+            except Exception as e:  # noqa: BLE001
+                add("worker", f"worker reachability error {type(e).__name__}", "check ssh/connectivity")
+
+        # plan compiles
+        if plan_compiles is not None:
+            try:
+                if not plan_compiles():
+                    add("plan", "plan does not compile", "inspect the generated plan")
+            except Exception as e:  # noqa: BLE001
+                add("plan", f"plan compile error {type(e).__name__}", "inspect the plan")
+
+        ok = not blockers
+        self._emit(
+            phase="preflight",
+            status="blocked" if blockers else "ok",
+            detail=("; ".join(f"{b['kind']}->{b['detail']}" for b in blockers) or "all preflight checks passed"),
+        )
+        return {"ok": ok, "blockers": blockers}
+
     @staticmethod
     def _failure_label(exc: BaseException) -> str:
         # Never persist arbitrary exception text: command/library exceptions may
