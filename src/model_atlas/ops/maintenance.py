@@ -358,18 +358,36 @@ class MaintenanceCoordinator:
         # genuinely not running, so it is not a consumer to drain or restore.
         if result.returncode in (3, 4):
             return False
+        # transient systemd failure -> retry a couple of times before failing closed
+        for _attempt in range(2):
+            import time
+            time.sleep(0.6)
+            result = self._command(command)
+            if result.returncode == 0:
+                return True
+            if result.returncode in (3, 4):
+                return False
         raise MaintenanceFailure("unit liveness is unknown")
 
     def _container_active(self, name: str) -> bool:
-        result = self._command(["docker", "inspect", "--format", "{{.State.Running}}", name])
-        if result.returncode != 0:
-            raise MaintenanceFailure("container liveness is unknown")
-        state = result.stdout.strip()
-        if state == "true":
-            return True
-        if state == "false":
-            return False
-        raise MaintenanceFailure("container liveness is malformed")
+        last_rc: int | None = None
+        for _attempt in range(3):
+            result = self._command(["docker", "inspect", "--format", "{{.State.Running}}", name])
+            last_rc = result.returncode
+            if result.returncode == 0:
+                state = result.stdout.strip()
+                if state == "true":
+                    return True
+                if state == "false":
+                    return False
+                # malformed output: retry a little
+                continue
+            # transient docker failure (daemon hiccup / container being recreated):
+            # retry; if the container is genuinely gone, non-zero persists -> fail
+            # closed below after retries.
+            import time
+            time.sleep(0.8)
+        raise MaintenanceFailure(f"container liveness is unknown (rc={last_rc})")
 
     def _snapshot(self) -> None:
         observed = self.clock()
