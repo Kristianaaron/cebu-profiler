@@ -1072,6 +1072,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  nav.side .tab:hover{{background:#262626}}
  nav.side .tab.active{{color:#dfdfdf;background:#262626}}
  main.main{{flex:1;padding:22px 26px}}
+ .panel{{display:none}} .panel.active{{display:block}}
  table{{border-collapse:collapse;width:100%;font-size:13px;margin-top:8px}}
  th,td{{text-align:left;padding:6px 10px;border-bottom:1px solid #2b2b2b}}
  th{{color:#979797;font-weight:600}}
