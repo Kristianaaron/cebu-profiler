@@ -120,6 +120,15 @@ def _status(journal_arg: Path) -> dict:
     phase_elapsed = max(0.0, now - phase_start)
     phase_dur = PHASE_DURATION_S.get(current, 120)
 
+    # derive preflight blockers (if any) so the UX can show a BLOCKED state
+    blockers: list[dict] = []
+    preflight_ev = [e for e in events if e.get("phase") == "preflight" and e.get("status") == "blocked"]
+    if preflight_ev:
+        detail = preflight_ev[-1].get("detail") or ""
+        for part in detail.split(";"):
+            if ">" in part:
+                kind, _, rest = part.partition(">")
+                blockers.append({"kind": kind.strip(), "detail": rest.strip()})
     return {
         "present": bool(events),
         "phase": current,
@@ -158,102 +167,114 @@ def _status_text(events: list[dict], current: str) -> str:
 WATCHER_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Atlas · Maintenance</title>
+<title>Atlas · Pipeline</title>
 <style>
-  :root{--bg:#0b0e14;--card:#12161f;--line:#232a38;--tx:#dbe3f0;--mut:#7c8798;
-        --blue:#58a6ff;--amber:#d29922;--green:#3fb950;}
+  :root{--bg:#0b0e14;--card:#12161f;--line:#232a38;--tx:#e6edf7;--mut:#8a94a6;
+        --blue:#58a6ff;--amber:#d29922;--green:#3fb950;--red:#f85149;--hot:#f4f4f5}
   *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);
-    font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
-  .wrap{max-width:760px;margin:0 auto;padding:40px 22px}
-  h1{font-size:20px;letter-spacing:.4px;margin:0 0 4px}
-  .sub{color:var(--mut);font-size:13px;margin-bottom:26px}
+    font-family:'Inter',ui-sans-serif,system-ui,sans-serif}
+  .wrap{max-width:760px;margin:0 auto;padding:36px 22px}
+  h1{font-size:19px;letter-spacing:.4px;margin:0 0 4px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}
+  .sub{color:var(--mut);font-size:13px;margin-bottom:22px}
   .card{background:var(--card);border:1px solid var(--line);border-radius:14px;
-        padding:22px;margin-bottom:16px}
-  .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:8px}
-  .pulse{animation:pulse 1.1s infinite}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
-  .bar{height:14px;border-radius:8px;background:#1a212d;overflow:hidden;margin:12px 0 6px;
-       border:1px solid var(--line)}
-  .bar>div{height:100%;width:0%;background:linear-gradient(90deg,var(--blue),#79c0ff);
-       transition:width .5s}
-  .meta{display:flex;justify-content:space-between;font-family:ui-monospace,Menlo,monospace;
-        font-size:12.5px;color:var(--mut)}
-  .tag{display:inline-block;background:#1a212d;border:1px solid var(--line);
-       border-radius:20px;padding:3px 11px;font-size:12px;color:var(--mut);margin:2px 4px 2px 0}
-  .muted{color:var(--mut)}.big{font-size:15px;font-weight:600}
-  .spinner{width:34px;height:34px;border:4px solid rgba(255,255,255,.12);
-       border-top-color:var(--blue);border-radius:50%;animation:spin 1s linear infinite;
-       display:inline-block}
-  @keyframes spin{to{transform:rotate(360deg)}}
-  .row{display:flex;align-items:center;gap:14px}
-  #notify{position:fixed;inset:0;background:rgba(4,6,10,.55);display:none;
-       align-items:center;justify-content:center;z-index:50}
-  #notify .box{background:var(--card);border:1px solid var(--green);border-radius:14px;
-       padding:26px;max-width:420px;text-align:center}
+        padding:22px;margin-bottom:14px}
+  .state{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:13px;color:var(--mut);margin-bottom:6px}
+  .status{color:var(--mut);font-size:13px;margin-bottom:10px}
+  .bar{height:6px;border-radius:3px;background:#1d2532;overflow:hidden;border:1px solid var(--line);margin:12px 0 6px}
+  .bar>div{height:100%;width:0%;background:var(--hot);transition:width .4s}
+  .meta{display:flex;justify-content:space-between;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--mut)}
+  .steps{display:flex;flex-direction:column;gap:2px}
+  .step{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);font-size:14px}
+  .step:last-child{border-bottom:none}
+  .dot{width:10px;height:10px;border-radius:50%;background:#2b3443;flex:0 0 auto}
+  .dot.on{background:#fff;box-shadow:0 0 8px #fff}
+  .dot.done{background:var(--green)}
+  .lbl{flex:1}.lbl small{color:var(--mut);margin-left:8px;font-weight:400}
+  .eta{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;color:var(--amber);margin-top:10px}
+  .resume{color:var(--mut);font-size:13px;margin-top:10px}
+  details{background:#0e131b;border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:12px}
+  summary{cursor:pointer;color:var(--blue);font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:13px;outline:none}
+  pre{background:#0c1016;border:1px solid var(--line);border-radius:6px;padding:10px;font-size:11px;color:#9aa4b2;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-all}
+  button{background:#262626;color:var(--tx);border:1px solid #3a3a3a;border-radius:5px;padding:4px 12px;font-size:11px;cursor:pointer;margin-top:6px}
+  button:hover{background:#333}
 </style></head><body>
 <div class="wrap">
-  <h1>Atlas · Maintenance Window</h1>
-  <div class="sub">Live lifecycle watcher — auto-refreshes. Stays up even while the
-    agent/gateway is offline during the drain. <a href="/atlas" style="color:#58a6ff">Open Atlas app →</a></div>
+  <h1>Atlas · Pipeline</h1>
+  <div class="sub">Live lifecycle watcher — stays up even while the agent is offline during a drain.
+    <a href="/atlas" style="color:#58a6ff">Open Atlas app →</a></div>
   <div class="card">
-    <div class="phase">
-      <span style="font-size:15px;font-weight:600"><span class="dot pulse" id="dot"></span><span id="phase">Waiting…</span></span>
-      <span class="muted" id="sub" style="font-size:13px">No maintenance run recorded yet.</span>
-    </div>
-    <div class="bar"><div id="fill"></div></div>
-    <div class="meta"><span id="shards"></span><span id="time"></span></div>
+    <div class="state" id="im-state">IDLE</div>
+    <div class="status" id="im-status">No window running.</div>
+    <div class="bar"><div id="im-fill"></div></div>
+    <div class="meta"><span id="im-shards"></span><span id="im-time"></span></div>
   </div>
   <div class="card">
-    <div style="font-size:13px;color:var(--mut);margin-bottom:10px">Pipeline phases</div>
-    <div style="display:flex;flex-direction:column;gap:10px">
-      <div class="row"><span class="spinner" id="sp-drain"></span><span class="big">1 · Drain</span></div>
-      <div class="row"><span class="spinner" id="sp-produce"></span><span class="big">2 · Produce</span></div>
-      <div class="row"><span class="spinner" id="sp-restore"></span><span class="big">3 · Restore / reload</span></div>
+    <div class="steps">
+      <div class="step"><span class="dot" id="im-s-drain"></span><span class="lbl">1 · Drain<small id="im-l-drain"></small></span></div>
+      <div class="step"><span class="dot" id="im-s-produce"></span><span class="lbl">2 · Produce<small id="im-l-produce"></small></span></div>
+      <div class="step"><span class="dot" id="im-s-restore"></span><span class="lbl">3 · Restore / reload<small id="im-l-restore"></small></span></div>
     </div>
+    <div class="eta" id="im-eta"></div>
+    <div class="resume" id="im-resume"></div>
   </div>
-  <div class="card" id="resume" style="display:none">
-    <div style="font-weight:600;margin-bottom:8px">Resumed what was running before</div>
-    <div id="services"></div>
-    <div id="resume-shards" class="muted" style="font-size:13px;margin-top:8px"></div>
+  <div class="card" id="im-debug-wrap" style="display:none">
+    <details><summary>See debugging details</summary>
+      <pre id="im-debug"></pre>
+      <button id="im-copy">Copy error to clipboard</button></details>
   </div>
 </div>
-<div id="notify"><div class="box"><div style="font-size:40px">&#9989;</div>
-  <div class="big" style="margin:10px 0">All services restored.</div><div class="muted" id="n-det"></div></div></div>
 <script>
-let lastPhase="";
-function col(p){return p==='drain'?'#58a6ff':p==='produce'?'#d29922':p==='restore'?'#3fb950':p==='maintenance'?'#a5d6ff':'#7c8798';}
-function fmt(s){s=Math.max(0,Math.floor(s||0));const m=Math.floor(s/60),r=s%60;return m+':'+(r<10?'0':'')+r;}
-function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
-async function tick(){
-  let d; try{ d=await (await fetch('/api/status',{cache:'no-store'})).json(); }
-  catch(e){ document.getElementById('phase').textContent='watcher offline'; return; }
-  const ph=d.phase, active=['drain','produce','restore'].includes(ph);
-  document.getElementById('dot').style.background=col(ph);
-  document.getElementById('dot').classList.toggle('pulse',active);
-  document.getElementById('phase').textContent=d.phase_label||ph;
-  document.getElementById('sub').textContent=d.status||'';
-  const tot=d.shard_total||0;
-  if(ph==='restore'||ph==='maintenance'){
-    const pct=tot?Math.round(100*d.shard_current/tot):(ph==='maintenance'?100:0);
-    document.getElementById('fill').style.width=Math.min(100,Math.max(0,pct))+'%';
-    document.getElementById('shards').textContent=tot?('DSV4 shards <b>'+d.shard_current+'</b>/'+tot+' ('+pct+'%)'):'';
-  } else { document.getElementById('fill').style.width='0%'; document.getElementById('shards').textContent=''; }
-  ['sp-drain','sp-produce','sp-restore'].forEach(id=>{const e=document.getElementById(id);e.style.visibility='hidden';});
-  if(ph==='drain')document.getElementById('sp-drain').style.visibility='visible';
-  if(ph==='produce')document.getElementById('sp-produce').style.visibility='visible';
-  if(ph==='restore')document.getElementById('sp-restore').style.visibility='visible';
-  document.getElementById('time').textContent='elapsed <b>'+fmt(d.elapsed_seconds)+'</b>'+(active?' · remaining <b>'+fmt(d.phase_remaining_seconds)+'</b>':'');
-  const rc=document.getElementById('resume');
-  if(d.result){ rc.style.display='block';
-    document.getElementById('services').innerHTML=(d.loaded&&d.loaded.length?d.loaded:'[DSV4]').map(s=>'<span class="tag">'+esc(s)+'</span>').join('');
-    if(tot)document.getElementById('resume-shards').textContent='DSV4 '+d.shard_current+'/'+tot+' shards loaded.';
-    if(lastPhase!=='maintenance'){document.getElementById('n-det').textContent='DSV4 reloaded';document.getElementById('notify').style.display='flex';}
-  } else if(ph==='restore'){ rc.style.display='block';
-    document.getElementById('services').innerHTML='<span class="tag">DSV4</span>'; }
-  lastPhase=ph;
-}
-document.getElementById('notify').onclick=function(){this.style.display='none';};
-tick(); setInterval(tick,2000);
-</script></body></html>"""
+(function(){
+  function $(id){return document.getElementById(id);}
+  function fmt(s){s=Math.max(0,Math.floor(s||0));var m=Math.floor(s/60),r=s%60;return m+':'+(r<10?'0':'')+r;}
+  function col(st){return {DRAIN:'#58a6ff',PRODUCE:'#d29922',RESTORE:'#3fb950',COMPLETE:'#3fb950',FAILED:'#f85149',BLOCKED:'#f85149',PREFLIGHT:'#58a6ff',IDLE:'#8a94a6'}[st]||'#8a94a6';}
+  function orderOf(st){return {IDLE:0,PREFLIGHT:1,DRAIN:2,PRODUCE:3,RESTORE:4,COMPLETE:5,FAILED:5,BLOCKED:1}[st]||0;}
+  function phaseOf(M){
+    if(!M||!M.present) return 'IDLE';
+    if(M.blocked) return 'BLOCKED';
+    var p=M.phase;
+    if(p==='preflight') return 'PREFLIGHT';
+    if(p==='drain') return 'DRAIN';
+    if(p==='produce') return 'PRODUCE';
+    if(p==='restore') return 'RESTORE';
+    if(p==='maintenance') return (M.result&&String(M.result).indexOf('success=False')>=0)?'FAILED':'COMPLETE';
+    return p?String(p).toUpperCase():'IDLE';
+  }
+  function render(M){
+    var st=phaseOf(M); if(st==='IDLE'){ $('im-state').textContent='IDLE'; $('im-status').textContent='No window running.'; return; }
+    $('#im-state').textContent=st; $('#im-state').style.color=col(st);
+    $('#im-status').textContent=(M.status||M.phase_label||st);
+    var tot=M.shard_total||0,pct=0;
+    if(st==='RESTORE'||st==='COMPLETE'){ pct=tot?Math.round(100*(M.shard_current||0)/tot):(st==='COMPLETE'?100:0); }
+    else if(st==='DRAIN'){ pct=Math.min(100,Math.round(((M.released&&M.released.length)||0)/4*100)); }
+    else if(st==='PRODUCE'){ pct=45; }
+    $('#im-fill').style.width=Math.min(100,Math.max(0,pct))+'%';
+    $('#im-shards').textContent=(tot&&(st==='RESTORE'||st==='COMPLETE'))?('DSV4 shards '+(M.shard_current||0)+'/'+tot+' ('+pct+'%)'):'';
+    $('#im-time').textContent='elapsed '+fmt(M.elapsed_seconds);
+    function step(k,idx,label){var o=orderOf(st),el=$('im-s-'+k),lco=$('im-l-'+k);el.className='dot'+(st===label?' on':(o>idx?' done':''));lco.textContent=st===label?'(running)':(o>idx?'\u2713':'');}
+    step('drain',2,'DRAIN'); step('produce',3,'PRODUCE'); step('restore',4,'RESTORE');
+    var eta=$('im-eta');
+    if(st==='DRAIN') eta.textContent='Services going offline — the agent will drop; this panel keeps running.';
+    else if(st==='PRODUCE') eta.textContent='Capturing & evaluating — the agent stays offline until restore. Expect minutes.';
+    else if(st==='RESTORE') eta.textContent='Restoring DSV4 + prior services… agent comes back online after this.';
+    else eta.textContent='';
+    $('#im-resume').innerHTML=M.result||'';
+    var dbg=$('im-debug-wrap');
+    if(st==='BLOCKED'||st==='FAILED'){
+      dbg.style.display='block';
+      var reason=(M.blockers&&M.blockers.length)?M.blockers.map(function(b){return b.kind+': '+b.detail;}).join('\n'):(M.result||M.status||st);
+      $('#im-debug').textContent=reason;
+      $('#im-copy').onclick=function(){var ta=document.createElement('textarea');ta.value=reason;document.body.appendChild(ta);ta.select();try{document.execCommand('copy');}catch(e){}document.body.removeChild(ta);$('#im-copy').textContent='Copied!';};
+    } else dbg.style.display='none';
+  }
+  function poll(){
+    if(location.protocol.indexOf('http')!==0) return;
+    fetch('/api/status',{cache:'no-store'}).then(function(r){return r.json();}).then(render).catch(function(){}).then(function(){setTimeout(poll,1500);});
+  }
+  poll();
+})();
+</script>
+</body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
