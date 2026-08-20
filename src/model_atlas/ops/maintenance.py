@@ -751,6 +751,7 @@ class MaintenanceCoordinator:
             self._emit(phase="drain", status="start")
             self._acquire()
             self.verify_drained()
+            self._emit(phase="drain", status="complete", detail="all consumers quiesced")
             produce_method = (
                 Path(str(payload[0])).name
                 if payload
@@ -807,6 +808,12 @@ class MaintenanceCoordinator:
             manual_intervention = True
         except BaseException as exc:
             failure = self._failure_label(exc)
+            # debug: surface the sanitized real reason
+            msg = str(exc) or ""
+            # never leak argv/env/creds: strip quotes/paths
+            import re as _re
+            msg = _re.sub(r"(?i)(token|secret|password|credential|environment|env|argv)", "<redacted>", msg)[:300]
+            self._emit(phase="maintenance", status="debug", detail=f"failure={type(exc).__name__}; msg={msg}")
         finally:
             if not manual_intervention:
                 try:
