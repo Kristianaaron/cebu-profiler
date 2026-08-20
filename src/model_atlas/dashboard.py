@@ -1307,7 +1307,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
     if(p==='drain') return 'DRAIN';
     if(p==='produce') return 'PRODUCE';
     if(p==='restore') return 'RESTORE';
-    if(p==='maintenance') return (M.result&&String(M.result).indexOf('success=False')>=0)?'FAILED':'COMPLETE';
+    if(p==='maintenance'||p==='idle') return 'IDLE';
     return p?String(p).toUpperCase():'IDLE';
   }}
   function render(M){{
