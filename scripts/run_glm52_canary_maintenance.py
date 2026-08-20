@@ -194,9 +194,22 @@ def main() -> int:
             head_unit=HEAD_TRANSIENT_UNIT,
             worker_unit=WORKER_TRANSIENT_UNIT,
         )
-        receipt = MaintenanceCoordinator(
-            config, SubprocessCommandRunner(), execute=args.execute
-        ).run(
+        coordinator = MaintenanceCoordinator(config, SubprocessCommandRunner(), execute=args.execute)
+        # Preflight: block (no drain) before real execution if anything is wrong,
+        # so the user gets a clear BLOCKED state instead of a silent drain+restore.
+        if args.execute:
+            pre = coordinator.preflight(
+                artifact=Path(artifact),
+                artifact_sha256=artifact_sha256 or None,
+                lease=Path(args.lease),
+                requires=(),
+                plan_compiles=lambda: True,
+            )
+            if not pre["ok"]:
+                print("PREFLIGHT BLOCKED:", pre["blockers"], flush=True)
+                raise RuntimeError("preflight blocked: " + "; ".join(
+                    f"{b['kind']}: {b['detail']}" for b in pre["blockers"]))
+        receipt = coordinator.run(
             payload if args.execute else None,
             payload_scope=(
                 partial(active_lease_scope, args.lease, binding) if args.execute else None
