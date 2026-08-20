@@ -1250,71 +1250,101 @@ def render_dashboard(data: dict[str, Any]) -> str:
     <!-- Isolated maintenance modal (runs before heavy chart scripts) -->
     <style>
       .im-backdrop{{position:fixed;inset:0;background:rgba(18,18,18,.78);z-index:9998;display:none;align-items:center;justify-content:center;padding:22px}}
-      .im-modal{{background:#1b1b1b;border:1px solid #2e2e2e;border-radius:10px;max-width:680px;width:100%;padding:24px 26px;color:#dcdcdc;font-family:'Inter',ui-sans-serif,system-ui,sans-serif;box-shadow:0 16px 48px rgba(0,0,0,.55)}}
-      .im-modal h2{{margin:0 0 10px;font-size:16px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;letter-spacing:-0.01em}}
-      .im-bar{{height:6px;border-radius:3px;background:#262626;overflow:hidden;border:1px solid #353535;margin:14px 0 6px}}
-      .im-bar>div{{height:100%;width:0%;background:#f4f4f5;transition:width .5s}}
-      .im-meta{{display:flex;justify-content:space-between;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;color:#979797;margin-bottom:14px}}
-      .im-step{{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #2e2e2e;font-size:14px;color:#dcdcdc}}
+      .im-modal{{background:#1b1b1b;border:1px solid #2e2e2e;border-radius:10px;max-width:700px;width:100%;padding:24px 26px;color:#dcdcdc;font-family:'Inter',ui-sans-serif,system-ui,sans-serif;box-shadow:0 16px 48px rgba(0,0,0,.55)}}
+      .im-modal h2{{margin:0 0 6px;font-size:16px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;letter-spacing:-0.01em}}
+      .im-state{{font-size:13px;color:#979797;margin-bottom:8px;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}}
+      .im-bar{{height:6px;border-radius:3px;background:#262626;overflow:hidden;border:1px solid #353535;margin:12px 0 4px}}
+      .im-bar>div{{height:100%;width:0%;background:#f4f4f5;transition:width .4s}}
+      .im-meta{{display:flex;justify-content:space-between;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;color:#979797;margin-bottom:10px}}
+      .im-steps{{display:flex;flex-direction:column;gap:2px;margin:4px 0}}
+      .im-step{{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid #2e2e2e;font-size:14px;color:#dcdcdc}}
       .im-step:last-child{{border-bottom:none}}
       .im-dot{{width:10px;height:10px;border-radius:50%;background:#353535;flex:0 0 auto}}
-      .im-dot.on{{background:#ffffff}}
+      .im-dot.on{{background:#ffffff;box-shadow:0 0 8px #fff}}
       .im-dot.done{{background:#3fb950}}
-      .im-tag{{display:inline-block;background:#262626;border:1px solid #353535;border-radius:4px;padding:2px 8px;font-size:12px;color:#dcdcdc;margin:2px 4px 2px 0}}
-      .im-time{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;color:#979797;margin-top:12px}}
+      .im-lbl{{flex:1}}
+      .im-lbl small{{color:#7c8798;margin-left:8px;font-weight:400}}
+      .im-eta{{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:12px;color:#ffb86b;margin-top:8px}}
+      .im-resume{{color:#9aa4b2;font-size:13px;margin-top:8px}}
+      .im-debug{{margin-top:12px}}
+      .im-debug details{{background:#0e131b;border:1px solid #2e2e2e;border-radius:8px;padding:10px}}
+      .im-debug summary{{cursor:pointer;color:#58a6ff;font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;font-size:13px;outline:none}}
+      .im-debug pre{{background:#0c1016;border:1px solid #2e2e2e;border-radius:6px;padding:10px;font-size:11px;color:#9aa4b2;max-height:200px;overflow:auto;white-space:pre-wrap;word-break:break-all}}
+      .im-copy{{background:#262626;color:#dcdcdc;border:1px solid #3a3a3a;border-radius:5px;padding:3px 10px;font-size:11px;cursor:pointer;margin-top:6px}}
+      .im-copy:hover{{background:#333}}
     </style>
     <div class="im-backdrop" id="im-backdrop"><div class="im-modal">
       <h2>Maintenance <span id="im-chip" style="font-size:13px;color:#7c8798"></span></h2>
-      <div id="im-status" style="color:#9aa4b2;font-size:13px;margin-bottom:4px">No window running.</div>
+      <div class="im-state" id="im-state">IDLE</div>
+      <div id="im-status" style="color:#9aa4b2;font-size:13px;margin-bottom:2px">No window running.</div>
       <div class="im-bar"><div id="im-fill"></div></div>
       <div class="im-meta"><span id="im-shards"></span><span id="im-time"></span></div>
-      <div class="im-step"><span class="im-dot" id="im-s-drain"></span>1 &middot; Drain</div>
-      <div class="im-step"><span class="im-dot" id="im-s-produce"></span>2 &middot; Produce</div>
-      <div class="im-step"><span class="im-dot" id="im-s-restore"></span>3 &middot; Restore / reload</div>
-      <div id="im-resume" class="im-time"></div>
+      <div class="im-steps">
+        <div class="im-step"><span class="im-dot" id="im-s-drain"></span><span class="im-lbl">1 &middot; Drain<small id="im-l-drain"></small></span></div>
+        <div class="im-step"><span class="im-dot" id="im-s-produce"></span><span class="im-lbl">2 &middot; Produce<small id="im-l-produce"></small></span></div>
+        <div class="im-step"><span class="im-dot" id="im-s-restore"></span><span class="im-lbl">3 &middot; Restore / reload<small id="im-l-restore"></small></span></div>
+      </div>
+      <div id="im-eta" class="im-eta"></div>
+      <div id="im-resume" class="im-resume"></div>
+      <div class="im-debug" id="im-debug-wrap" style="display:none">
+        <details><summary>See debugging details</summary>
+          <pre id="im-debug"></pre>
+          <button class="im-copy" id="im-copy">Copy error to clipboard</button></details>
+      </div>
     </div></div>
     <script>
-    (function(){{
-      var BACK=document.getElementById('im-backdrop');
-      function fmt(s){{s=Math.max(0,Math.floor(s||0));var m=Math.floor(s/60),r=s%60;return m+':'+(r<10?'0':'')+r;}}
-      function col(p){{return p==='drain'?'#58a6ff':p==='produce'?'#d29922':p==='restore'?'#3fb950':p==='maintenance'?'#3fb950':'#7c8798';}}
-      function step(k,ph){{
-        var o=['drain','produce','restore','maintenance'].indexOf(ph);
-        var ik=['drain','produce','restore'].indexOf(k);
-        var el=document.getElementById('im-s-'+k);
-        el.className='im-dot'+(ph===k?' on':(o>ik?' done':''));
-      }}
-      function render(M){{
-        var ph=(M&&M.phase)||'idle';
-        var active=ph==='drain'||ph==='produce'||ph==='restore';
-        if(!(M&&M.present)||(!active&&ph!=='maintenance')){{ BACK.style.display='none'; return; }}
-        BACK.style.display='flex';
-        var c=col(ph);
-        document.getElementById('im-chip').textContent=ph.toUpperCase();
-        document.getElementById('im-chip').style.color=c;
-        document.getElementById('im-status').textContent=M.status||(M.phase_label||ph);
-        var tot=M.shard_total||0;
-        if(ph==='restore'||ph==='maintenance'){{
-          var pct=tot?Math.round(100*(M.shard_current||0)/tot):(ph==='maintenance'?100:0);
-          document.getElementById('im-fill').style.width=Math.min(100,Math.max(0,pct))+'%';
-          document.getElementById('im-shards').textContent=tot?('DSV4 shards '+(M.shard_current||0)+'/'+tot+' ('+pct+'%)'):'';
-        }} else {{
-          document.getElementById('im-fill').style.width='0%';
-          document.getElementById('im-shards').textContent='';
-        }}
-        document.getElementById('im-time').textContent='elapsed '+fmt(M.elapsed_seconds)+(active?' &middot; remaining '+fmt(M.phase_remaining_seconds):'');
-        step('drain',ph); step('produce',ph); step('restore',ph);
-        var rs=''; if(M.loaded&&M.loaded.length) rs+='Resumed: '+M.loaded.join(', ');
-        if(M.result){{ var dv=(M.result||'').split('success=')[1]; rs+=(rs?' &middot; ':'')+'success='+dv; }}
-        document.getElementById('im-resume').innerHTML=rs||'';
-      }}
-      (function poll(){{
-        if(location.protocol.indexOf('http')!==0) return;
-        fetch('/api/status',{{cache:'no-store'}}).then(function(r){{return r.json();}})
-          .then(render).catch(function(){{}}).then(function(){{setTimeout(poll,2000);}});
-      }})();
-    }})();
-    </script>
+(function(){{
+  var BACK=document.getElementById('im-backdrop');
+  function $(id){{ return document.getElementById(id); }}
+  function fmt(s){{ s=Math.max(0,Math.floor(s||0)); var m=Math.floor(s/60), r=s%60; return m+':'+(r<10?'0':'')+r; }}
+  function col(st){{ return {{'DRAIN':'#58a6ff','PRODUCE':'#d29922','RESTORE':'#3fb950','COMPLETE':'#3fb950','FAILED':'#f85149','BLOCKED':'#f85149','PREFLIGHT':'#58a6ff','IDLE':'#7c8798'}}[st]||'#7c8798'; }}
+  function orderOf(st){{ return {{'IDLE':0,'PREFLIGHT':1,'DRAIN':2,'PRODUCE':3,'RESTORE':4,'COMPLETE':5,'FAILED':5,'BLOCKED':1}}[st]||0; }}
+  function phaseOf(M){{
+    if(!M||!M.present) return 'IDLE';
+    if(M.blocked) return 'BLOCKED';
+    var p=M.phase;
+    if(p==='preflight') return 'PREFLIGHT';
+    if(p==='drain') return 'DRAIN';
+    if(p==='produce') return 'PRODUCE';
+    if(p==='restore') return 'RESTORE';
+    if(p==='maintenance') return (M.result&&String(M.result).indexOf('success=False')>=0)?'FAILED':'COMPLETE';
+    return p?String(p).toUpperCase():'IDLE';
+  }}
+  function render(M){{
+    var st=phaseOf(M); if(st==='IDLE'){{ BACK.style.display='none'; return; }}
+    BACK.style.display='flex'; var c=col(st);
+    $('im-chip').textContent=st; $('im-chip').style.color=c;
+    $('im-state').textContent=st; $('im-state').style.color=c;
+    $('im-status').textContent=(M.status||M.phase_label||st);
+    var tot=M.shard_total||0,pct=0;
+    if(st==='RESTORE'||st==='COMPLETE'){{ pct=tot?Math.round(100*(M.shard_current||0)/tot):(st==='COMPLETE'?100:0); }}
+    else if(st==='DRAIN'){{ pct=Math.min(100,Math.round(((M.released&&M.released.length)||0)/4*100)); }}
+    else if(st==='PRODUCE'){{ pct=45; }}
+    $('im-fill').style.width=Math.min(100,Math.max(0,pct))+'%';
+    $('im-shards').textContent=(tot&&(st==='RESTORE'||st==='COMPLETE'))?('DSV4 shards '+(M.shard_current||0)+'/'+tot+' ('+pct+'%)'):'';
+    $('im-time').textContent='elapsed '+fmt(M.elapsed_seconds);
+    function step(k,idx,label){{ var o=orderOf(st),el=$('im-s-'+k),lco=$('im-l-'+k); el.className='im-dot'+(st===label?' on':(o>idx?' done':'')); lco.textContent=st===label?'(running)':(o>idx?'\u2713':''); }}
+    step('drain',2,'DRAIN'); step('produce',3,'PRODUCE'); step('restore',4,'RESTORE');
+    var eta=$('im-eta');
+    if(st==='DRAIN') eta.textContent='Services going offline — the agent will drop; this overlay keeps running.';
+    else if(st==='PRODUCE') eta.textContent='Capturing & evaluating — the agent stays offline until restore. Expect minutes.';
+    else if(st==='RESTORE') eta.textContent='Restoring DSV4 + prior services… the agent comes back online after this.';
+    else eta.textContent='';
+    $('im-resume').innerHTML=(M.result||'');
+    var dbg=$('im-debug-wrap');
+    if(st==='BLOCKED'||st==='FAILED'){{
+      dbg.style.display='block';
+      var reason=(M.blockers&&M.blockers.length)?M.blockers.map(function(b){{return b.kind+': '+b.detail;}}).join('\n'):(M.result||M.status||st);
+      $('im-debug').textContent=reason;
+      $('im-copy').onclick=function(){{ var ta=document.createElement('textarea'); ta.value=reason; document.body.appendChild(ta); ta.select(); try{{document.execCommand('copy');}}catch(e){{}} document.body.removeChild(ta); $('im-copy').textContent='Copied!'; }};
+    }} else dbg.style.display='none';
+  }}
+  (function poll(){{
+    if(location.protocol.indexOf('http')!==0) return;
+    fetch('/api/status',{{cache:'no-store'}}).then(function(r){{return r.json();}})
+      .then(render).catch(function(){{}}).then(function(){{setTimeout(poll,1500);}});
+  }})();
+}})();    </script>
 <div class="layout">
 <nav class="side">{tab_html}</nav>
 <div class="col">
