@@ -9,11 +9,18 @@ A "channel" is the structured FFN unit of an expert: the coupled `gate[j,:]`,
 `up[j,:]` rows and `down[:,j]` column (blueprint §12.1). Here we only measure
 the activation side (`gate*up` intermediate value); the structural weight side
 is read from the model by the scorers.
+
+The accumulator stores per-(layer, expert) [mid]-vectors instead of per-channel
+dict entries; `observe_expert` also accepts a [T, mid] block straight from the
+vectorized runtime. Finalized stats are numerically identical to the previous
+per-scalar implementation.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+
+import numpy as np
 
 
 @dataclass
@@ -32,56 +39,74 @@ class ChannelStat:
 
 @dataclass
 class ChannelStatsAccumulator:
-    """Online aggregator keyed by (layer, expert, channel). """
+    """Online aggregator keyed by (layer, expert); per-channel vectors inside."""
 
-    _sum_abs: dict[tuple[int, int, int], float] = field(default_factory=dict)
-    _sum_sq: dict[tuple[int, int, int], float] = field(default_factory=dict)
-    _n: dict[tuple[int, int, int], int] = field(default_factory=dict)
-    _peak: dict[tuple[int, int, int], float] = field(default_factory=dict)
-    _n_active: dict[tuple[int, int, int], int] = field(default_factory=dict)
+    _sum_abs: dict[tuple[int, int], np.ndarray] = field(default_factory=dict)
+    _sum_sq: dict[tuple[int, int], np.ndarray] = field(default_factory=dict)
+    _n: dict[tuple[int, int], int] = field(default_factory=dict)
+    _peak: dict[tuple[int, int], np.ndarray] = field(default_factory=dict)
+    _n_active: dict[tuple[int, int], np.ndarray] = field(default_factory=dict)
     _eps: float = 1e-6
 
-    def observe_expert(self, layer: int, expert: int, gate: list[float], up: list[float]) -> None:
-        """Accumulate one token's intermediate activation per channel.
+    def observe_expert(
+        self,
+        layer: int,
+        expert: int,
+        gate: list[float] | "np.ndarray",
+        up: list[float] | "np.ndarray" | None = None,
+    ) -> None:
+        """Accumulate intermediate activations per channel.
 
-        `gate` and `up` are the [mid] per-channel values of one expert for one
-        token; the intermediate activation is `z[c] = gate[c] * up[c]`.
+        Vectorized form (used by the NumPy runtime): `gate` is the [T, mid]
+        intermediate block `z = gate*up` for one expert across tokens and `up`
+        is ignored. Scalar form (kept for direct callers): pass the per-token
+        `gate` and `up` channel vectors; the intermediate is `z[c] = gate[c]*up[c]`.
         """
-        for c, (g, u) in enumerate(zip(gate, up, strict=True)):
-            z = g * u
-            key = (layer, expert, c)
-            az = abs(z)
-            if key in self._n:
-                self._sum_abs[key] += az
-                self._sum_sq[key] += z * z
-                self._n[key] += 1
-                if az > self._peak[key]:
-                    self._peak[key] = az
-                if az > self._eps:
-                    self._n_active[key] += 1
-            else:
-                self._sum_abs[key] = az
-                self._sum_sq[key] = z * z
-                self._n[key] = 1
-                self._peak[key] = az
-                self._n_active[key] = 1 if az > self._eps else 0
+        if up is not None:
+            z = np.asarray([g * u for g, u in zip(gate, up, strict=True)], dtype=np.float64)
+        else:
+            z = np.asarray(gate, dtype=np.float64)
+            if z.ndim == 1:  # a bare gate vector without `up` is scalar-form misuse
+                raise TypeError("scalar form requires both gate and up")
+        az = np.abs(z)
+
+        key = (layer, expert)
+        if key in self._n:
+            n = self._n[key]
+            tot = n + z.shape[0]
+            self._sum_abs[key] += az.sum(axis=0)
+            self._sum_sq[key] += (z * z).sum(axis=0)
+            self._peak[key] = np.maximum(self._peak[key], az.max(axis=0))
+            self._n_active[key] += (az > self._eps).sum(axis=0)
+            self._n[key] = tot
+        else:
+            self._sum_abs[key] = az.sum(axis=0).copy()
+            self._sum_sq[key] = (z * z).sum(axis=0).copy()
+            self._peak[key] = az.max(axis=0).copy()
+            self._n_active[key] = (az > self._eps).sum(axis=0)
+            self._n[key] = z.shape[0]
 
     def finalize(self) -> list[ChannelStat]:
         """Emit sorted finalized per-channel statistics (layer, expert, channel)."""
         rows: list[ChannelStat] = []
-        for key, n in self._n.items():
-            layer, expert, channel = key
-            rows.append(
-                ChannelStat(
-                    layer=layer,
-                    expert=expert,
-                    channel=channel,
-                    rms=(self._sum_sq[key] / n) ** 0.5,
-                    mean_abs=self._sum_abs[key] / n,
-                    frequency=self._n_active[key] / n,
-                    peak=self._peak[key],
-                    samples=n,
+        for key in sorted(self._n):
+            layer, expert = key
+            n = self._n[key]
+            sum_abs = self._sum_abs[key]
+            sum_sq = self._sum_sq[key]
+            peak = self._peak[key]
+            n_active = self._n_active[key]
+            for c in range(sum_abs.shape[0]):
+                rows.append(
+                    ChannelStat(
+                        layer=layer,
+                        expert=expert,
+                        channel=c,
+                        rms=(float(sum_sq[c]) / n) ** 0.5,
+                        mean_abs=float(sum_abs[c]) / n,
+                        frequency=float(n_active[c]) / n,
+                        peak=float(peak[c]),
+                        samples=n,
+                    )
                 )
-            )
-        rows.sort(key=lambda r: (r.layer, r.expert, r.channel))
         return rows

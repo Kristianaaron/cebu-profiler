@@ -8,6 +8,13 @@ fully exercises the layerwise tracing + REAP machinery (fork A).
 
 The forward iterates one layer at a time and keeps only the running hidden
 state, so it plays the role of the "stream one layer, free it" REAP loop.
+
+Numerics: the hot per-token × per-expert matmuls run on NumPy (BLAS). The
+public model structures stay plain Python lists (scorers, the derivative
+builder, and the checkpoint tooling read them directly); arrays are derived
+once per model into a lazily-built cache and traces are converted back to
+lists at the boundary, so results stay JSON-serializable and byte-comparable
+with the previous pure-Python engine up to float summation order.
 """
 
 from __future__ import annotations
@@ -15,63 +22,12 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
 
 from model_atlas.atlas.collector import ChannelStatsAccumulator
 from model_atlas.schemas.architecture import ArchitectureSpec
-
-
-# a: [n, m] x b: [m, p] -> [n, p]
-def _matmul(a: list[list[float]], b: list[list[float]]) -> list[list[float]]:
-    n, m = len(a), len(a[0]) if a else 0
-    p = len(b[0]) if b else 0
-    out: list[list[float]] = [[0.0] * p for _ in range(n)]
-    for i in range(n):
-        ai = a[i]
-        for j in range(m):
-            aij = ai[j]
-            if aij == 0.0:
-                continue
-            bj = b[j]
-            oi = out[i]
-            for q in range(p):
-                oi[q] += aij * bj[q]
-    return out
-
-
-def _matvec(a: list[list[float]], x: list[float]) -> list[float]:
-    return [sum(ai[q] * x[q] for q in range(len(x))) for ai in a]
-
-
-def _vec_add(a: list[float], b: list[float]) -> list[float]:
-    return [x + y for x, y in zip(a, b, strict=True)]
-
-
-def _silu_vec(x: list[float]) -> list[float]:
-    return [v / (1.0 + math.exp(-v)) for v in x]
-
-
-def _dot(u: list[float], v: list[float]) -> float:
-    return sum(a * b for a, b in zip(u, v, strict=True))
-
-
-def _l2_norm(x: list[float]) -> float:
-    return math.sqrt(sum(v * v for v in x))
-
-
-def _softmax_full(x: list[float]) -> list[float]:
-    m = max(x)
-    e = [math.exp(v - m) for v in x]
-    s = sum(e)
-    return [v / s for v in e]
-
-
-def _softmax_topk(logits: list[float], k: int) -> tuple[list[int], list[float]]:
-    """Top-k selected indices + softmax probabilities over the selected set."""
-    order = sorted(range(len(logits)), key=lambda i: logits[i], reverse=True)
-    selected = order[:k]
-    sel_logits = [logits[i] for i in selected]
-    probs = _softmax_full(sel_logits)
-    return selected, probs
 
 
 @dataclass
@@ -90,6 +46,8 @@ class MiniMoE:
     embed: list[list[float]]  # [vocab, hidden]
     lm_head: list[list[float]]  # [vocab, hidden]
     layers: list[LayerWeights] = field(default_factory=list)
+    # lazily-built NumPy mirror of the weights above (never serialized)
+    np_cache: Any = field(default=None, repr=False, compare=False)
 
 
 def build_mini_moe(arch: ArchitectureSpec, seed: int = 0) -> MiniMoE:
@@ -133,6 +91,30 @@ def build_mini_moe(arch: ArchitectureSpec, seed: int = 0) -> MiniMoE:
     return model
 
 
+def _model_np(model: MiniMoE) -> dict[str, Any]:
+    """Build (once) the array mirror of every layer's weights."""
+    if model.np_cache is not None:
+        return model.np_cache
+    layers = []
+    for lw in model.layers:
+        layers.append(
+            {
+                "ln_w": np.asarray(lw.ln_w, dtype=np.float64),
+                "router": np.asarray(lw.router, dtype=np.float64),
+                "gate": np.stack([np.asarray(e["gate"], dtype=np.float64) for e in lw.experts]),
+                "up": np.stack([np.asarray(e["up"], dtype=np.float64) for e in lw.experts]),
+                "down": np.stack([np.asarray(e["down"], dtype=np.float64) for e in lw.experts]),
+            }
+        )
+    cache = {
+        "embed": np.asarray(model.embed, dtype=np.float64),
+        "lm_head": np.asarray(model.lm_head, dtype=np.float64),
+        "layers": layers,
+    }
+    model.np_cache = cache
+    return cache
+
+
 @dataclass
 class LayerTrace:
     layer: int
@@ -158,6 +140,12 @@ class ForwardResult:
         default_factory=list
     )  # per-token hidden (v2 §11)
     deviations_used: int = 0  # count of per-expert computations (none fabricated)
+
+
+def _softmax_rows(x: np.ndarray) -> np.ndarray:
+    m = x.max(axis=-1, keepdims=True)
+    e = np.exp(x - m)
+    return e / e.sum(axis=-1, keepdims=True)
 
 
 def representation_profile(
@@ -194,94 +182,90 @@ def _forward_layer(
     excluded: dict[int, frozenset[int]] | None = None,
     channel_stats: ChannelStatsAccumulator | None = None,
 ) -> tuple[LayerTrace, list[list[float]]]:
-    T = len(hidden)
-    logits: list[list[float]] = []
-    probs_all: list[list[float]] = []
-    topk_ids: list[list[int]] = []
-    topk_probs: list[list[float]] = []
-    expert_norm: list[list[float]] = []
-    router_weighted: list[list[float]] = []
-    entropy: list[float] = []
-    input_norm: list[float] = []
-    moe_norm: list[float] = []
-    output_norm: list[float] = []
-    combined_out: list[list[float]] = []
-    out: list[list[float]] = []
-    override = route_override or {}
+    W = _model_np(model)["layers"][layer_idx]
+    H = np.asarray(hidden, dtype=np.float64)  # [T, hidden]
+    T = H.shape[0]
+    E = model.n_exp
+
+    # (simplified) pre-MoE normalization in place of full attention stack
+    ln = H * W["ln_w"]  # [T, hidden]
+    logits = ln @ W["router"].T  # [T, n_exp]
+
     excluded_set = excluded.get(layer_idx, frozenset()) if excluded else frozenset()
-    allowed = [e for e in range(model.n_exp) if e not in excluded_set]
+    allowed = [e for e in range(E) if e not in excluded_set]
     if not allowed:
         raise ValueError(f"ablation excluded all experts at layer {layer_idx}")
+    sub = logits[:, allowed]  # [T, A]
 
+    # route among `allowed` (all experts normally, minus `excluded` on ablation)
+    k_eff = min(top_k, len(allowed))
+    order = np.argsort(-sub, axis=1, kind="stable")[:, :k_eff]  # [T, k] cols into allowed
+    sel_logits = np.take_along_axis(sub, order, axis=1)  # [T, k]
+    topk_p = _softmax_rows(sel_logits)  # softmax over the selected set
+    # full softmax over the allowed set, scattered back over all experts
+    p_mat = np.zeros((T, E), dtype=np.float64)
+    p_mat[:, allowed] = _softmax_rows(sub)
+
+    # counterfactual: force a specific equal-compute expert set; keep the
+    # frozen router's gate values over that set (no router retraining)
+    override = route_override or {}
+    overridden = {t: list(sel) for (l, t), sel in override.items() if l == layer_idx}
+    for t, sel in overridden.items():
+        sel_logits_t = np.asarray([logits[t, e] for e in sel], dtype=np.float64)
+        topk_p[t] = _softmax_rows(sel_logits_t)
+        p_mat[t] = _softmax_rows(logits[t])  # full softmax over ALL experts
+
+    # per-expert FFN for every token at once: [T,E,mid] intermediates -> [T,E,hidden]
+    gate_pre = np.einsum("th,emh->tem", ln, W["gate"])
+    gate = gate_pre / (1.0 + np.exp(-gate_pre))  # SiLU on the gate branch
+    up = np.einsum("th,emh->tem", ln, W["up"])
+    if channel_stats is not None:
+        Z = gate * up
+        for e in range(E):
+            channel_stats.observe_expert(layer_idx, e, Z[:, e, :])
+    expert_out = np.einsum("tem,ehm->teh", gate * up, W["down"])  # [T, E, hidden]
+    expert_norm = np.linalg.norm(expert_out, axis=2)  # [T, E]
+    router_weighted = p_mat * expert_norm  # [T, E]
+
+    # combine only the selected experts, weighted by their routing probability.
+    # overridden tokens take their weights over the forced expert set instead.
+    contrib = np.zeros((T, E), dtype=np.float64)
+    allowed_arr = np.asarray(allowed)
     for t in range(T):
-        h = hidden[t]
-        # (simplified) pre-MoE normalization in place of full attention stack
-        ln = [(v * w) for v, w in zip(h, layer_weights.ln_w, strict=True)]
-        i_norm = _l2_norm(h)
-        logits_l = _matvec(layer_weights.router, ln)  # [n_exp]
-        sub = [logits_l[e] for e in allowed]
-        if (layer_idx, t) in override:
-            # counterfactual: force a specific equal-compute expert set; keep the
-            # frozen router's gate values over that set (no router retraining)
-            sel = list(override[(layer_idx, t)])
-            sel_p = _softmax_full([logits_l[e] for e in sel])
-            p = _softmax_full(logits_l)
+        if t in overridden:
+            for idx, e in enumerate(overridden[t]):
+                contrib[t, e] += topk_p[t, idx]
         else:
-            # route among `allowed` (all experts normally, minus `excluded` on ablation)
-            sel_idx, sel_p = _softmax_topk(sub, top_k)
-            sel = [allowed[i] for i in sel_idx]
-            sub_p = _softmax_full(sub)
-            p = [0.0] * model.n_exp
-            for idx, e in enumerate(allowed):
-                p[e] = sub_p[idx]
+            cols = allowed_arr[order[t]] if len(allowed) != E else order[t]
+            contrib[t, cols] += topk_p[t]
+    combined = np.einsum("te,teh->th", contrib, expert_out)  # [T, hidden]
 
-        norm_e: list[float] = []
-        weighted: list[float] = []
-        combined = [0.0] * model.hidden
-        for e, we in enumerate(layer_weights.experts):
-            gate = _silu_vec(_matvec(we["gate"], ln))
-            up = _matvec(we["up"], ln)
-            if channel_stats is not None:
-                channel_stats.observe_expert(layer_idx, e, gate, up)
-            expert_out = _matvec(we["down"], [g * u for g, u in zip(gate, up, strict=True)])
-            nrm = _l2_norm(expert_out)
-            norm_e.append(nrm)
-            weighted.append(p[e] * nrm)
-            if e in sel:
-                idx = sel.index(e)
-                combined = _vec_add(combined, [sel_p[idx] * v for v in expert_out])
-        # residual add
-        nt = _vec_add(h, combined)
-        out.append(nt)
-        combined_out.append(combined)
+    out = H + combined  # residual add
+    pos = p_mat > 0.0
+    entropy = -np.where(pos, p_mat * np.log(np.where(pos, p_mat, 1.0)), 0.0).sum(axis=1)
 
-        H = -sum(pi * math.log(pi) for pi in p if pi > 0.0)
-        entropy.append(H)
-        logits.append(logits_l)
-        input_norm.append(i_norm)
-        moe_norm.append(_l2_norm(combined))
-        output_norm.append(_l2_norm(nt))
-        probs_all.append(p)
-        topk_ids.append(sel)
-        topk_probs.append(sel_p)
-        expert_norm.append(norm_e)
-        router_weighted.append(weighted)
+    ids_rows: list[list[int]] = []
+    for t in range(T):
+        if t in overridden:
+            ids_rows.append(list(overridden[t]))
+        else:
+            ids_rows.append([int(allowed[j]) for j in order[t]])
 
     trace = LayerTrace(
         layer=layer_idx,
-        logits=logits,
-        probs_all=probs_all,
-        topk_ids=topk_ids,
-        topk_probs=topk_probs,
-        expert_norm=expert_norm,
-        router_weighted=router_weighted,
-        entropy=entropy,
-        input_norm=input_norm,
-        moe_norm=moe_norm,
-        output_norm=output_norm,
-        combined=combined_out,
+        logits=logits.tolist(),
+        probs_all=p_mat.tolist(),
+        topk_ids=ids_rows,
+        topk_probs=topk_p.tolist(),
+        expert_norm=expert_norm.tolist(),
+        router_weighted=router_weighted.tolist(),
+        entropy=entropy.tolist(),
+        input_norm=np.linalg.norm(H, axis=1).tolist(),
+        moe_norm=np.linalg.norm(combined, axis=1).tolist(),
+        output_norm=np.linalg.norm(out, axis=1).tolist(),
+        combined=combined.tolist(),
     )
-    return trace, out
+    return trace, out.tolist()
 
 
 def forward(
@@ -301,8 +285,8 @@ def forward(
     """
     if top_k is None:
         top_k = model.arch.moe.top_k
-    emb = model.embed
-    hidden = [list(emb[t]) for t in tokens]
+    cache = _model_np(model)
+    hidden = cache["embed"][list(tokens)].tolist()  # [T, hidden] as lists
     traces: list[LayerTrace] = []
     for idx, layer_w in enumerate(model.layers):
         trace, hidden = _forward_layer(
@@ -310,7 +294,7 @@ def forward(
         )
         traces.append(trace)
     final = hidden[-1]  # last token hidden state
-    logits = _matvec(model.lm_head, final)  # [vocab]
+    logits = (cache["lm_head"] @ np.asarray(final, dtype=np.float64)).tolist()  # [vocab]
     return ForwardResult(
         traces=traces,
         final_hidden=final,
