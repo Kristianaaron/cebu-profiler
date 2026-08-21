@@ -370,9 +370,19 @@ class MaintenanceCoordinator:
         raise MaintenanceFailure("unit liveness is unknown")
 
     def _container_active(self, name: str) -> bool:
+        """Probe container liveness, distinguishing absent from unknown.
+
+        A container intentionally removed by a successful ``docker compose down``
+        is legitimately gone: ``docker inspect`` returns non-zero. Confirm the
+        absence authoritatively with ``docker ps -a`` (rc=0, no output) and treat
+        it as INACTIVE rather than unknown. A non-zero inspect with no absence
+        confirmation is a daemon/transport/permission failure and fails closed.
+        """
         last_rc: int | None = None
-        for _attempt in range(3):
-            result = self._command(["docker", "inspect", "--format", "{{.State.Running}}", name])
+        for attempt in range(3):
+            result = self._command(
+                ["docker", "inspect", "--format", "{{.State.Running}}", name]
+            )
             last_rc = result.returncode
             if result.returncode == 0:
                 state = result.stdout.strip()
@@ -380,13 +390,33 @@ class MaintenanceCoordinator:
                     return True
                 if state == "false":
                     return False
-                # malformed output: retry a little
-                continue
-            # transient docker failure (daemon hiccup / container being recreated):
-            # retry; if the container is genuinely gone, non-zero persists -> fail
-            # closed below after retries.
-            import time
-            time.sleep(0.8)
+                # Malformed successful output: one retry, then fail closed.
+                if attempt < 1:
+                    import time
+                    time.sleep(0.8)
+                    continue
+                raise MaintenanceFailure("container liveness is malformed")
+            # Non-zero inspect: the container may be absent after a successful
+            # `docker compose down`, or docker may be failing. Confirm absence
+            # with an authoritative probe before declaring it inactive.
+            absence = self._command(
+                [
+                    "docker",
+                    "ps",
+                    "-a",
+                    "--filter",
+                    f"name=^{name}$",
+                    "--format",
+                    "{{.Names}}",
+                ]
+            )
+            if absence.returncode == 0 and not absence.stdout.strip():
+                return False
+            # daemon / transport / permission failure or transient blink ->
+            # retry, then fail closed.
+            if attempt < 2:
+                import time
+                time.sleep(0.8)
         raise MaintenanceFailure(f"container liveness is unknown (rc={last_rc})")
 
     def _snapshot(self) -> None:

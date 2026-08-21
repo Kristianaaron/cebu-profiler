@@ -625,3 +625,126 @@ def test_uncertain_payload_cleanup_requires_manual_intervention_without_restore(
     assert receipt.manual_intervention_required
     assert receipt.failure == "ProcessGroupQuiescenceError"
     assert not any(action.action_id.startswith("restore_") for action in receipt.actions)
+# Focused container-liveness classification tests for _container_active / verify_drained.
+# Appended to tests/unit/test_maintenance_runner.py.
+
+
+def _verify_coordinator(tmp_path: Path, runner: FakeRunner) -> MaintenanceCoordinator:
+    """Coordinator with no production services active, for verify_drained-only tests."""
+    return MaintenanceCoordinator(config(tmp_path), runner)
+
+
+class ScriptedContainerRunner(FakeRunner):
+    """Script `docker inspect` / `docker ps -a` answers for one container probe.
+
+    Scenarios supply per-attempt CommandResults; indexes clamp to the last entry so
+    scripts may be shorter than the number of probes actually issued (but the tests
+    assert exact call counts, so scripts should match). `docker` in real life is a
+    local command, so no `ssh` wrapper is expected here.
+    """
+
+    CONTAINER = "deepseek-v4-flash-vllm-dspark-1"
+
+    def __init__(
+        self,
+        *,
+        inspect_results: list[CommandResult],
+        probe_results: list[CommandResult] | None = None,
+    ) -> None:
+        super().__init__(active=set())  # no units active: only the container matters
+        self._inspect_results = inspect_results
+        self._probe_results = probe_results if probe_results is not None else []
+        self._inspect_index = 0
+        self._probe_index = 0
+        self.inspect_calls: list[tuple[str, ...]] = []
+        self.probe_calls: list[tuple[str, ...]] = []
+
+    def run(self, argv: Sequence[str]) -> CommandResult:
+        command = tuple(argv)
+        inner = self._inner(command)
+        if inner[:3] == ("docker", "inspect", "--format"):
+            self.calls.append(command)
+            self.inspect_calls.append(command)
+            idx = min(self._inspect_index, len(self._inspect_results) - 1)
+            self._inspect_index += 1
+            return self._inspect_results[idx]
+        if inner[:3] == ("docker", "ps", "-a"):
+            self.calls.append(command)
+            self.probe_calls.append(command)
+            if not self._probe_results:
+                raise AssertionError("absence probe issued but probe_results is empty")
+            idx = min(self._probe_index, len(self._probe_results) - 1)
+            self._probe_index += 1
+            return self._probe_results[idx]
+        return super().run(argv)
+
+
+def test_absent_container_after_successful_stop_is_inactive(tmp_path: Path) -> None:
+    # `docker compose down` removed the container: `docker inspect` returns
+    # non-zero, but the authoritative absence probe (`docker ps -a` with an exact
+    # name filter) returns rc=0 with no output -> safely inactive, drain proceeds.
+    runner = ScriptedContainerRunner(
+        inspect_results=[CommandResult(returncode=1, stdout="")],
+        probe_results=[CommandResult(returncode=0, stdout="")],
+    )
+    _verify_coordinator(tmp_path, runner).verify_drained()
+    assert len(runner.inspect_calls) == 1
+    assert len(runner.probe_calls) == 1
+    assert runner.probe_calls[0][4] == f"name=^{ScriptedContainerRunner.CONTAINER}$"
+
+
+def test_running_container_fails_drain_verification(tmp_path: Path) -> None:
+    runner = ScriptedContainerRunner(
+        inspect_results=[CommandResult(returncode=0, stdout="true\n")],
+    )
+    with pytest.raises(MaintenanceFailure, match="drain verification failed"):
+        _verify_coordinator(tmp_path, runner).verify_drained()
+    assert len(runner.inspect_calls) == 1
+
+
+def test_stopped_container_allows_drain_verification(tmp_path: Path) -> None:
+    runner = ScriptedContainerRunner(
+        inspect_results=[CommandResult(returncode=0, stdout="false\n")],
+    )
+    # No exception means drain verification passed.
+    _verify_coordinator(tmp_path, runner).verify_drained()
+    assert len(runner.inspect_calls) == 1
+
+
+def test_malformed_docker_output_retries_once_then_fails_closed(tmp_path: Path) -> None:
+    # Successful exit (rc=0) with output that is neither `true` nor `false`:
+    # one retry, then fail closed as malformed.
+    malformed = CommandResult(returncode=0, stdout="maybe\n")
+    runner = ScriptedContainerRunner(
+        inspect_results=[malformed, malformed],
+    )
+    with pytest.raises(MaintenanceFailure, match="malformed"):
+        _verify_coordinator(tmp_path, runner).verify_drained()
+    assert len(runner.inspect_calls) == 2  # original + exactly one retry
+
+
+def test_transient_daemon_failure_recovers_and_allows_drain(tmp_path: Path) -> None:
+    # Daemon blinks: the first two inspections fail (probe also unavailable),
+    # then it recovers and reports the container as stopped => drained.
+    down = CommandResult(returncode=1, stdout="")
+    stopped = CommandResult(returncode=0, stdout="false\n")
+    runner = ScriptedContainerRunner(
+        inspect_results=[down, down, stopped],
+        probe_results=[down, down],
+    )
+    _verify_coordinator(tmp_path, runner).verify_drained()
+    assert len(runner.inspect_calls) == 3
+    assert len(runner.probe_calls) == 2
+
+
+def test_persistent_daemon_failure_fails_closed(tmp_path: Path) -> None:
+    # Every inspection fails AND absence cannot be confirmed: unknown -> fail closed.
+    down = CommandResult(returncode=1, stdout="")
+    runner = ScriptedContainerRunner(
+        inspect_results=[down, down, down],
+        probe_results=[down, down, down],
+    )
+    with pytest.raises(MaintenanceFailure, match="liveness is unknown"):
+        _verify_coordinator(tmp_path, runner).verify_drained()
+    assert len(runner.inspect_calls) == 3
+    assert len(runner.probe_calls) == 3
