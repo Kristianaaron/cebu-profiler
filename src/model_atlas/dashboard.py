@@ -1973,6 +1973,12 @@ function retCol(r){{return r>=0.9?'#4ade80':r>=0.75?'#fbbf24':'#f87171';}}
   else once();
 }})();
 
+
+// ---- Capability 3D voxel engine ----
+{_CAP3D_JS}
+
+// ---- Success-Failure 3D engine ----
+{_CONTRAST_JS}
     </script>
 </body></html>"""
 
