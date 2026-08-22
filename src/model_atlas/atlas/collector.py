@@ -20,7 +20,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import numpy as np
 
 
 @dataclass
@@ -35,6 +34,18 @@ class ChannelStat:
     frequency: float  # fraction of tokens where |z| above epsilon
     peak: float  # max |z| observed
     samples: int
+
+
+np = None
+
+
+def _ensure_np():
+    global np
+    if np is None:
+        import numpy as _numpy
+
+        np = _numpy
+    return np
 
 
 @dataclass
@@ -62,6 +73,7 @@ class ChannelStatsAccumulator:
         is ignored. Scalar form (kept for direct callers): pass the per-token
         `gate` and `up` channel vectors; the intermediate is `z[c] = gate[c]*up[c]`.
         """
+        _ensure_np()
         if up is not None:
             z = np.asarray([g * u for g, u in zip(gate, up, strict=True)], dtype=np.float64)
         else:

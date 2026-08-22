@@ -24,7 +24,6 @@ import random
 from dataclasses import dataclass, field
 from typing import Any
 
-import numpy as np
 
 from model_atlas.atlas.collector import ChannelStatsAccumulator
 from model_atlas.schemas.architecture import ArchitectureSpec
@@ -91,19 +90,38 @@ def build_mini_moe(arch: ArchitectureSpec, seed: int = 0) -> MiniMoE:
     return model
 
 
+# NumPy is loaded lazily on first engine use so that merely importing this
+# module (e.g. via model_atlas.evaluation) stays dependency-light.
+np = None
+
+
+def _ensure_np():
+    global np
+    if np is None:
+        import numpy as _numpy
+
+        np = _numpy
+    return np
+
+
 def _model_np(model: MiniMoE) -> dict[str, Any]:
+    _ensure_np()
     """Build (once) the array mirror of every layer's weights."""
-    if model.np_cache is not None:
-        return model.np_cache
+    cache = getattr(model, "np_cache", None)
+    if cache is not None:
+        return cache
     layers = []
     for lw in model.layers:
         layers.append(
             {
                 "ln_w": np.asarray(lw.ln_w, dtype=np.float64),
                 "router": np.asarray(lw.router, dtype=np.float64),
-                "gate": np.stack([np.asarray(e["gate"], dtype=np.float64) for e in lw.experts]),
-                "up": np.stack([np.asarray(e["up"], dtype=np.float64) for e in lw.experts]),
-                "down": np.stack([np.asarray(e["down"], dtype=np.float64) for e in lw.experts]),
+                # per-expert 2D arrays: experts may have different channel
+                # widths after pruning, so they are kept unstacked here and
+                # grouped by width at compute time.
+                "gate": [np.asarray(e["gate"], dtype=np.float64) for e in lw.experts],
+                "up": [np.asarray(e["up"], dtype=np.float64) for e in lw.experts],
+                "down": [np.asarray(e["down"], dtype=np.float64) for e in lw.experts],
             }
         )
     cache = {
@@ -143,6 +161,7 @@ class ForwardResult:
 
 
 def _softmax_rows(x: np.ndarray) -> np.ndarray:
+    _ensure_np()
     m = x.max(axis=-1, keepdims=True)
     e = np.exp(x - m)
     return e / e.sum(axis=-1, keepdims=True)
@@ -182,6 +201,7 @@ def _forward_layer(
     excluded: dict[int, frozenset[int]] | None = None,
     channel_stats: ChannelStatsAccumulator | None = None,
 ) -> tuple[LayerTrace, list[list[float]]]:
+    _ensure_np()
     W = _model_np(model)["layers"][layer_idx]
     H = np.asarray(hidden, dtype=np.float64)  # [T, hidden]
     T = H.shape[0]
@@ -215,15 +235,29 @@ def _forward_layer(
         topk_p[t] = _softmax_rows(sel_logits_t)
         p_mat[t] = _softmax_rows(logits[t])  # full softmax over ALL experts
 
-    # per-expert FFN for every token at once: [T,E,mid] intermediates -> [T,E,hidden]
-    gate_pre = np.einsum("th,emh->tem", ln, W["gate"])
-    gate = gate_pre / (1.0 + np.exp(-gate_pre))  # SiLU on the gate branch
-    up = np.einsum("th,emh->tem", ln, W["up"])
+    # per-expert FFN for every token at once: [T,E,mid_e] intermediates -> [T,E,hidden].
+    # experts may have different channel widths after pruning (variable mid_e), so
+    # group experts by width and batch each group; results land in expert_out.
+    expert_out = np.zeros((T, E, model.hidden), dtype=np.float64)
+    groups: dict[int, list[int]] = {}
+    for e in range(E):
+        groups.setdefault(W["gate"][e].shape[0], []).append(e)
+    Z_by_expert: dict[int, Any] = {}
+    for width, es in groups.items():
+        gs = np.stack([W["gate"][e] for e in es])          # [g, width, hidden]
+        us = np.stack([W["up"][e] for e in es])            # [g, width, hidden]
+        ds = np.stack([W["down"][e] for e in es])          # [g, hidden, width]
+        gate_g = np.einsum("th,gwh->tgw", ln, gs)
+        gate_g = gate_g / (1.0 + np.exp(-gate_g))          # SiLU on the gate branch
+        up_g = np.einsum("th,gwh->tgw", ln, us)
+        Zg = gate_g * up_g
+        out_g = np.einsum("tgw,ghw->tgh", Zg, ds)  # [T, g, hidden]
+        for gi, e in enumerate(es):
+            Z_by_expert[e] = Zg[:, gi, :]
+            expert_out[:, e, :] = out_g[:, gi, :]
     if channel_stats is not None:
-        Z = gate * up
         for e in range(E):
-            channel_stats.observe_expert(layer_idx, e, Z[:, e, :])
-    expert_out = np.einsum("tem,ehm->teh", gate * up, W["down"])  # [T, E, hidden]
+            channel_stats.observe_expert(layer_idx, e, Z_by_expert[e])
     expert_norm = np.linalg.norm(expert_out, axis=2)  # [T, E]
     router_weighted = p_mat * expert_norm  # [T, E]
 
@@ -276,6 +310,7 @@ def forward(
     excluded: dict[int, frozenset[int]] | None = None,
     channel_stats: ChannelStatsAccumulator | None = None,
 ) -> ForwardResult:
+    _ensure_np()
     """Streaming forward across layers; returns per-layer traces + final output.
 
     `route_override` forces specific expert sets at (layer, token) for
