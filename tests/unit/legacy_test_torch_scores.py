@@ -11,7 +11,7 @@ import math
 import pytest
 
 from model_atlas.schemas.evidence import EvidenceKind
-from model_atlas.scoring.torch_scores import (
+from model_atlas.experiments.legacy.torch_scores import (
     RealActivationHook,
     TorchScoringResult,
     causal_ablation_scores,

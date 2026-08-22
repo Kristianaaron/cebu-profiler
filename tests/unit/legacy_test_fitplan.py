@@ -2,7 +2,7 @@
 
 import json
 
-from model_atlas.fitplan import WidthFits, choose_display, fit_plan
+from model_atlas.experiments.legacy.fitplan import WidthFits, choose_display, fit_plan
 
 
 def test_fit_plan_returns_widths_and_fit():
@@ -27,7 +27,7 @@ def test_choose_display_picks_largest_fit():
 def test_fit_plan_json_serializable():
     import json
 
-    from model_atlas.fitplan import to_json
+    from model_atlas.experiments.legacy.fitplan import to_json
 
     obj = json.loads(to_json("/media/glm52/models/nvidia/GLM-5.2-NVFP4"))
     assert "recommended_width" in obj
@@ -42,7 +42,7 @@ def test_valid_widths_all_multiple_of_group():
 def test_fit_default_semantics_no_double_reserve():
     """Round-5 #9: DEFAULT_WINDOW_GIB is already usable (no extra headroom
     subtraction); measured physical capacity subtracts headroom once."""
-    from model_atlas.fitplan import DEFAULT_WINDOW_GIB, OS_HEADROOM_GIB, fit_plan
+    from model_atlas.experiments.legacy.fitplan import DEFAULT_WINDOW_GIB, OS_HEADROOM_GIB, fit_plan
 
     # explicit default => budget == DEFAULT_WINDOW_GIB
     fits = fit_plan("/media/glm52/models/nvidia/GLM-5.2-NVFP4")

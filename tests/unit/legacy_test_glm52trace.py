@@ -12,7 +12,7 @@ import struct
 import pytest
 
 from model_atlas.checkpoint.safetensors import write_safetensors
-from model_atlas.glm52trace import (
+from model_atlas.experiments.legacy.glm52trace import (
     PROBE_INPUT_LABEL,
     GlmRoutingTrace,
     _sum_p_log,
