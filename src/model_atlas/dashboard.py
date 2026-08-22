@@ -672,7 +672,11 @@ _CAP3D_JS = r"""
     var x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9, i;
     function scan(pp) { if (pp[0] < x0) x0 = pp[0]; if (pp[0] > x1) x1 = pp[0]; if (pp[1] < y0) y0 = pp[1]; if (pp[1] > y1) y1 = pp[1]; }
     for (i = 0; i < flat.length; i++) { var o = projAll(flat[i], 0, 0); for (var j = 0; j < 8; j++) scan(o.pts[j]); }
-    OX = W / 2 - (x0 + x1) / 2; OY = H / 2 - (y0 + y1) / 2;
+    var floorPad = Math.min(46, Math.max(18, H * 0.09)) * zoom;
+    var midY = (y0 + y1) / 2;
+    var oy = H / 2 - midY;
+    if (y1 + oy > H - floorPad) oy = H - floorPad - y1;   // push up so stack bottoms sit above the floor line
+    OX = W / 2 - (x0 + x1) / 2; OY = oy;
     cells = [];
     for (i = 0; i < flat.length; i++) {
       var v = flat[i], o = projAll(v, OX, OY), nz = [], vis = [];
@@ -705,21 +709,139 @@ _CAP3D_JS = r"""
     }
   }
 
+  function polyPath(poly) { ctx.beginPath(); ctx.moveTo(poly[0][0], poly[0][1]); for (var i = 1; i < poly.length; i++) ctx.lineTo(poly[i][0], poly[i][1]); ctx.closePath(); }
+  function centroid(cell) { var sx=0, sy=0; for (var i=0;i<cell.pts.length;i++){sx+=cell.pts[i][0];sy+=cell.pts[i][1];} return [sx/cell.pts.length, sy/cell.pts.length]; }
+
+  function drawFloorAndAxes() {
+    if (!cells.length) return;
+    // ground the scene: a soft floor quad under everything + faint axis rails
+    var minY = 1e9; for (var i = 0; i < cells.length; i++) { for (var j = 0; j < 8; j++) if (cells[i].pts[j][1] > minY) minY = cells[i].pts[j][1]; }
+    var xs = [], zs = [];
+    for (i = 0; i < ne; i++) xs.push((i - (ne - 1) / 2) * SX);
+    for (i = 0; i < labels.length; i++) zs.push((i - (labels.length - 1) / 2) * SZ);
+    function P(x, z) { var r = rot3(x, (nl - 1) / 2 * SY * spread * -1, z); return [OX + r[0] * sc(), OY + r[1] * sc()]; }
+    // NOTE: y of floor uses bottom layer level so the plate hugs the stack bases
+    var corners = [P(xs[0] - HFE, zs[0] - HFE), P(xs[xs.length-1] + HFE, zs[0] - HFE), P(xs[xs.length-1] + HFE, zs[zs.length-1] + HFE), P(xs[0] - HFE, zs[zs.length-1] + HFE)];
+    polyPath(corners);
+    ctx.fillStyle = 'rgba(255,255,255,0.03)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    // axis rails along the two diagonals with end ticks
+    var a1 = P(xs[0] - HFE, zs[0] - HFE), b1 = P(xs[xs.length-1] + HFE, zs[0] - HFE);
+    var a2 = P(xs[0] - HFE, zs[0] - HFE), b2 = P(xs[0] - HFE, zs[zs.length-1] + HFE);
+    ctx.strokeStyle = 'rgba(230,230,230,0.22)';
+    ctx.beginPath(); ctx.moveTo(a1[0], a1[1]); ctx.lineTo(b1[0], b1[1]); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(a2[0], a2[1]); ctx.lineTo(b2[0], b2[1]); ctx.stroke();
+    ctx.font = '9.5px system-ui'; ctx.fillStyle = 'rgba(160,160,160,0.8)';
+    ctx.textAlign = 'left';
+    ctx.fillText('experts \u2192', (b1[0]+6), b1[1]);
+    ctx.fillText('capabilities \u2192', (b2[0]-4), b2[1]+12);
+  }
+
+  function sc() { return Math.min((W - 70) / (Math.max(ne * SX, nl * SY, labels.length * SZ) + 4), (H - 70) / (nl * SY + labels.length * SZ + 3)) * 0.95 * zoom; }
+
+  function drawLayerPlates() {
+    // one translucent plate per active layer under its cubes: makes stacking depth readable at a glance
+    for (var l = nl - 1; l >= 0; l--) {
+      if (!layerOn[l]) continue;
+      var pts = [];
+      var yLevel = -((l - (nl - 1) / 2) * SY * spread);
+      var xs0 = -(ne / 2) * SX, xs1 = ((ne - 1) - (ne - 1) / 2) * SX;
+      var zs0 = -(labels.length / 2) * SZ, zs1 = ((labels.length - 1) - (labels.length - 1) / 2) * SZ;
+      [[xs0 - HFE*1.5, zs0 - HFE*1.5],[xs1 + HFE*1.5, zs0 - HFE*1.5],[xs1 + HFE*1.5, zs1 + HFE*1.5],[xs0 - HFE*1.5, zs1 + HFE*1.5]].forEach(function (c) {
+        var r = rot3(c[0], yLevel, c[1]); pts.push([OX + r[0] * sc(), OY + r[1] * sc()]);
+      });
+      var focused = (focus != null && hover && hover.label === focus) || false;
+      polyPath(pts);
+      ctx.fillStyle = 'rgba(125,211,252,' + (focused ? 0.05 : 0.028) + ')';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(125,211,252,' + (l === selLayerLabel() ? 0.35 : 0.14) + ')';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+  function selLayerLabel() { return selLayer ? selLayer.layer : -1; }
+
+  function drawRisers() {
+    // vertical hairlines from each stack base to the floor: anchors columns in 3D
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    ctx.lineWidth = 1;
+    var seen = {};
+    for (var i = 0; i < cells.length; i++) {
+      var v = cells[i].v, key = v.expert + ':' + v.label;
+      if (seen[key]) continue;
+      seen[key] = true;
+      var topY = null;
+      for (var l = 0; l < nl; l++) { if (!layerOn[l]) continue; break; }
+      var xw = (v.expert - (ne - 1) / 2) * SX, zw = (v.label - (labels.length - 1) / 2) * SZ;
+      var yTop = -((nl - 1) / 2) * SY * spread + HFE;
+      var yBot = ((nl - 1) / 2) * SY * spread + HFE;
+      var p1r = rot3(xw, yTop, zw), p2r = rot3(xw, yBot, zw);
+      ctx.beginPath();
+      ctx.moveTo(OX + p1r[0] * sc(), OY + p1r[1] * sc());
+      ctx.lineTo(OX + p2r[0] * sc(), OY + p2r[1] * sc());
+      ctx.stroke();
+    }
+  }
+
   function draw() {
     layout();
     ctx.clearRect(0, 0, W, H);   // transparent canvas -> grid + vignette behind
+    drawFloorAndAxes();
+    drawRisers();
     var order = cells.slice();
     order.sort(function (a, b) { return a.depth - b.depth; });
+    drawLayerPlatesUnder(order);
     for (var i = 0; i < order.length; i++) drawCube(order[i]);
+    drawLayerLabels(order);
     // subtle floating layer labels (L0, L1, ...) anchored by each layer's centroid
     var lp = [], la;
     for (la = 0; la < nl; la++) lp.push({ x: 0, y: 0, n: 0 });
     for (la = 0; la < cells.length; la++) { var cc = cells[la]; lp[cc.v.layer].x += cc.cx; lp[cc.v.layer].y += cc.cy; lp[cc.v.layer].n++; }
-    ctx.font = '10.5px system-ui'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-    for (la = 0; la < nl; la++) {
-      if (!lp[la].n) continue;
-      ctx.fillStyle = 'rgba(163,163,163,0.5)';
-      ctx.fillText('L' + la, lp[la].x / lp[la].n - 34, lp[la].y / lp[la].n);
+    drawLayerLabels(order);
+  }
+
+  function drawLayerPlatesUnder(order) {
+    // interleave: for each layer (back to front), its plate then its cubes
+    var byLayer = {};
+    order.forEach(function (c) { (byLayer[c.v.layer] = byLayer[c.v.layer] || []).push(c); });
+    var layersSorted = Object.keys(byLayer).map(Number).sort(function (a, b) { return b - a; });
+    layersSorted.forEach(function (l) {
+      // plate for this layer
+      if (layerOn[l]) {
+        var yLevel = -((l - (nl - 1) / 2) * SY * spread);
+        var xs0 = -(ne / 2) * SX, xs1 = ((ne - 1) - (ne - 1) / 2) * SX;
+        var zs0 = -(labels.length / 2) * SZ, zs1 = ((labels.length - 1) - (labels.length - 1) / 2) * SZ;
+        var pts = [];
+        [[xs0 - HFE*1.6, zs0 - HFE*1.6],[xs1 + HFE*1.6, zs0 - HFE*1.6],[xs1 + HFE*1.6, zs1 + HFE*1.6],[xs0 - HFE*1.6, zs1 + HFE*1.6]].forEach(function (c) {
+          var r = rot3(c[0], yLevel + HFE, c[1]); pts.push([OX + r[0] * sc(), OY + r[1] * sc()]);
+        });
+        polyPath(pts);
+        var dimmed = (selLayer && selLayer.layer !== l);
+        ctx.fillStyle = dimmed ? 'rgba(125,211,252,0.015)' : 'rgba(125,211,252,0.032)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(125,211,252,' + ((selLayer && selLayer.layer === l) ? '0.38' : '0.13') + ')';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      byLayer[l].forEach(drawCube);
+    });
+  }
+
+  function drawLayerLabels(order) {
+    // crisp L-tags pinned to the LEFT edge of each layer's plate
+    ctx.font = 'bold 10px ' + getComputedStyle(document.body).fontFamily;
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    for (var l = 0; l < nl; l++) {
+      if (!layerOn[l]) continue;
+      var yLevel = -((l - (nl - 1) / 2) * SY * spread);
+      var r = rot3(-(ne / 2) * SX - HFE * 2.4, yLevel + HFE, -(labels.length / 2) * SZ);
+      var x = OX + r[0] * sc(), y = OY + r[1] * sc();
+      var activeSel = selLayer && selLayer.layer === l;
+      ctx.fillStyle = activeSel ? 'rgba(235,235,235,0.95)' : 'rgba(150,160,172,0.75)';
+      ctx.fillText('L' + l, x, y);
     }
     ctx.textBaseline = 'alphabetic';
   }
@@ -841,6 +963,20 @@ _CAP3D_JS = r"""
   for (var vi = 1; vi < vox.length; vi++) if (vox[vi].score > hi.score) hi = vox[vi];
   focus = hi ? hi.label : 0;
   draw(); renderPanel();
+  (function drawLegend() {
+    // fixed score legend under the canvas: brightness == measured saliency share for the focused capability
+    var host = cv.closest('.cap3d-wrap') || cv.parentNode;
+    if (!host || document.getElementById('cap3d-legend')) return;
+    var lg = document.createElement('div');
+    lg.id = 'cap3d-legend';
+    lg.style.cssText = 'display:flex;align-items:center;gap:10px;margin:8px 2px 0;font-family:system-ui;font-size:9.5px;color:#8b93a1;';
+    var grad = 'linear-gradient(90deg,rgba(235,235,235,0.08),rgba(235,235,235,0.95))';
+    lg.innerHTML = '<span style=\"letter-spacing:.04em\">dim</span>'
+      + '<span style=\"flex:0 0 90px;height:6px;border-radius:3px;background:' + grad + '\"></span>'
+      + '<span>bright &nbsp;=\u00A0saliency share</span>'
+      + '<span style=\"margin-left:auto;color:#5c6672\">drag to orbit \u00B7 wheel to zoom</span>';
+    host.appendChild(lg);
+  })();
   (function wireControls() {
     var zi = document.getElementById('czoomin'), zo = document.getElementById('czoomout'), sp = document.getElementById('cspread');
     if (zi) zi.addEventListener('click', function () { zoom = Math.min(3, zoom * 1.25); draw(); });
