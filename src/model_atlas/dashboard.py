@@ -1433,7 +1433,7 @@ canvas#cap3d.dragging{{cursor:grabbing}}
     var dbg=$('im-debug-wrap');
     if(st==='BLOCKED'||st==='FAILED'){{
       dbg.style.display='block';
-      var reason=(M.blockers&&M.blockers.length)?M.blockers.map(function(b){{return b.kind+': '+b.detail;}}).join('\n'):(M.result||M.status||st);
+      var reason=(M.blockers&&M.blockers.length)?M.blockers.map(function(b){{return b.kind+': '+b.detail;}}).join('\\n'):(M.result||M.status||st);
       $('im-debug').textContent=reason;
       $('im-copy').onclick=function(){{ var ta=document.createElement('textarea'); ta.value=reason; document.body.appendChild(ta); ta.select(); try{{document.execCommand('copy');}}catch(e){{}} document.body.removeChild(ta); $('im-copy').textContent='Copied!'; }};
     }} else dbg.style.display='none';
@@ -1681,7 +1681,7 @@ function retCol(r){{return r>=0.9?'#4ade80':r>=0.75?'#fbbf24':'#f87171';}}
   var mp=document.getElementById('sum-map');
   if(mp){{
     var links=[["Profiling","Experts","which experts carry which capability","capability"],["Profiling","Success−Failure","who fires on wins vs losses","contrast"],["Profiling","Expert Pairings","co-routing + cascade risk","coalition"],["Profiling","Structure","hierarchy + route paths","structure"],["Quantization & Fit","Compression","int4/int8 response per expert","compression"],["Quantization & Fit","Derivatives","prune/keep plans + fit verdict","candidate"],["Researcher","Pareto Explorer","quality vs GiB frontier","pareto"],["Researcher","V3 Analyzers","fidelity-first deep dives","v3"]];
-    mp.innerHTML=links.map(function(l){{return "<div class='verdict' style='cursor:pointer' onclick=\"document.querySelector('[data-tab="+l[3]+"]').click()\"><div class='vt'>"+l[0]+"</div><div class='vm'><b>"+l[1]+"</b><span style='color:var(--mut);font-size:12px'> — "+l[2]+"</span></div></div>";}}).join('');
+    mp.innerHTML=links.map(function(l){{return "<div class='verdict' style='cursor:pointer' onclick=&quot;document.querySelector(&apos;[data-tab="+l[3]+"]&apos;).click()&quot;><div class='vt'>"+l[0]+"</div><div class='vm'><b>"+l[1]+"</b><span style='color:var(--mut);font-size:12px'> — "+l[2]+"</span></div></div>";}}).join('');
   }}
   var rk=document.getElementById('sum-rawkeys');
   if(rk) rk.innerHTML = Object.keys(DATA).map(function(k){{return "<span class='chip'>"+esc(k)+"</span>";}}).join('');
@@ -1716,7 +1716,7 @@ function retCol(r){{return r>=0.9?'#4ade80':r>=0.75?'#fbbf24':'#f87171';}}
     var mxp=Math.max.apply(null,DATA.paths.map(function(r){{return r.count;}}))||1;
     pb.innerHTML=DATA.paths.map(function(r){{
       var sig=(r.signature||[]).map(function(s){{return s.join('·');}}).join(' → ');
-      return "<div class='lvlbar'><span class='ll' style='min-width:170px' title=\""+esc(sig)+"\">"+esc(sig.length>28?sig.slice(0,27)+'…':sig)+"</span><span class='lb'><i style='width:"+Math.max(3,Math.round(r.count/mxp*100))+"%;background:linear-gradient(90deg,#7dd3fc,#5eead4)'></i></span><span class='lv'>"+Math.round(r.success_rate*100)+"% ok</span></div>";
+      return "<div class='lvlbar'><span class='ll' style='min-width:170px' title='"+esc(sig)+"'>"+esc(sig.length>28?sig.slice(0,27)+'…':sig)+"</span><span class='lb'><i style='width:"+Math.max(3,Math.round(r.count/mxp*100))+"%;background:linear-gradient(90deg,#7dd3fc,#5eead4)'></i></span><span class='lv'>"+Math.round(r.success_rate*100)+"% ok</span></div>";
     }}).join('');
   }}
 }})();
@@ -1917,58 +1917,60 @@ function retCol(r){{return r>=0.9?'#4ade80':r>=0.75?'#fbbf24':'#f87171';}}
   fill('t-expert-clusters', ['layer','expert','activating clusters','unique coverage'],
     cs.expert_activation.map(e=>({{'layer':e.layer,'expert':e.expert,'activating clusters':(e.activating_clusters||[]).join(',')||'-','unique coverage':e.unique_coverage}})) );
 }})();
- document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{{
-   document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
-   document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
-   t.classList.add('active');
-   document.getElementById('panel-'+t.dataset.tab).classList.add('active');
- }}));
- // ---- Maintenance lifecycle status (drain/produce/restore) ----
- (function(){{
-   var M = DATA.maintenance || {{present:false}};
-   var body = document.getElementById('maintenance-body');
-   if(!body) return;
-   if(!M.present){{ body.innerHTML='<p class="note">No maintenance run recorded. Runs appear here live while draining.</p>'; return; }}
-   var phase = M.phase || 'idle';
-   var col = phase==='drain'?'#58a6ff':phase==='produce'?'#d29922':phase==='restore'?'#3fb950':phase==='maintenance'?'#a5d6ff':'#8a94a6';
-   function bar(cur,tot){{ if(!tot) return ''; var n=Math.min(24,Math.round(24*cur/tot)); var b=''; for(var i=0;i<24;i++) b+= i<n?'#':'.'; return '<div style="font-family:monospace;font-size:15px;color:'+col+'">['+b+'] '+cur+'/'+tot+' shards</div>'; }}
-   body.innerHTML =
-     '<h3 style="color:'+col+';margin:6px 0 8px">'+phase.toUpperCase()+'</h3>'+
-     '<p style="font-size:15px;margin:4px 0">'+esc(M.status||'')+'</p>'+
-     (M.released&&M.released.length?'<p style="margin:4px 0">Released: '+M.released.join(', ')+'</p>':'')+
-     (M.loaded&&M.loaded.length?'<p style="margin:4px 0">Loading/restored: '+M.loaded.join(', ')+'</p>':'')+
-     (M.shard_total?bar(M.shard_current||0,M.shard_total):'')+
-     (M.result?'<p class="note" style="margin:4px 0">'+esc(M.result)+'</p>':'');
-   // ---- time affordances: elapsed (live) + remaining (est.) ----
-   var est=M.estimated_total_seconds||1680, started=(M.run_started_epoch||0)*1000;
-   var dur=M.phase_duration_s||{{drain:60,produce:1200,restore:420}};
-   var split=['drain','produce','restore'].map(function(k){{return k+' ~'+Math.round((dur[k]||0)/60)+'m';}}).join(' · ');
-   function fmt(s){{ var m=Math.floor(s/60), r=Math.floor(s)%60; return m+':'+(r<10?'0':'')+r; }}
-   body.innerHTML += '<div id="mt-time" style="margin-top:10px;padding-top:8px;border-top:1px solid #262c38;font-family:monospace;font-size:14px">'+
-     '&#9202; elapsed <b id="mt-el">'+fmt(M.elapsed_seconds||0)+'</b>'+
-     (M.phase!=='maintenance'?' &nbsp; &#9203; remaining <b id="mt-left">'+fmt(M.eta_remaining_seconds||0)+'</b>':'')+
-     '<span class="note" style="margin-left:8px">(est. '+fmt(est)+' total)</span></div>'+
-     '<p class="note" style="margin:4px 0">expected: '+split+'</p>';
-   if(started){{ setInterval(function(){{
-       var sec=Math.max(0,(Date.now()-started)/1000);
-       var el=document.getElementById('mt-el'), lf=document.getElementById('mt-left');
-       if(el) el.textContent=fmt(sec);
-       if(lf) lf.textContent=fmt(Math.max(0,est-sec));
-     }},1000); }}
-   // floating pill so drain is obvious on any tab
-   if(phase==='drain'||phase==='produce'||phase==='restore'){{
-     var pill=document.createElement('div');
-     pill.style.cssText='position:fixed;top:14px;right:18px;z-index:60;background:#161a22;border:1px solid '+col+';color:'+col+';padding:8px 14px;border-radius:20px;font-family:monospace;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 4px 18px rgba(0,0,0,.4)';
-     pill.innerHTML='<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:'+col+';box-shadow:0 0 10px '+col+';margin-right:9px"></span>'+phase.toUpperCase()+' - DSV4 '+(phase==='drain'||phase==='restore'?'OFFLINE':'BUSY');
-     pill.onclick=function(){{ document.querySelector('[data-tab=maintenance]').click(); }};
-     document.body.appendChild(pill);
-   }}
- }})();
- function esc(s){{ var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }}
- document.querySelector('.tab').classList.add('active');
 
-  document.getElementById('panel-summary').classList.add('active');
-</script>
+// ---- Tab switching ----
+(function(){{
+  var tabs = document.querySelectorAll('.tab');
+  tabs.forEach(function(t){{
+    t.addEventListener('click', function(){{
+      tabs.forEach(function(x){{ x.classList.remove('active'); }});
+      document.querySelectorAll('.panel').forEach(function(x){{ x.classList.remove('active'); }});
+      t.classList.add('active');
+      var p = document.getElementById('panel-' + t.dataset.tab);
+      if (p) p.classList.add('active');
+    }});
+  }});
+}})();
+
+// ---- Maintenance timer (elapsed / remaining / expected) ----
+(function(){{
+  function fmt(s){{ s=Math.max(0,Math.round(s)); var h=Math.floor(s/3600), m=Math.floor((s%3600)/60), x=s%60;
+    return (h?h+'h ':'')+(m||h?m+'m ':'')+x+'s'; }}
+  function tick(){{
+    var M = (window.DATA && DATA.maintenance) || {{}};
+    var el = document.getElementById('mt-el');
+    if (!el) return;
+    if (!M.present){{ el.textContent = 'idle'; return; }}
+    el.textContent = fmt(M.elapsed_seconds || 0);
+  }}
+  function once(){{
+    var M = (window.DATA && DATA.maintenance) || {{}};
+    var host = document.querySelector('#panel-maintenance');
+    if (!host) return;
+    var body = document.getElementById('maintenance-body');
+    if (!body) return;
+    var left = document.createElement('span');
+    left.id = 'mt-left';
+    left.style.cssText = 'color:var(--mut);font-size:12px';
+    body.insertBefore(left, body.firstChild);
+    function paint(){{
+      var M2 = (window.DATA && DATA.maintenance) || {{}};
+      if (!M2.present){{ left.textContent = 'No maintenance window running.'; return; }}
+      var rem = M2.eta_remaining_seconds != null ? M2.eta_remaining_seconds : null;
+      var tot = M2.estimated_total_seconds;
+      left.textContent = 'remaining: ' + (rem != null ? fmt(rem) : '?')
+        + (tot ? (' · expected: ' + fmt(tot)) : '')
+        + (M2.status ? (' · ' + M2.status) : '');
+    }}
+    paint();
+    tick();
+    setInterval(tick, 1000);
+  }}
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', once);
+  else once();
+}})();
+
+    </script>
 </body></html>"""
 
 
