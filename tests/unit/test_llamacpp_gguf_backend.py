@@ -66,6 +66,32 @@ def _write_two_tensor_gguf(
     path.write_bytes(bytes(header) + b"\0" * padding + b"\0" * payload_size)
 
 
+def _strip_scope(argv: list[str]) -> list[str]:
+    """Remove the systemd-run --scope prefix the backend adds under systemd."""
+    if not argv or argv[0] != "systemd-run":
+        return argv
+    # flags that take a value; --quiet/-q does not
+    VALUE_FLAGS = {"-p", "--property", "--description", "--working-directory", "-u", "--unit"}
+    i = 1
+    while i < len(argv):
+        tok = argv[i]
+        if tok in ("--scope", "--quiet", "-q", "--user", "--system"):
+            i += 1
+        elif tok in VALUE_FLAGS:
+            i += 2
+        else:
+            return argv[i:]
+    return []
+
+
+
+
+def _clamped_threads(n: int) -> int:
+    from model_atlas.backend.enforce import DEFAULT_MAX_THREADS
+
+    return max(1, min(n, DEFAULT_MAX_THREADS))
+
+
 def _fake_toolchain(tmp_path: Path, *, commit: str = PINNED_COMMIT) -> tuple[Path, Path]:
     root = tmp_path / "llama.cpp"
     (root / ".git").mkdir(parents=True)
@@ -104,10 +130,10 @@ class FakeRunner:
     def run(self, argv: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
         assert cwd.name == "llama.cpp"
         self.calls.append(list(argv))
-        if "convert_hf_to_gguf.py" in argv[1]:
+        if any("convert_hf_to_gguf.py" in a for a in argv):
             _write_fake_gguf(Path(argv[argv.index("--outfile") + 1]))
             return subprocess.CompletedProcess(argv, 0, "", "")
-        if self.fail_quantizer:
+        if self.fail_quantizer and "llama-quantize" in " ".join(argv):
             return subprocess.CompletedProcess(argv, 7, "", "synthetic quantizer failure")
         _write_fake_gguf(Path(argv[-3]))
         return subprocess.CompletedProcess(argv, 0, "", "")
@@ -197,6 +223,8 @@ def test_fake_subprocess_job_uses_exact_no_pruning_argv_and_preserves_source(
     assert source_manifest(str(source)) == before
     assert len(runner.calls) == 2
     converter, quantizer = runner.calls
+    converter = _strip_scope(converter)
+    quantizer = _strip_scope(quantizer)
     assert converter == [
         str(python),
         str((root / "convert_hf_to_gguf.py").resolve()),
@@ -219,7 +247,7 @@ def test_fake_subprocess_job_uses_exact_no_pruning_argv_and_preserves_source(
     assert quantizer[-3:] == [
         str(engine.run_dir / "stage/llamacpp-gguf-mixed/llamacpp-work/candidate/model.gguf"),
         "Q4_K",
-        "3",
+        str(_clamped_threads(3)),
     ]
     assert not any(arg.startswith("--prune") for call in runner.calls for arg in call)
     outputs = {ref.name: ref for ref in job.stage("llamacpp-gguf-mixed").outputs}
@@ -274,7 +302,7 @@ def test_quantizer_failure_preserves_intermediate_and_resume_skips_conversion(
     context = _context(source, staging)
     adapter.prepare(context)
 
-    with pytest.raises(BackendUnavailable, match="quantizer exited 7"):
+    with pytest.raises(BackendUnavailable, match=r"quantizer \[.*\] exited 7"):
         adapter.execute(context, "first")
     intermediate = staging.parent / "llamacpp-work/source-auto.gguf"
     assert intermediate.is_file()
@@ -289,7 +317,9 @@ def test_quantizer_failure_preserves_intermediate_and_resume_skips_conversion(
     result = adapter2.resume(context, "second")
 
     assert len(resumed.calls) == 1
-    assert resumed.calls[0][0].endswith("llama-quantize")
+    assert _strip_scope(resumed.calls[0])[-1].endswith("llama-quantize") or any(
+        a.endswith("llama-quantize") for a in resumed.calls[0]
+    )
     assert result["runtime_validated"] is False
     assert not intermediate.exists()
     assert _gguf_structure("llamacpp_gguf_mixed", staging, "gguf").ok
@@ -429,7 +459,7 @@ def test_resume_rejects_changed_plan_provenance_before_subprocess(tmp_path: Path
     )
     context = _context(source, staging)
     adapter.prepare(context)
-    with pytest.raises(BackendUnavailable, match="quantizer exited"):
+    with pytest.raises(BackendUnavailable, match=r"quantizer( \[.*\])? exited"):
         adapter.execute(context, "first")
 
     changed = _context(source, staging, plan=PLAN.replace("blk\\.2", "blk\\.3"))

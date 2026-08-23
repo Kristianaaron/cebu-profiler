@@ -19,6 +19,7 @@ from model_atlas.backend.contract import (
     BackendUnavailable,
     ParameterSpec,
 )
+from model_atlas.backend.enforce import cgroup_scope_argv, clamp_threads
 from model_atlas.recipe.schema import RecipeStatus
 
 BACKEND_ID = "llamacpp_gguf_mixed"
@@ -417,17 +418,23 @@ class LlamaCppGgufMixedAdapter(BackendAdapter):
             if final.exists():
                 final.unlink()
             if not (intermediate.is_file() and self._gguf_ok(scratch)):
-                converter_argv = [
-                    str(self.python_executable),
-                    probe.converter,
-                    str(source),
-                    "--outfile",
-                    str(intermediate),
-                    "--outtype",
-                    "auto",
-                ]
+                converter_argv, conv_mode = cgroup_scope_argv(
+                    [
+                        str(self.python_executable),
+                        probe.converter,
+                        str(source),
+                        "--outfile",
+                        str(intermediate),
+                        "--outtype",
+                        "auto",
+                    ],
+                    label="gguf-converter",
+                )
                 self._run_checked(
-                    self.runner, converter_argv, cwd=self.toolchain_root, label="GGUF converter"
+                    self.runner,
+                    converter_argv,
+                    cwd=self.toolchain_root,
+                    label=f"GGUF converter [{conv_mode}]",
                 )
                 if not intermediate.is_file() or not self._gguf_ok(scratch):
                     raise BackendUnavailable("converter did not produce a structurally valid GGUF")
@@ -436,7 +443,9 @@ class LlamaCppGgufMixedAdapter(BackendAdapter):
             candidate = candidate_dir / "model.gguf"
             if candidate.exists():
                 candidate.unlink()
-            quantizer_argv = [
+            threads = clamp_threads(threads)
+            quantizer_argv, quant_mode = cgroup_scope_argv(
+                [
                 probe.quantizer,
                 "--allow-requantize",
                 "--tensor-type-file",
@@ -449,9 +458,14 @@ class LlamaCppGgufMixedAdapter(BackendAdapter):
                 str(candidate),
                 "Q4_K",
                 str(threads),
-            ]
+                ],
+                label="gguf-quantizer",
+            )
             self._run_checked(
-                self.runner, quantizer_argv, cwd=self.toolchain_root, label="GGUF quantizer"
+                self.runner,
+                quantizer_argv,
+                cwd=self.toolchain_root,
+                label=f"GGUF quantizer [{quant_mode}]",
             )
             if not candidate.is_file() or not self._gguf_ok(candidate_dir):
                 raise BackendUnavailable("quantizer did not produce a structurally valid GGUF")
