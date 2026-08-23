@@ -423,6 +423,7 @@ class LlamaCppGgufMixedAdapter(BackendAdapter):
                         str(self.python_executable),
                         probe.converter,
                         str(source),
+                        "--use-temp-file",
                         "--outfile",
                         str(intermediate),
                         "--outtype",

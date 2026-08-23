@@ -229,6 +229,7 @@ def test_fake_subprocess_job_uses_exact_no_pruning_argv_and_preserves_source(
         str(python),
         str((root / "convert_hf_to_gguf.py").resolve()),
         str(source.resolve()),
+        "--use-temp-file",
         "--outfile",
         str(engine.run_dir / "stage/llamacpp-gguf-mixed/llamacpp-work/source-auto.gguf"),
         "--outtype",
