@@ -60,6 +60,14 @@ model-atlas plan k3-mini --budget-gb 0.001 --node-budget-a-gb 0.0006
 
 Run `model-atlas --help` for all commands.
 
+## Runtime-kernel evidence
+
+Atlas imports versioned kernel benchmark receipts without owning the CUDA
+implementation. Exact measured direct-packed observations can gate candidate
+runtime selection; CPU/reference checks and estimates remain visible but cannot
+be ranked as speed evidence. See the
+[Kernel Evidence Bridge](docs/kernel-evidence-bridge.md).
+
 ## License
 
 Apache-2.0.

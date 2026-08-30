@@ -21,6 +21,15 @@ from model_atlas.checkpoint.source_manifest import load_manifest
 from model_atlas.checkpoint.structural_graph import build_structural_graph
 from model_atlas.dashboard import write_dashboard
 from model_atlas.experiments.pareto_v3 import restrict_frontier
+from model_atlas.kernels import (
+    KernelManifestRequest,
+    KernelPhase,
+    KernelQuery,
+    build_execution_manifest,
+    load_catalog,
+    rankability_reasons,
+    write_catalog,
+)
 from model_atlas.planning.memory_planner import GIB, assess
 from model_atlas.planning.realbytes import account_manifest, plan_candidates, report
 from model_atlas.registry.architectures import get_registry
@@ -87,10 +96,93 @@ def export(
 def dashboard(
     out: str = typer.Option("atlas_dashboard.html", "--out", help="output HTML path"),
     seed: int = typer.Option(0, "--seed"),
+    kernel_receipt: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--kernel-receipt",
+        help="Runtime-kernel receipt or catalog; repeat to import several",
+    ),
 ) -> None:
     """Render the Atlas Lab interactive dashboard from measured data."""
-    path = write_dashboard(out, seed=seed)
+    path = write_dashboard(out, seed=seed, kernel_receipts=kernel_receipt)
     print(f"wrote interactive dashboard: {path}")
+
+
+@app.command("kernel-import")
+def kernel_import(
+    receipts: list[str] = typer.Argument(..., help="Receipt/catalog JSON files"),  # noqa: B008
+    out: str = typer.Option("kernel-evidence.json", "--out", help="Normalized catalog path"),
+) -> None:
+    """Validate runtime receipts and write a deterministic Atlas catalog."""
+    catalog = load_catalog(receipts)
+    path = write_catalog(out, catalog)
+    eligible = sum(not rankability_reasons(receipt) for receipt in catalog.receipts)
+    print(f"wrote kernel evidence catalog: {path}")
+    print(f"  receipts: {len(catalog.receipts)}")
+    print(f"  measured and ranking-eligible: {eligible}")
+
+
+@app.command("kernel-query")
+def kernel_query(
+    catalog_path: str = typer.Option(..., "--catalog"),
+    device_name: str = typer.Option(..., "--device"),
+    compute_capability: str = typer.Option(..., "--compute-capability"),
+    cuda_version: str = typer.Option(..., "--cuda-version"),
+    driver_version: str = typer.Option(..., "--driver-version"),
+    representation_format: str = typer.Option(..., "--format"),
+    abi_name: str = typer.Option(..., "--abi"),
+    abi_version: int = typer.Option(1, "--abi-version"),
+    phase: KernelPhase = typer.Option(KernelPhase.DECODE, "--phase"),  # noqa: B008
+    m: int = typer.Option(..., "--m"),
+    n: int = typer.Option(..., "--n"),
+    k: int = typer.Option(..., "--k"),
+    tp_world_size: int = typer.Option(1, "--tp"),
+    grouped_moe: bool = typer.Option(False, "--grouped-moe"),
+    backend_commit: str | None = typer.Option(None, "--backend-commit"),
+    allow_bucket_estimate: bool = typer.Option(False, "--allow-bucket-estimate"),
+) -> None:
+    """Ask the fail-closed kernel oracle about one exact workload."""
+    catalog = load_catalog([catalog_path])
+    result = catalog.query(
+        KernelQuery(
+            device_name=device_name,
+            compute_capability=compute_capability,
+            cuda_version=cuda_version,
+            driver_version=driver_version,
+            representation_format=representation_format,
+            abi_name=abi_name,
+            abi_version=abi_version,
+            phase=phase,
+            m=m,
+            n=n,
+            k=k,
+            tp_world_size=tp_world_size,
+            grouped_moe=grouped_moe,
+            backend_commit=backend_commit,
+        ),
+        allow_bucket_estimate=allow_bucket_estimate,
+    )
+    print(result.model_dump_json(indent=2))
+    if not result.eligible:
+        raise typer.Exit(2)
+
+
+@app.command("kernel-manifest")
+def kernel_manifest(
+    catalog_path: str = typer.Option(..., "--catalog"),
+    request_path: str = typer.Option(..., "--request"),
+    out: str = typer.Option("kernel-execution-manifest.json", "--out"),
+) -> None:
+    """Bind a candidate to exact measured kernels or refuse the export."""
+    request = KernelManifestRequest.model_validate_json(Path(request_path).read_bytes())
+    manifest = build_execution_manifest(
+        request.candidate_id,
+        request.requirements,
+        load_catalog([catalog_path]),
+    )
+    destination = Path(out)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(manifest.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    print(f"wrote measured kernel execution manifest: {destination}")
 
 
 @app.command("list-architectures")

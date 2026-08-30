@@ -26,6 +26,7 @@ from model_atlas.atlas.runtime import MiniMoE, build_mini_moe, forward
 from model_atlas.builder import build_derivative
 from model_atlas.compression import expert_response_curve, get_backend_registry
 from model_atlas.evaluation import detect_leakage, evaluate_heldout, promote_allowed
+from model_atlas.kernels import load_catalog, summarize_catalog
 from model_atlas.planning import SearchInputs, generate_candidates
 from model_atlas.registry.architectures import get_registry
 from model_atlas.schemas.evidence import EvidenceKind
@@ -54,6 +55,7 @@ _ICONS: dict[str, str] = {
     "corpus": '<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>',
     "hierarchy": '<path d="M8 6h13M8 12h13M8 18h13"/><circle cx="4" cy="6" r="2"/><circle cx="4" cy="12" r="2"/><circle cx="4" cy="18" r="2"/>',
     "reality": '<path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><circle cx="12" cy="12" r="6"/>',
+    "kernels": '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 3v4M16 3v4M8 17v4M16 17v4M3 8h4M17 8h4M3 16h4M17 16h4"/><rect x="8" y="8" width="8" height="8" rx="1"/>',
 }
 
 
@@ -212,7 +214,10 @@ def _real_bytes_payload() -> dict[str, Any]:
     return out
 
 
-def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
+def build_dashboard_data(
+    seed: int = SEED,
+    kernel_receipts: list[str] | None = None,
+) -> dict[str, Any]:
     """Run the measured pipeline and return JSON-serializable dashboard data."""
     model = build_mini_moe(ARCH, seed=seed)
     corpus, labels, stages = make_synthetic_corpus(
@@ -408,6 +413,7 @@ def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
         "eval_host": 8100,
         "note": "Eval Harness = standalone benchmarking app, Atlas = profiling/fit platform",
     }
+    kernel_evidence_payload = summarize_catalog(load_catalog(kernel_receipts or []))
 
     return {
         "meta": {
@@ -430,6 +436,7 @@ def build_dashboard_data(seed: int = SEED) -> dict[str, Any]:
         "hierarchy": hierarchy_payload,
         "reality": reality_payload,
         "ecosystem": ecosystem_payload,
+        "kernel_evidence": kernel_evidence_payload,
         "pareto": '<path d="M3 3v18h18"/><path d="M3 17 9 11 13 15 21 7"/>',
     "v3": _v3_pipeline_payload(model, corpus, seed),
         "candidates_graph": _candidate_graph_payload(model, corpus, seed),
@@ -904,6 +911,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
             "section": "Quantization & Fit",
             "tabs": [
                 {"id": "compression", "title": "Compression"},
+                {"id": "kernels", "title": "Runtime Kernels"},
                 {"id": "candidate", "title": "Derivatives"},
                 {"id": "heldout", "title": "Held-out"},
                 {"id": "reality", "title": "Real-bytes"},
@@ -1204,6 +1212,11 @@ def render_dashboard(data: dict[str, Any]) -> str:
    </div>
  </div>
  <div class="panel" id="panel-compression"><p class="note">Per-expert compression response (int4 vs int8), reconstruction error + output drift (measured math).</p><table id="t-compression"></table></div>
+ <div class="panel" id="panel-kernels">
+   <p class="note">Imported runtime-kernel evidence. Only exact-shape, direct packed-weight measurements on identified hardware may influence speed rankings or execution manifests. CPU/reference and bucket-only observations remain visible but ineligible.</p>
+   <div id="kernel-summary"></div>
+   <table id="t-kernels"></table>
+ </div>
  <div class="panel" id="panel-candidate"><p class="note">Derivative candidates: kept experts/layer, resident bytes per node, go/no-go fit, held-out retention.</p><table id="t-candidate"></table></div>
  <div class="panel" id="panel-heldout"><p class="note">Per-capability held-out retention (derivative vs source), measured.</p><table id="t-heldout"></table></div>
  <div class="panel" id="panel-reality"><p class="note">Real-bytes derivative envelopes (§24/§25) computed from measured checkpoint bytes — the mounted GLM-5.2 NVFP4 when present, else a synthetic caret. Retention fractions are estimates (a routing census needs inference); the byte math is measured.</p>
@@ -1364,6 +1377,17 @@ def render_dashboard(data: dict[str, Any]) -> str:
  fill('t-path', ['count','success rate','signature'], DATA.paths.map(r=>({{count:r.count, 'success rate':r.success_rate, signature:r.signature.map(s=>s.join(',')).join(' | ')}})));
  fill('t-compression', ['layer/expert','format','bits','recon','drift','repair'],
    DATA.compression.flatMap(c=>c.points.map(p=>({{'layer/expert':`L${{c.layer}}E${{c.expert}}`, format:p.format, bits:p.bits, recon:p.recon, drift:p.drift, repair:p.repair}}))));
+ (function(){{
+   var ke = DATA.kernel_evidence || {{status:'unmeasured',counts:{{}},rows:[]}};
+   document.getElementById('kernel-summary').innerHTML =
+     `<span class='stat'><span class='k'>oracle status</span><span class='v'>${{ke.status}}</span></span>`+
+     `<span class='stat'><span class='k'>measured eligible</span><span class='v'>${{(ke.counts||{{}}).measured||0}}</span></span>`+
+     `<span class='stat'><span class='k'>compatibility only</span><span class='v'>${{(ke.counts||{{}}).compatibility_only||0}}</span></span>`;
+   fill('t-kernels', ['receipt','status','hardware','CC','representation','phase','shape','latency ms','bottleneck','reason'],
+     (ke.rows||[]).map(r=>({{'receipt':r.receipt_id,'status':r.status,'hardware':r.hardware,'CC':r.cc,
+       'representation':r.representation,'phase':r.phase,'shape':r.shape,'latency ms':r.latency_ms??'-',
+       'bottleneck':r.bottleneck,'reason':r.reason||'-'}})));
+ }})();
  fill('t-candidate', ['name','kept/layer','resident A','resident B','fitted','retention','promo'],
    DATA.candidates.map(c=>({{name:c.name, 'kept/layer':(c.kept_per_layer?Object.values(c.kept_per_layer).join(','):'-'), 'resident A':c.resident_a, 'resident B':c.resident_b, fitted:c.fitted, retention:c.retention, promo:(c.promotion_blocked?'blocked':'ok')}})));
  fill('t-heldout', ['label','n','source','deriv','retention'], DATA.heldout.map(r=>({{label:r.label, n:r.n, source:r.source, deriv:r.deriv, retention:r.retention}})));
@@ -1692,8 +1716,12 @@ def render_dashboard(data: dict[str, Any]) -> str:
 </script></body></html>"""
 
 
-def write_dashboard(path: str, seed: int = SEED) -> str:
-    data = build_dashboard_data(seed=seed)
+def write_dashboard(
+    path: str,
+    seed: int = SEED,
+    kernel_receipts: list[str] | None = None,
+) -> str:
+    data = build_dashboard_data(seed=seed, kernel_receipts=kernel_receipts)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(render_dashboard(data))
     return path

@@ -32,6 +32,8 @@ def test_build_dashboard_data_has_sections():
     assert data["reality"]["candidates"], "real-bytes envelopes must be non-empty"
     assert data["reality"]["measured_gib"] > 0
     assert data["ecosystem"]["eval_host"] == 8100
+    assert data["kernel_evidence"]["status"] == "unmeasured"
+    assert data["kernel_evidence"]["rows"] == []
 
 
 def test_render_dashboard_is_self_contained_html():
@@ -44,6 +46,8 @@ def test_render_dashboard_is_self_contained_html():
     # collapses to its intrinsic 300x150 size and the cells render invisibly.
     assert "canvas#cap3d{width:100%" in html
     assert "canvas#cap3d-contrast{width:100%" in html
+    assert 'id="panel-kernels"' in html
+    assert "Runtime Kernels" in html
     # embedded JSON payload parses (const DATA = {...}; then JS follows)
     start = html.index("const DATA = ") + len("const DATA = ")
     i = start
