@@ -2,7 +2,7 @@
 
 The profiler consumes receipts; it does not own CUDA kernel implementation.  A
 receipt is eligible for runtime decisions only when it describes a measured,
-direct-packed execution on identified hardware at the exact requested shape.
+direct execution on identified hardware at the exact requested shape.
 """
 
 from __future__ import annotations
@@ -11,12 +11,14 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from model_atlas.schemas.evidence import EvidenceKind
 
 
 class KernelPhase(StrEnum):
+    """Convenience constants, not a schema allowlist; workload phases are strings."""
+
     DECODE = "decode"
     PREFILL = "prefill"
 
@@ -28,13 +30,17 @@ class KernelRunStatus(StrEnum):
 
 
 class KernelExecutionPath(StrEnum):
+    DIRECT_NATIVE = "direct_native"
     DIRECT_PACKED = "direct_packed"
+    DIRECT_SPARSE = "direct_sparse"
     MATERIALIZED_DEQUANT = "materialized_dequant"
     CPU_REFERENCE = "cpu_reference"
     UNKNOWN = "unknown"
 
 
 class KernelBottleneck(StrEnum):
+    """Common labels; receipt bottlenecks remain extensible strings."""
+
     MEMORY_BANDWIDTH = "memory_bandwidth"
     RECONSTRUCTION = "reconstruction"
     COMPUTE = "compute"
@@ -72,16 +78,22 @@ class KernelRepresentation(BaseModel):
     abi_version: int = Field(ge=1)
     bits_per_weight: float = Field(gt=0.0)
     codebook: str | None = None
-    fused_reconstruction: bool
-    full_dequant_materialized: bool
+    fused_transform: bool = Field(
+        validation_alias=AliasChoices("fused_transform", "fused_reconstruction")
+    )
+    full_precision_materialized: bool = Field(
+        validation_alias=AliasChoices(
+            "full_precision_materialized", "full_dequant_materialized"
+        )
+    )
 
 
 class KernelWorkload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    model_family: str
-    projection: str
-    phase: KernelPhase
+    model_id: str = Field(validation_alias=AliasChoices("model_id", "model_family"))
+    operator: str = Field(validation_alias=AliasChoices("operator", "projection"))
+    phase: str = Field(min_length=1)
     m: int = Field(ge=1)
     n: int = Field(ge=1)
     k: int = Field(ge=1)
@@ -112,7 +124,7 @@ class KernelMetrics(BaseModel):
     reconstruction_overhead_pct: float | None = Field(default=None, ge=0.0)
     max_abs_error: float | None = Field(default=None, ge=0.0)
     mean_abs_error: float | None = Field(default=None, ge=0.0)
-    bottleneck: KernelBottleneck = KernelBottleneck.UNKNOWN
+    bottleneck: str = KernelBottleneck.UNKNOWN
 
 
 class KernelProvenance(BaseModel):
@@ -170,7 +182,7 @@ class KernelQuery(BaseModel):
     representation_format: str
     abi_name: str
     abi_version: int = Field(ge=1)
-    phase: KernelPhase
+    phase: str = Field(min_length=1)
     m: int = Field(ge=1)
     n: int = Field(ge=1)
     k: int = Field(ge=1)
@@ -195,7 +207,7 @@ class KernelOracleKey(BaseModel):
     representation_format: str
     abi_name: str
     abi_version: int
-    phase: KernelPhase
+    phase: str
     m: int
     m_bucket: str
     n: int

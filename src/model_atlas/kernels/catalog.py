@@ -36,6 +36,13 @@ from model_atlas.kernels.schema import (
 from model_atlas.schemas.evidence import EvidenceKind
 
 _MAX_RECEIPT_BYTES = 4 * 1024 * 1024
+_DIRECT_EXECUTION_PATHS = frozenset(
+    {
+        KernelExecutionPath.DIRECT_NATIVE,
+        KernelExecutionPath.DIRECT_PACKED,
+        KernelExecutionPath.DIRECT_SPARSE,
+    }
+)
 
 
 class KernelEvidenceError(ValueError):
@@ -112,7 +119,7 @@ class KernelEvidenceCatalog(BaseModel):
             status=KernelEvidenceStatus.UNMEASURED,
             eligible=False,
             exact_shape=False,
-            reasons=["no compatible exact-shape direct-packed measurement"],
+            reasons=["no compatible exact-shape direct-kernel measurement"],
         )
 
 
@@ -127,12 +134,15 @@ def rankability_reasons(receipt: KernelBenchmarkReceipt) -> list[str]:
         reasons.append("hardware identity is incomplete")
     if not receipt.hardware.cuda_version or not receipt.hardware.driver_version:
         reasons.append("CUDA/driver identity is incomplete")
-    if receipt.backend.execution_path is not KernelExecutionPath.DIRECT_PACKED:
-        reasons.append("execution path is not direct packed-weight compute")
-    if not receipt.representation.fused_reconstruction:
-        reasons.append("reconstruction is not fused with compute")
-    if receipt.representation.full_dequant_materialized:
-        reasons.append("a full dequantized weight tensor was materialized")
+    if receipt.backend.execution_path not in _DIRECT_EXECUTION_PATHS:
+        reasons.append("execution path is not a direct kernel path")
+    if (
+        receipt.backend.execution_path is KernelExecutionPath.DIRECT_PACKED
+        and not receipt.representation.fused_transform
+    ):
+        reasons.append("packed representation transform is not fused with compute")
+    if receipt.representation.full_precision_materialized:
+        reasons.append("a full-precision weight tensor was materialized")
     if not receipt.backend.commit:
         reasons.append("backend commit is missing")
     if receipt.provenance.producer_schema != "atlas.kernel-benchmark/v1":
@@ -272,10 +282,10 @@ def summarize_catalog(catalog: KernelEvidenceCatalog) -> dict[str, Any]:
                     f"{receipt.representation.format}/"
                     f"{receipt.representation.abi_name}@{receipt.representation.abi_version}"
                 ),
-                "phase": receipt.workload.phase.value,
+                "phase": receipt.workload.phase,
                 "shape": f"{receipt.workload.m}x{receipt.workload.n}x{receipt.workload.k}",
                 "latency_ms": receipt.metrics.latency_ms,
-                "bottleneck": receipt.metrics.bottleneck.value,
+                "bottleneck": receipt.metrics.bottleneck,
                 "reason": "; ".join(reasons),
             }
         )
@@ -303,7 +313,7 @@ def _matches_identity(receipt: KernelBenchmarkReceipt, query: KernelQuery) -> bo
         and receipt.representation.format == query.representation_format
         and receipt.representation.abi_name == query.abi_name
         and receipt.representation.abi_version == query.abi_version
-        and receipt.workload.phase is query.phase
+        and receipt.workload.phase == query.phase
         and receipt.workload.n == query.n
         and receipt.workload.k == query.k
         and receipt.workload.tp_world_size == query.tp_world_size
@@ -429,12 +439,12 @@ def _adapt_milestone0(
                     abi_version=int(abi.get("abi_version", 1)),
                     bits_per_weight=float(abi.get("bits", 3.0)),
                     codebook=str(abi.get("codebook") or "mcg"),
-                    fused_reconstruction=direct_proof,
-                    full_dequant_materialized=not direct_proof,
+                    fused_transform=direct_proof,
+                    full_precision_materialized=not direct_proof,
                 ),
                 workload=KernelWorkload(
-                    model_family=str(case.get("model") or "milestone0-synthetic"),
-                    projection=str(case.get("projection") or "synthetic"),
+                    model_id=str(case.get("model") or "milestone0-synthetic"),
+                    operator=str(case.get("projection") or "synthetic"),
                     phase=KernelPhase.DECODE,
                     m=int(shape["m"]),
                     n=int(shape["n"]),

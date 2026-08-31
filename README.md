@@ -63,9 +63,11 @@ Run `model-atlas --help` for all commands.
 ## Runtime-kernel evidence
 
 Atlas imports versioned kernel benchmark receipts without owning the CUDA
-implementation. Exact measured direct-packed observations can gate candidate
+implementation. Exact measured direct-kernel observations can gate candidate
 runtime selection; CPU/reference checks and estimates remain visible but cannot
-be ranked as speed evidence. See the
+be ranked as speed evidence. Model IDs, operator names, phases, representations,
+and ABIs are data rather than allowlists, so new models do not require bridge
+code changes. See the
 [Kernel Evidence Bridge](docs/kernel-evidence-bridge.md).
 
 ## License

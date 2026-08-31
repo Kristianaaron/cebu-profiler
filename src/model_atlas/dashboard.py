@@ -1213,7 +1213,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
  </div>
  <div class="panel" id="panel-compression"><p class="note">Per-expert compression response (int4 vs int8), reconstruction error + output drift (measured math).</p><table id="t-compression"></table></div>
  <div class="panel" id="panel-kernels">
-   <p class="note">Imported runtime-kernel evidence. Only exact-shape, direct packed-weight measurements on identified hardware may influence speed rankings or execution manifests. CPU/reference and bucket-only observations remain visible but ineligible.</p>
+   <p class="note">Imported runtime-kernel evidence for any model and representation ABI. Only exact-shape direct-native, fused-packed, or direct-sparse measurements on identified hardware may influence speed rankings or execution manifests. CPU/reference and bucket-only observations remain visible but ineligible.</p>
    <div id="kernel-summary"></div>
    <table id="t-kernels"></table>
  </div>

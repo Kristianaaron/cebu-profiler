@@ -23,7 +23,6 @@ from model_atlas.dashboard import write_dashboard
 from model_atlas.experiments.pareto_v3 import restrict_frontier
 from model_atlas.kernels import (
     KernelManifestRequest,
-    KernelPhase,
     KernelQuery,
     build_execution_manifest,
     load_catalog,
@@ -131,7 +130,7 @@ def kernel_query(
     representation_format: str = typer.Option(..., "--format"),
     abi_name: str = typer.Option(..., "--abi"),
     abi_version: int = typer.Option(1, "--abi-version"),
-    phase: KernelPhase = typer.Option(KernelPhase.DECODE, "--phase"),  # noqa: B008
+    phase: str = typer.Option("decode", "--phase"),
     m: int = typer.Option(..., "--m"),
     n: int = typer.Option(..., "--n"),
     k: int = typer.Option(..., "--k"),

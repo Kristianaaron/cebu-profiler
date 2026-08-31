@@ -59,12 +59,12 @@ def _receipt(
             abi_version=1,
             bits_per_weight=3.0,
             codebook="mcg-3bit",
-            fused_reconstruction=fused,
-            full_dequant_materialized=materialized,
+            fused_transform=fused,
+            full_precision_materialized=materialized,
         ),
         workload=KernelWorkload(
-            model_family="glm-5.2",
-            projection="expert-down",
+            model_id="fixture/moe-v1",
+            operator="experts.down",
             phase=KernelPhase.DECODE,
             m=m,
             n=6144,
@@ -144,8 +144,8 @@ def test_materialized_dequant_measurement_is_compatibility_only() -> None:
         materialized=True,
     )
     reasons = rankability_reasons(receipt)
-    assert "execution path is not direct packed-weight compute" in reasons
-    assert "a full dequantized weight tensor was materialized" in reasons
+    assert "execution path is not a direct kernel path" in reasons
+    assert "a full-precision weight tensor was materialized" in reasons
     result = KernelEvidenceCatalog(receipts=[receipt]).query(_query())
     assert result.status is KernelEvidenceStatus.COMPATIBILITY_ONLY
     assert result.eligible is False
@@ -175,6 +175,66 @@ def test_candidate_runtime_objective_uses_only_measured_exact_kernel_latency() -
     assert assessment.eligible is True
     assert assessment.status is KernelEvidenceStatus.MEASURED
     assert assessment.measured_kernel_latency_ms == 0.081
+
+
+def test_unseen_model_and_native_non_exl3_representation_need_no_registration() -> None:
+    assert (
+        KernelMetrics(latency_ms=0.1, bottleneck="future_collective_overlap_bound").bottleneck
+        == "future_collective_overlap_bound"
+    )
+    receipt = _receipt(
+        receipt_id="future-native-model-m2",
+        execution_path=KernelExecutionPath.DIRECT_NATIVE,
+        fused=False,
+        materialized=False,
+    ).model_copy(
+        update={
+            "representation": KernelRepresentation(
+                format="future-q5",
+                abi_name="vendor.future.block-q5",
+                abi_version=7,
+                bits_per_weight=5.25,
+                fused_transform=False,
+                full_precision_materialized=False,
+            ),
+            "workload": KernelWorkload(
+                model_id="publisher/model-released-after-atlas",
+                operator="novel_moe.branch_17.projection_z",
+                phase="vision_encode_v2",
+                m=2,
+                n=6144,
+                k=1024,
+                tp_world_size=2,
+            ),
+        }
+    )
+    query = _query().model_copy(
+        update={
+            "representation_format": "future-q5",
+            "abi_name": "vendor.future.block-q5",
+            "abi_version": 7,
+            "phase": "vision_encode_v2",
+        }
+    )
+    result = KernelEvidenceCatalog(receipts=[receipt]).query(query)
+    assert result.status is KernelEvidenceStatus.MEASURED
+    assert result.eligible is True
+
+
+def test_first_branch_v1_field_names_remain_import_compatible() -> None:
+    payload = _receipt().model_dump(mode="json")
+    representation = payload["representation"]
+    representation["fused_reconstruction"] = representation.pop("fused_transform")
+    representation["full_dequant_materialized"] = representation.pop(
+        "full_precision_materialized"
+    )
+    workload = payload["workload"]
+    workload["model_family"] = workload.pop("model_id")
+    workload["projection"] = workload.pop("operator")
+    imported = KernelBenchmarkReceipt.model_validate(payload)
+    assert imported.workload.model_id == "fixture/moe-v1"
+    assert imported.workload.operator == "experts.down"
+    assert imported.representation.fused_transform is True
 
 
 def test_runtime_m0_cpu_receipt_imports_without_becoming_speed_evidence(tmp_path: Path) -> None:
