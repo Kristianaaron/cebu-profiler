@@ -176,9 +176,7 @@ def _enumerate_regular_files(root_descriptor: int) -> dict[str, dict[str, int]]:
         for entry in entries:
             relative = prefix / entry.name
             try:
-                entry_stat = os.stat(
-                    entry.name, dir_fd=directory_descriptor, follow_symlinks=False
-                )
+                entry_stat = os.stat(entry.name, dir_fd=directory_descriptor, follow_symlinks=False)
             except OSError as exc:
                 raise SourceProfileError(f"cannot stat source entry {relative}: {exc}") from exc
             if stat.S_ISLNK(entry_stat.st_mode):
@@ -242,9 +240,7 @@ def _open_parent_directory(root_descriptor: int, relative: str) -> tuple[int, st
         raise
 
 
-def _hash_checked_file(
-    root_descriptor: int, relative: str, expected: dict[str, int]
-) -> str:
+def _hash_checked_file(root_descriptor: int, relative: str, expected: dict[str, int]) -> str:
     """Hash one fixed regular file using bounded reads and race checks."""
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -295,11 +291,7 @@ def _checkpoint_key(path: Path) -> bytes:
     try:
         descriptor = os.open(path, flags, 0o600)
     except FileExistsError:
-        read_flags = (
-            os.O_RDONLY
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0)
-        )
+        read_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         try:
             existing_descriptor = os.open(path, read_flags)
         except OSError as exc:
@@ -316,9 +308,7 @@ def _checkpoint_key(path: Path) -> bytes:
                 ) from None
             payload = os.read(existing_descriptor, 33)
             if len(payload) != 32 or os.read(existing_descriptor, 1):
-                raise SourceProfileError(
-                    "manifest checkpoint key has invalid length"
-                ) from None
+                raise SourceProfileError("manifest checkpoint key has invalid length") from None
             key_stat_after = os.fstat(existing_descriptor)
             if _reuse_stat_record(key_stat) != _reuse_stat_record(key_stat_after):
                 raise SourceProfileError("manifest checkpoint key changed while read")
@@ -635,6 +625,24 @@ def build_glm52_mixed_gguf_profile(
         raise SourceProfileError("risk evidence kind must be estimated")
 
     manifest_digest = source_manifest_digest(manifest)
+    # Honest channel-saliency basis: NO real activation-profiling artifact
+    # exists yet, so the claim is kind="estimated" over the deterministic
+    # header-derived structural census bound into this profile. The detail
+    # format mirrors nvfp4_suitability so a future measured artifact can
+    # upgrade the kind with sha256 lineage:
+    #   basis_artifact_sha256=<sha256 of the structural census basis>;
+    #   basis=<name>;activation_profiling=not_yet_run
+    census_basis = json.dumps(
+        {
+            "source_manifest_digest": manifest_digest,
+            "config_sha256": config_sha256,
+            "index_sha256": index_sha256,
+            "tensor_plan_sha256": tensor_plan_sha256,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    census_basis_sha256 = hashlib.sha256(census_basis).hexdigest()
     profile: dict[str, object] = {
         "schema_version": 1,
         "profile_kind": "glm52_mixed_gguf_quantize_only",
@@ -652,8 +660,16 @@ def build_glm52_mixed_gguf_profile(
                 "kind": "estimated",
                 "present": True,
                 "detail": (
-                    f"risk_artifact_sha256={risk_sha256};"
-                    f"tensor_plan_sha256={tensor_plan_sha256}"
+                    f"risk_artifact_sha256={risk_sha256};tensor_plan_sha256={tensor_plan_sha256}"
+                ),
+            },
+            "channel_saliency": {
+                "kind": "estimated",
+                "present": True,
+                "detail": (
+                    f"basis=header_structural_census;"
+                    f"basis_artifact_sha256={census_basis_sha256};"
+                    "activation_profiling=not_yet_run"
                 ),
             },
             "routing": None,

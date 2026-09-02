@@ -100,16 +100,12 @@ def test_transport_junk_inode_churn_does_not_invalidate_payload(tmp_path: Path) 
     _write(metadata, "metadata-v1")
     checkpoint = tmp_path / "state.json"
     output = tmp_path / "manifest.json"
-    first = build_resumable_source_manifest(
-        source, checkpoint_path=checkpoint, output_path=output
-    )
+    first = build_resumable_source_manifest(source, checkpoint_path=checkpoint, output_path=output)
     junk.unlink()
     _write(junk, "junk")
     metadata.unlink()
     _write(metadata, "metadata-v2")
-    second = build_resumable_source_manifest(
-        source, checkpoint_path=checkpoint, output_path=output
-    )
+    second = build_resumable_source_manifest(source, checkpoint_path=checkpoint, output_path=output)
     assert second.digest == first.digest
     assert second.hashed_files == 0
     assert second.reused_files == 1
@@ -174,15 +170,36 @@ def test_profile_binds_completed_manifest_and_never_fabricates_calibration(
     assert isinstance(evidence, dict)
     nvfp4 = evidence["nvfp4_suitability"]
     assert isinstance(nvfp4, dict)
+    expected_basis = hashlib.sha256(
+        json.dumps(
+            {
+                "source_manifest_digest": source_manifest_digest(json.loads(manifest.read_text())),
+                "config_sha256": _sha(source / "config.json"),
+                "index_sha256": _sha(source / "model.safetensors.index.json"),
+                "tensor_plan_sha256": _sha(plan),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    saliency = evidence["channel_saliency"]
+    assert isinstance(saliency, dict)
     assert evidence == {
         "nvfp4_suitability": nvfp4,
+        "channel_saliency": {
+            "kind": "estimated",
+            "present": True,
+            "detail": (
+                f"basis=header_structural_census;"
+                f"basis_artifact_sha256={expected_basis};"
+                "activation_profiling=not_yet_run"
+            ),
+        },
         "routing": None,
     }
     assert "calibration" not in profile
     assert "quality_metrics" not in profile
-    assert nvfp4["detail"] == (
-        f"risk_artifact_sha256={_sha(risk)};tensor_plan_sha256={_sha(plan)}"
-    )
+    assert nvfp4["detail"] == (f"risk_artifact_sha256={_sha(risk)};tensor_plan_sha256={_sha(plan)}")
     assert profile["execution"] == {
         "source_id": "nvidia/GLM-5.2-NVFP4",
         "checkpoint_path": str(source.resolve()),
@@ -193,9 +210,9 @@ def test_profile_binds_completed_manifest_and_never_fabricates_calibration(
     }
     imported = AtlasProfile.from_dict(json.loads(output.read_text()))
     assert imported.execution is not None
-    assert imported.execution.source_manifest_digest == profile["execution"][
-        "source_manifest_digest"
-    ]
+    assert (
+        imported.execution.source_manifest_digest == profile["execution"]["source_manifest_digest"]
+    )
     assert imported.execution.has_calibration is False
     assert output.exists()
 
