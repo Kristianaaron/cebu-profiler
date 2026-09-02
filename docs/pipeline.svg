@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1160" height="640" viewBox="0 0 1160 640" font-family="ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0c1220"/><stop offset="1" stop-color="#101a2e"/>
+    </linearGradient>
+    <linearGradient id="acc" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#818cf8"/>
+    </linearGradient>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <rect width="1160" height="640" rx="16" fill="url(#bg)"/>
+  <text x="48" y="58" fill="#f1f5f9" font-size="30" font-weight="700">Cebu Profiler</text>
+  <text x="48" y="86" fill="#94a3b8" font-size="15">Shrink a huge model. Prove it still works. Fail closed.</text>
+  <rect x="48" y="104" width="1064" height="2" fill="url(#acc)" opacity="0.6"/>
+
+  <!-- stage template: rect + title + subtitle -->
+  <!-- Row 1 -->
+  <g>
+    <rect x="48"  y="150" width="240" height="110" rx="12" fill="#16233b" stroke="#243b5e"/>
+    <circle cx="76" cy="180" r="11" fill="#38bdf8"/><text x="76" y="184.5" fill="#0c1220" font-size="12" font-weight="800" text-anchor="middle">1</text>
+    <text x="96" y="185" fill="#e2e8f0" font-size="16" font-weight="700">Profile</text>
+    <text x="66" y="212" fill="#94a3b8" font-size="12.5">Census every tensor and layer.</text>
+    <text x="66" y="230" fill="#94a3b8" font-size="12.5">What is this model made of,</text>
+    <text x="66" y="248" fill="#94a3b8" font-size="12.5">and what does it prove?</text>
+
+    <rect x="328" y="150" width="240" height="110" rx="12" fill="#16233b" stroke="#243b5e"/>
+    <circle cx="356" cy="180" r="11" fill="#818cf8"/><text x="356" y="184.5" fill="#0c1220" font-size="12" font-weight="800" text-anchor="middle">2</text>
+    <text x="376" y="185" fill="#e2e8f0" font-size="16" font-weight="700">Recommend</text>
+    <text x="346" y="212" fill="#94a3b8" font-size="12.5">Pick the method the evidence</text>
+    <text x="346" y="230" fill="#94a3b8" font-size="12.5">supports — quantize or prune.</text>
+    <text x="346" y="248" fill="#94a3b8" font-size="12.5">No evidence, no method.</text>
+
+    <rect x="608" y="150" width="240" height="110" rx="12" fill="#16233b" stroke="#243b5e"/>
+    <circle cx="636" cy="180" r="11" fill="#34d399"/><text x="636" y="184.5" fill="#0c1220" font-size="12" font-weight="800" text-anchor="middle">3</text>
+    <text x="656" y="185" fill="#e2e8f0" font-size="16" font-weight="700">Compress</text>
+    <text x="626" y="212" fill="#94a3b8" font-size="12.5">GGUF-mixed quantization, or</text>
+    <text x="626" y="230" fill="#94a3b8" font-size="12.5">saliency-ranked 16-group expert</text>
+    <text x="626" y="248" fill="#94a3b8" font-size="12.5">width-slice. Aligned, repairable.</text>
+
+    <rect x="888" y="150" width="224" height="110" rx="12" fill="#16233b" stroke="#243b5e"/>
+    <circle cx="916" cy="180" r="11" fill="#fbbf24"/><text x="916" y="184.5" fill="#0c1220" font-size="12" font-weight="800" text-anchor="middle">4</text>
+    <text x="936" y="185" fill="#e2e8f0" font-size="16" font-weight="700">Verify &amp; hand off</text>
+    <text x="906" y="212" fill="#94a3b8" font-size="12.5">Structure checks, teacher KLD/CKA</text>
+    <text x="906" y="230" fill="#94a3b8" font-size="12.5">gate, then a hash-verified</text>
+    <text x="906" y="248" fill="#94a3b8" font-size="12.5">.atlasbundle for serving.</text>
+  </g>
+  <line x1="288" y1="205" x2="326" y2="205" stroke="#64748b" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="568" y1="205" x2="606" y2="205" stroke="#64748b" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="848" y1="205" x2="886" y2="205" stroke="#64748b" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Fail-closed band -->
+  <rect x="48" y="300" width="1064" height="92" rx="12" fill="#0f1a2c" stroke="#7f1d1d" stroke-dasharray="6 4"/>
+  <text x="76" y="334" fill="#fca5a5" font-size="15" font-weight="700">✕  Fail-closed at every step</text>
+  <text x="76" y="356" fill="#94a3b8" font-size="12.5">Missing evidence, malformed maps, or a gate rejection stops the pipeline — nothing is guessed,</text>
+  <text x="76" y="374" fill="#94a3b8" font-size="12.5">nothing is silently estimated, nothing publishes unless it passes. Estimated is never called measured.</text>
+
+  <!-- gate row -->
+  <g>
+    <rect x="48" y="428" width="512" height="160" rx="12" fill="#16233b" stroke="#243b5e"/>
+    <text x="76" y="462" fill="#e2e8f0" font-size="15" font-weight="700">Quality gate — compare against the original</text>
+    <text x="76" y="486" fill="#94a3b8" font-size="12.5">Run the compressed model and the full teacher on the same prompts.</text>
+    <text x="76" y="504" fill="#94a3b8" font-size="12.5">KLD: how far the whole word-choice distribution drifts.</text>
+    <text x="76" y="522" fill="#94a3b8" font-size="12.5">CKA: whether each layer still represents things the same way.</text>
+    <text x="76" y="540" fill="#94a3b8" font-size="12.5">Drift past budget → exit 2, rejected decision recorded, nothing published.</text>
+    <rect x="76" y="556" width="130" height="20" rx="10" fill="#064e3b"/><text x="141" y="570" fill="#6ee7b7" font-size="11" text-anchor="middle" font-weight="700">PASS → publish</text>
+    <rect x="216" y="556" width="130" height="20" rx="10" fill="#7f1d1d"/><text x="281" y="570" fill="#fca5a5" font-size="11" text-anchor="middle" font-weight="700">REJECT → exit 2</text>
+  </g>
+  <g>
+    <rect x="600" y="428" width="512" height="160" rx="12" fill="#16233b" stroke="#243b5e"/>
+    <text x="628" y="462" fill="#e2e8f0" font-size="15" font-weight="700">Two ways to shrink (pick by evidence)</text>
+    <text x="628" y="488" fill="#e2e8f0" font-size="13" font-weight="600" >Quantize</text>
+    <text x="700" y="488" fill="#94a3b8" font-size="12.5">same shape, smaller numbers — 4-bit groups</text>
+    <text x="628" y="514" fill="#e2e8f0" font-size="13" font-weight="600">Width-slice</text>
+    <text x="700" y="514" fill="#94a3b8" font-size="12.5">delete the least-useful 16-channel expert groups,</text>
+    <text x="700" y="532" fill="#94a3b8" font-size="12.5">ranked by saliency, layout stays NVFP4-coherent</text>
+    <text x="628" y="560" fill="#94a3b8" font-size="12">Experts carry most of a MoE&apos;s weight — attention &amp; shared layers are protected.</text>
+  </g>
+</svg>
