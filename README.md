@@ -7,13 +7,13 @@
 **A fail-closed pipeline that shrinks enormous MoE models into smaller, verified
 derivatives — and refuses to publish anything it cannot prove.**
 
-Cebu Profiler (formerly `model-atlas`) measures what is inside a large
-transformer/MoE checkpoint and turns that evidence into a smaller derivative
-candidate: tensor census → evidence profiling → method recommendation →
-compression → quality gate → verified handoff. It is **model-agnostic**:
-registered subjects include **GLM-5.2** (NVIDIA NVFP4, 78 layers, 256 routed
-experts, top-8) and **Kimi K3** (2.78T params, 104B active, 896 experts/layer
-top-16), driven by a configurable `ArchitectureSpec`.
+Cebu Profiler measures what is inside a large transformer/MoE checkpoint and
+turns that evidence into a smaller derivative candidate: tensor census →
+evidence profiling → method recommendation → compression → quality gate →
+verified handoff. It is **model-agnostic**: registered subjects include
+**GLM-5.2** (NVIDIA NVFP4, 78 layers, 256 routed experts, top-8) and
+**Kimi K3** (2.78T params, 104B active, 896 experts/layer top-16), driven by a
+configurable `ArchitectureSpec`.
 
 ---
 
@@ -78,11 +78,11 @@ can't prove its work refuses to ship it.
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
-model-atlas doctor
-model-atlas list-architectures
-model-atlas census k3-mini
-model-atlas plan k3-mini --node-a-gb 0.001 --node-b-gb 0.001
-model-atlas preflight --out capability_report.json
+cebu-profiler doctor
+cebu-profiler list-architectures
+cebu-profiler census k3-mini
+cebu-profiler plan k3-mini --node-a-gb 0.001 --node-b-gb 0.001
+cebu-profiler preflight --out capability_report.json
 ```
 
 Width-slice runner:
@@ -99,7 +99,7 @@ python scripts/run_glm52_width_slice.py --source <checkpoint_dir> --out <out_dir
     --execute --metric-report <CaptureMetricReport.json> --kld-budget 0.10 --cka-budget 0.05
 ```
 
-Run `model-atlas --help` for all commands. Tests: `pytest` (fast) /
+Run `cebu-profiler --help` for all commands. Tests: `pytest` (fast) /
 `pytest -m ""` (full) / `pytest -m integration`.
 
 ## Intent (one clear purpose per app)
