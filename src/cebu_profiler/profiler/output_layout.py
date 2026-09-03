@@ -161,9 +161,27 @@ def validate_evidence_present(run: ProfilerRun, evidence_present: list[str]) -> 
     return warnings
 
 
-def build_run_manifest(run: ProfilerRun, evidence_present: list[str]) -> dict[str, Any]:
-    """Compose the run_manifest.json content for this run."""
-    return {
+def build_run_manifest(
+    run: ProfilerRun,
+    evidence_present: list[str],
+    *,
+    run_dir: str | None = None,
+    extra_limitations: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Compose the run_manifest.json content for this run.
+
+    When `run_dir` is given, embeds the machine-checkable evidence-coverage
+    gate and the limitations ledger (both fail-closed; coverage failures become
+    warnings on the run, not silent passes).
+    """
+    from cebu_profiler.evaluation.coverage import (
+        check_coverage,
+        coverage_payload,
+        default_limitations,
+        limitations_payload,
+    )
+
+    manifest: dict[str, Any] = {
         "profiler_run_id": run.profiler_run_id,
         "source_model_asset_id": run.source_model_asset_id,
         "source_checkpoint_revision": run.source_checkpoint_revision,
@@ -175,3 +193,17 @@ def build_run_manifest(run: ProfilerRun, evidence_present: list[str]) -> dict[st
         "evidence_present": sorted(evidence_present),
         "warnings": list(run.warnings) + validate_evidence_present(run, evidence_present),
     }
+    if run_dir is not None:
+        cov = check_coverage(run_dir, run.evidence_level)
+        manifest["coverage"] = coverage_payload(cov)
+        if not cov.passed:
+            manifest["warnings"] = list(manifest["warnings"]) + [
+                f"coverage: {f}" for f in cov.failures
+            ]
+        lims = default_limitations(run.evidence_level)
+        manifest["limitations"] = limitations_payload(lims)
+        for extra in extra_limitations or []:
+            manifest["limitations"].update(
+                {k: v for k, v in extra.items() if k not in manifest["limitations"]}
+            )
+    return manifest

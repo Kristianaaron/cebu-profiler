@@ -21,10 +21,10 @@ Four properties define the pipeline:
   104B active, 896 routed experts/layer top-16, Stable LatentMoE, MXFP4
   experts, ~1.56 TB). The core is driven by a configurable `ArchitectureSpec`;
   other large models register as additional architectures.
-- **Serving-ready for vLLM & SGLang.** Derivatives are laid out for direct
-  vLLM / SGLang serving — NVFP4-coherent expert groups, router-consistent —
-  not GGUF exports. Runtime load/forward validation is an explicit gate,
-  never assumed.
+- **Serving-ready for vLLM, SGLang & TRT-LLM.** Derivatives are laid out for
+  direct vLLM / SGLang / TRT-LLM serving — NVFP4-coherent expert groups,
+  router-consistent — not GGUF exports. Runtime load/forward validation is an
+  explicit gate, never assumed.
 
 ## How it works
 
@@ -103,6 +103,42 @@ but cannot be ranked as speed evidence. Model IDs, operator names, phases,
 representations, and ABIs are data rather than allowlists, so new models do not
 require bridge code changes. See the
 [Kernel Evidence Bridge](https://github.com/Kristianaaron/cebu-profiler/blob/main/docs/kernel-evidence-bridge.md).
+
+## Evidence-grade instrumentation
+
+Beyond the base census and REAP profile, the profiler ships evidence-grade
+instrumentation used when a derivative claim must survive scrutiny:
+
+- **Rank-trust protocol** (`stability/protocol.py`) — split-half rank
+  reliability (Spearman) between calibration halves, keep-set Jaccard at fixed
+  sizes, and named proxy controls (count / mass / proxy), with an evidence-typed
+  verdict: `measured` is reserved for strong split-half agreement on real runs,
+  never granted to proxies.
+- **Causal prune-arm stress matrix** (`stress/arms.py`) — remove low-score
+  experts at several fractions against random-removal and high-score controls,
+  plus a bit-exact identity arm; damage is scored by measured logit-KL, output
+  cosine, and argmax stability — not by the proxy that chose the victims.
+- **Deep census** (`census/deep.py`) — opt-in measured per-tensor quantization
+  damage (INT8 per-channel, INT4 group-128, FP8 e4m3 SQNR in dB) plus
+  distribution and spectral statistics, decoded straight from safetensors
+  bytes in bounded-memory chunks; the header-only census remains the default.
+- **Coverage gate & limitations ledger** — every run manifest carries a
+  machine-checkable evidence-coverage report and an explicit limitations block;
+  missing or empty artifacts fail the gate instead of passing silently.
+
+## Credits & methodology inspiration
+
+Several instrumentation patterns here were independently re-implemented after
+studying [alesha-pro/atlas](https://github.com/alesha-pro/atlas) (MIT) and its
+published GLM-5.3-Flash NVFP4 evidence bundle — specifically: split-half rank
+stability with keep-set Jaccard and proxy controls, the five-arm causal prune
+stress test with random/high controls, per-tensor measured SQNR scans
+(INT8/INT4-g128/FP8), and machine-readable coverage + limitations blocks in
+model evidence bundles. All code in this repository is original: the
+implementations run on Cebu Profiler's own manifest model, scorer interfaces,
+and frozen-model intervention API, with evidence-typing, fail-closed identity
+arms, bounded-memory chunked decoding, and config-driven architecture specs as
+additions of our own. Ideas credited where due; nothing copied.
 
 ## License
 
