@@ -13,10 +13,10 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 
-from model_atlas.atlas.runtime import LayerWeights, MiniMoE, forward
-from model_atlas.compression.quant import uniform_int_quant
-from model_atlas.planning.maps import CandidatePlan
-from model_atlas.schemas.model_asset import AssetType, ModelAsset
+from cebu_profiler.compression.quant import uniform_int_quant
+from cebu_profiler.planning.maps import CandidatePlan
+from cebu_profiler.profiler.runtime import LayerWeights, MiniMoE, forward
+from cebu_profiler.schemas.model_asset import AssetType, ModelAsset
 
 # precisions we actually rewrite to integer tiers; others keep source bytes.
 _APPLY_BITS = {"int4": 4, "int8": 8, "nvfp4": 4, "fp8": 8}

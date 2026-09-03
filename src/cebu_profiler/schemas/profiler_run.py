@@ -1,4 +1,4 @@
-"""Atlas run schema + state machine (v2 §3C)."""
+"""Cebu Profiler run schema + state machine (v2 §3C)."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from model_atlas.schemas.evidence import EvidenceLevel
-from model_atlas.schemas.ontology import DataPartition
+from cebu_profiler.schemas.evidence import EvidenceLevel
+from cebu_profiler.schemas.ontology import DataPartition
 
 
-class AtlasRunStatus(StrEnum):
+class ProfilerRunStatus(StrEnum):
     DRAFT = "draft"
     VALIDATING = "validating"
     ESTIMATING = "estimating"
@@ -27,11 +27,11 @@ class AtlasRunStatus(StrEnum):
 
 # States in which Pause/Cancel are permitted (at safe boundaries only).
 _PAUSABLE = frozenset(
-    {AtlasRunStatus.TRACING, AtlasRunStatus.VALIDATING, AtlasRunStatus.ESTIMATING}
+    {ProfilerRunStatus.TRACING, ProfilerRunStatus.VALIDATING, ProfilerRunStatus.ESTIMATING}
 )
 
 
-class AtlasRunProgress(BaseModel):
+class ProfilerRunProgress(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     current_layer: int = Field(default=0, ge=0)
@@ -41,19 +41,19 @@ class AtlasRunProgress(BaseModel):
     estimated_remaining_seconds: float | None = Field(default=None, ge=0.0)
 
 
-class AtlasRun(BaseModel):
-    """A resumable, long-running Atlas analysis job (v2 §3C / §8)."""
+class ProfilerRun(BaseModel):
+    """A resumable, long-running Cebu Profiler analysis job (v2 §3C / §8)."""
 
     model_config = ConfigDict(extra="forbid")
 
-    atlas_run_id: str
+    profiler_run_id: str
     source_model_asset_id: str
     source_checkpoint_revision: str | None = None
     calibration_suite_id: str
-    data_partition: DataPartition = DataPartition.ATLAS_CALIBRATION
+    data_partition: DataPartition = DataPartition.CEBU_CALIBRATION
     evidence_level: EvidenceLevel = EvidenceLevel.BASIC_SALIENCY
-    status: AtlasRunStatus = AtlasRunStatus.DRAFT
-    progress: AtlasRunProgress | None = None
+    status: ProfilerRunStatus = ProfilerRunStatus.DRAFT
+    progress: ProfilerRunProgress | None = None
     warnings: list[str] = Field(default_factory=list)
     failure_info: dict[str, str] = Field(default_factory=dict)
     configuration_hash: str | None = None
@@ -69,8 +69,8 @@ class AtlasRun(BaseModel):
     @property
     def is_terminal(self) -> bool:
         return self.status in {
-            AtlasRunStatus.COMPLETED,
-            AtlasRunStatus.COMPLETED_WITH_WARNINGS,
-            AtlasRunStatus.CANCELLED,
-            AtlasRunStatus.FAILED_TERMINAL,
+            ProfilerRunStatus.COMPLETED,
+            ProfilerRunStatus.COMPLETED_WITH_WARNINGS,
+            ProfilerRunStatus.CANCELLED,
+            ProfilerRunStatus.FAILED_TERMINAL,
         }

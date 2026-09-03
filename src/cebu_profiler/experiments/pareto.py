@@ -2,7 +2,7 @@
 
 Sweeps the retained-channel budget and, per level, reports the uniform and
 heterogeneous retention/fidelity at the same budget. The frontier answers
-Atlas's founding question: does measured heterogeneous allocation dominate a
+Cebu Profiler's founding question: does measured heterogeneous allocation dominate a
 fixed-width control at equal parameter size?
 """
 
@@ -10,9 +10,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from model_atlas.atlas.reap import CalibrationSample
-from model_atlas.atlas.runtime import MiniMoE
-from model_atlas.experiments.controls import budget_for, matched_budget_compare
+from cebu_profiler.experiments.controls import budget_for, matched_budget_compare
+from cebu_profiler.profiler.reap import CalibrationSample
+from cebu_profiler.profiler.runtime import MiniMoE
 
 
 @dataclass

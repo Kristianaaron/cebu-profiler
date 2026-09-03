@@ -2,7 +2,7 @@
 
 ## 1.0.0 — 2026-08-13
 
-Atlas v3 fidelity-first architecture (per the v3 implementation instruction +
+Cebu Profiler v3 fidelity-first architecture (per the v3 implementation instruction +
 GLM-5.2 blueprint) —
 
 - New `analysis/` analyzers (all evidence-disciplined, never mutate weights):
@@ -31,7 +31,7 @@ GLM-5.2 blueprint) —
 - `analysis/corpus_semantic.py`: bidirectional corpus↔model map (cluster→experts,
   expert→activating clusters) with per-cluster coverage statuses and teacher-relative
   quality-delta projection onto clusters.
-- `atlas/v3_pipeline.py`: canonical fidelity-first orchestrator streaming all analyzers.
+- `profiler/v3_pipeline.py`: canonical fidelity-first orchestrator streaming all analyzers.
 - Dashboard: new **Researcher** nav section with **V3 Analyzers / Candidate Graph /
   Corpus Evidence** tabs over measured data; prediction-vs-measured labels on every
   surface.
@@ -116,10 +116,10 @@ Capability tab: monochrome 3D voxel view + sticky detail panel, agent-friendly �
 
 ## 0.8.1 — 2026-08-12
 
-Native Atlas↔Eval bridge: eval-lab's Atlas Lab now natively consumes the full
+Native Cebu↔Eval bridge: eval-lab's Cebu Lab now natively consumes the full
 profiler picture (no data dropped) —
 
-- `atlas/export.py` emits a consolidated `planning_maps.json` (the seven
+- `profiler/export.py` emits a consolidated `planning_maps.json` (the seven
   granular §25 maps + per-candidate precision/residency/coverage), registered
   in the §27 output contract so nothing is flagged as an unknown artifact.
 - Prepared for the eval-harness consumer: bridge carries precision/residency/
@@ -127,7 +127,7 @@ profiler picture (no data dropped) —
 
 ## 0.8.0 — 2026-08-12
 
-Cohesive Atlas Profile Platform IA (Profile vs Quantization & Fit) —
+Cohesive Cebu Profile Platform IA (Profile vs Quantization & Fit) —
 
 - Dashboard reorganised into three nav sections + an ecosystem link: **Overview**
   (Summary), **Profiling** (Capability, Success−Failure, Coalitions, Paths,
@@ -139,7 +139,7 @@ Cohesive Atlas Profile Platform IA (Profile vs Quantization & Fit) —
   prevalence).
 - New **Real-bytes** view: §24/§25 derivative envelopes from measured
   checkpoint bytes — the mounted GLM-5.2 NVFP4 census when present, else a
-  synthetic caret. So Atlas = the profiling/fit platform; Eval stays the
+  synthetic caret. So Cebu Profiler = the profiling/fit platform; Eval stays the
   benchmark app.
 - Tests: test_f14 extended to defend the new payloads; 169 total; ruff + mypy clean.
 
@@ -182,10 +182,10 @@ the measured GLM-5.2 NVFP4 census —
 
 ## 0.5.0 — 2026-08-12
 
-Six-level atlas hierarchy (v2 §9) — traceable up and down, closing the gap
+Six-level profiler hierarchy (v2 §9) — traceable up and down, closing the gap
 where only the L1 ownership layer existed —
 
-- `atlas/hierarchy.py`: `AtlasLevel` (weights → units → experts → coalitions →
+- `profiler/hierarchy.py`: `ProfilerLevel` (weights → units → experts → coalitions →
   pathways → behaviour), `HierarchyMap` with up (`ancestors` / `behaviours_of`)
   and down (`descendants` / `project_down`) traceability, and a measured
   `prevalence = #behaviours supported` signal per contributor.
@@ -198,13 +198,13 @@ where only the L1 ownership layer existed —
   guaranteed artifact at the enhanced evidence level and is emitted by
   `export_run()`.
 - Tests: `test_f19_hierarchy` (8) + exported-artifact coverage in
-  `test_atlas_export`; 155 total; ruff + mypy clean.
+  `test_profiler_export`; 155 total; ruff + mypy clean.
 
 ## 0.4.0 — 2026-08-07
 
 Complete the offline-buildable blueprint phase-2 modules (§8.1/8.3/8.4, §10, Priority 4#5, §17 Control C) —
 
-- `schemas/trace_records.py` + `atlas/traces.py`: normalized §10 trace records
+- `schemas/trace_records.py` + `profiler/traces.py`: normalized §10 trace records
   (`RouterRecord` / `ExpertAggregate` / `ChannelAggregate`), all measured.
 - `scoring/semantic.py` (§8.1): capability-label → expert semantic associations
   (protection/explanation signal) fed into the manifest as `scores.semantic`.
@@ -225,18 +225,18 @@ Complete the offline-buildable blueprint phase-2 modules (§8.1/8.3/8.4, §10, P
 
 Wire the compression milestone into the export bridge —
 
-- `atlas/export.py`: `export_run()` now also emits `compression_manifest.json`
+- `profiler/export.py`: `export_run()` now also emits `compression_manifest.json`
   (trace → TENP → stability → causal → Taylor → SM121 width planner) over the
   same eval-lab calibration corpus.
 - `output_layout.py`: `compression_manifest.json` added to the §27 canonical
-  `ATLAS_RUN_FILES` set and guaranteed at the enhanced/causal evidence levels.
+  `CEBU_RUN_FILES` set and guaranteed at the enhanced/causal evidence levels.
 - Tests: export + output-layout coverage for the new artifact; 127 total.
 
 ## 0.3.0 — 2026-08-07
 
-First end-to-end Atlas compression milestone (GLM-5.2 neuron/EXL3 blueprint §7–12, §25) —
+First end-to-end Cebu Profiler compression milestone (GLM-5.2 neuron/EXL3 blueprint §7–12, §25) —
 
-- `atlas/collector.py` + `runtime` streaming channel collector (`ChannelStatsAccumulator`)
+- `profiler/collector.py` + `runtime` streaming channel collector (`ChannelStatsAccumulator`)
   — Module A: online per-(layer, expert, channel) FFN activation stats, no raw-tensor persistence.
 - First-class scorers (`scoring/`): TENP (forward-only, NVFP4-ready), grouped-Taylor surrogate,
   targeted causal boundary triage, stability/confidence/rank aggregation (blueprint §9.1 base + §7 B–E).
@@ -247,20 +247,20 @@ First end-to-end Atlas compression milestone (GLM-5.2 neuron/EXL3 blueprint §7�
   (dry-run, permutation equivalence, topology, replay, protected).
 - `integrations/glm52.py` / `integrations/k3.py`: architecture adapters (structural layout contract;
   real tensor sizes gated on checkpoint census).
-- `atlas/compress.py`: `run_compression_pipeline()` — trace → TENP → stability → causal → Taylor
+- `profiler/compress.py`: `run_compression_pipeline()` — trace → TENP → stability → causal → Taylor
   → planner → manifest over the synthetic MiniMoE.
 - Tests: 15 new `test_f16_compression_pipeline`; 125 total; ruff + mypy clean.
 
 ## 0.2.0 — 2026-08-04
 
-Atlas export bridge (cross-repo manifest contract v1) —
+Cebu Profiler export bridge (cross-repo manifest contract v1) —
 
-- `atlas/export.py`: `export_run()` runs the real REAP pipeline (mini-MoE →
+- `profiler/export.py`: `export_run()` runs the real REAP pipeline (mini-MoE →
   eval-lab calibration corpus → saliency → candidate plans → optional
-  derivative) and **writes** the canonical `atlas_runs/<id>/` artifacts
+  derivative) and **writes** the canonical `profiler_runs/<id>/` artifacts
   (`run_manifest.json`, `layer_saliency.json`, `plans.json`, `derivative.json`),
-  realizing the declared `output_layout.ATLAS_RUN_FILES` contract.
-- CLI: `model-atlas export --eval-lab-root <path> --out <root> [--build]`.
+  realizing the declared `output_layout.CEBU_RUN_FILES` contract.
+- CLI: `cebu-profiler export --eval-lab-root <path> --out <root> [--build]`.
 - Source expert identity preserved end-to-end in keep-map + derivative maps.
 - Tests: 5 new; 110 total; ruff + mypy strict clean.
 
@@ -268,7 +268,7 @@ Atlas export bridge (cross-repo manifest contract v1) —
 
 Initial scaffold (blueprint §21 first commit, model-agnostic):
 
-- Package skeleton (`src/model_atlas`), hatchling build, `model-atlas` CLI.
+- Package skeleton (`src/cebu_profiler`), hatchling build, `cebu-profiler` CLI.
 - `ArchitectureSpec` + registry; Kimi K3 registered as the first subject, plus
   `k3-mini` synthetic model for deterministic unit tests.
 - Tensor census + ownership (layerwise, source-identity preserving, no
@@ -278,6 +278,6 @@ Initial scaffold (blueprint §21 first commit, model-agnostic):
 - `AGENTS.md` invariants, architecture / tensor-ownership / memory-model docs.
 - Deterministic unit tests; ruff + mypy config.
 
-Not yet implemented (later milestones): streamed REAP atlas runtime, trace
+Not yet implemented (later milestones): streamed REAP profiling runtime, trace
 capture, keep-map / derivative planning UI, checkpoint conversion, repair /
 distillation, two-node serving runtime, eval-lab plugin bridge.

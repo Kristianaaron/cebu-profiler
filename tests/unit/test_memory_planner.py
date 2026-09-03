@@ -1,14 +1,14 @@
 """Memory-planner tests: go/no-go, resident vs stored vs active accounting."""
 
-from model_atlas.census.census import build_manifest
-from model_atlas.census.tensor_ownership import PhysicalLocation
-from model_atlas.planning.memory_planner import (
+from cebu_profiler.census.census import build_manifest
+from cebu_profiler.census.tensor_ownership import PhysicalLocation
+from cebu_profiler.planning.memory_planner import (
     active_expert_bytes_per_token,
     assess,
     resident_bytes_by_node,
 )
-from model_atlas.registry.architectures import get_registry
-from model_atlas.schemas.architecture import DTYPE_BYTES, DType, TensorRole
+from cebu_profiler.registry.architectures import get_registry
+from cebu_profiler.schemas.architecture import DTYPE_BYTES, DType, TensorRole
 
 
 def test_safe_plan_when_budgets_are_large():

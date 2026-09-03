@@ -2,11 +2,11 @@
 
 from pathlib import Path
 
-from model_atlas.checkpoint.classifier import classify_tensor
-from model_atlas.checkpoint.source_manifest import load_manifest, shard_hashes
-from model_atlas.checkpoint.structural_graph import build_structural_graph
-from model_atlas.checkpoint.synthetic import UNCLASSIFIED_NAME, make_synthetic_checkpoint
-from model_atlas.schemas.architecture import TensorRole
+from cebu_profiler.checkpoint.classifier import classify_tensor
+from cebu_profiler.checkpoint.source_manifest import load_manifest, shard_hashes
+from cebu_profiler.checkpoint.structural_graph import build_structural_graph
+from cebu_profiler.checkpoint.synthetic import UNCLASSIFIED_NAME, make_synthetic_checkpoint
+from cebu_profiler.schemas.architecture import TensorRole
 
 CLASSIFIED_TENSOR_COUNT = 20  # 18 per-layer + embed + lm_head
 

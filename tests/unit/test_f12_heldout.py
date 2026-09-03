@@ -1,18 +1,18 @@
 """F12 tests: held-out retention, leakage gate, repair targets (v2 §7, §14, §26)."""
 
-from model_atlas.atlas.reap import CalibrationSample, make_synthetic_corpus, run_calibration
-from model_atlas.atlas.runtime import build_mini_moe
-from model_atlas.builder import build_derivative
-from model_atlas.compression import expert_response_curve, get_backend_registry
-from model_atlas.evaluation import (
+from cebu_profiler.builder import build_derivative
+from cebu_profiler.compression import expert_response_curve, get_backend_registry
+from cebu_profiler.evaluation import (
     detect_leakage,
     evaluate_heldout,
     promote_allowed,
     router_repair_targets,
 )
-from model_atlas.planning import SearchInputs, build_candidate
-from model_atlas.registry.architectures import get_registry
-from model_atlas.schemas.ontology import CapabilityLabel, TrajectoryStage
+from cebu_profiler.planning import SearchInputs, build_candidate
+from cebu_profiler.profiler.reap import CalibrationSample, make_synthetic_corpus, run_calibration
+from cebu_profiler.profiler.runtime import build_mini_moe
+from cebu_profiler.registry.architectures import get_registry
+from cebu_profiler.schemas.ontology import CapabilityLabel, TrajectoryStage
 
 ARCH = get_registry().get("k3-mini")
 

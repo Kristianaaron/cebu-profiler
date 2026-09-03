@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from model_atlas.atlas.collector import ChannelStatsAccumulator
-from model_atlas.atlas.reap import CalibrationSample
-from model_atlas.atlas.runtime import MiniMoE, forward
-from model_atlas.schemas.trace_records import (
+from cebu_profiler.profiler.collector import ChannelStatsAccumulator
+from cebu_profiler.profiler.reap import CalibrationSample
+from cebu_profiler.profiler.runtime import MiniMoE, forward
+from cebu_profiler.schemas.trace_records import (
     ChannelAggregate,
     ExpertAggregate,
     RouterRecord,
     TraceRecords,
 )
-from model_atlas.scoring.tenp import tenp_rank
+from cebu_profiler.scoring.tenp import tenp_rank
 
 
 def trace_records(

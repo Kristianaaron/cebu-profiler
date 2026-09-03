@@ -1,6 +1,6 @@
 """Behaviour and trajectory ontology (v2 §8, §11), as typed controlled enums.
 
-These are the shared vocabularies the Atlas uses to tag traces so behaviour can
+These are the shared vocabularies the Cebu Profiler uses to tag traces so behaviour can
 be sliced, contrasted, and linked to experts/coalitions/pathways.
 """
 
@@ -55,7 +55,7 @@ class SuccessState(StrEnum):
 
 
 class DataPartition(StrEnum):
-    ATLAS_CALIBRATION = "atlas_calibration"
+    CEBU_CALIBRATION = "cebu_calibration"
     DEVELOPMENT_EVALUATION = "development_evaluation"
     HELD_OUT_EVALUATION = "held_out_evaluation"
 

@@ -1,11 +1,11 @@
 """Census + ownership tests: coverage, no unclassified, source identity."""
 
-from model_atlas.census.census import build_manifest
-from model_atlas.census.precision import PrecisionCensus, census_precision
-from model_atlas.census.tensor_ownership import PhysicalLocation, TensorRole
-from model_atlas.checkpoint.source_manifest import load_manifest
-from model_atlas.checkpoint.synthetic import make_synthetic_checkpoint
-from model_atlas.registry.architectures import get_registry
+from cebu_profiler.census.census import build_manifest
+from cebu_profiler.census.precision import PrecisionCensus, census_precision
+from cebu_profiler.census.tensor_ownership import PhysicalLocation, TensorRole
+from cebu_profiler.checkpoint.source_manifest import load_manifest
+from cebu_profiler.checkpoint.synthetic import make_synthetic_checkpoint
+from cebu_profiler.registry.architectures import get_registry
 
 MINI_EXPECTED_RECORDS = 34  # per layer: 7 single + 8 experts + 1 shared = 16; x2 = 32; +2 global
 

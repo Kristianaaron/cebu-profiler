@@ -1,6 +1,6 @@
 """Tensor ownership: which tensor lives where, with source identity preserved.
 
-Ownership is the backbone of the Atlas's "full picture of experts." Every real
+Ownership is the backbone of the Cebu Profiler's "full picture of experts." Every real
 tensor maps to exactly one role (invariant: no unclassified tensors) and one
 physical location. Source expert IDs are never conflated with candidate/local
 slot IDs or physical locations.
@@ -12,7 +12,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from model_atlas.schemas.architecture import DTYPE_BYTES, DType, TensorRole
+from cebu_profiler.schemas.architecture import DTYPE_BYTES, DType, TensorRole
 
 
 class PhysicalLocation(StrEnum):

@@ -1,15 +1,15 @@
 """F10 tests: derivative architecture search + planning maps (v2 §24–§25)."""
 
-from model_atlas.atlas.reap import make_synthetic_corpus, run_calibration
-from model_atlas.atlas.runtime import build_mini_moe
-from model_atlas.compression import expert_response_curve, get_backend_registry
-from model_atlas.planning import (
+from cebu_profiler.compression import expert_response_curve, get_backend_registry
+from cebu_profiler.planning import (
     SearchInputs,
     build_candidate,
     expert_src_bytes,
     generate_candidates,
 )
-from model_atlas.registry.architectures import get_registry
+from cebu_profiler.profiler.reap import make_synthetic_corpus, run_calibration
+from cebu_profiler.profiler.runtime import build_mini_moe
+from cebu_profiler.registry.architectures import get_registry
 
 ARCH = get_registry().get("k3-mini")
 

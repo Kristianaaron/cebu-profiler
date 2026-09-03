@@ -1,6 +1,6 @@
 """Memory and derivative planning."""
 
-from model_atlas.planning.maps import (
+from cebu_profiler.planning.maps import (
     CandidatePlan,
     CoalitionProtectionMap,
     KeepEntry,
@@ -13,20 +13,20 @@ from model_atlas.planning.maps import (
     SubstituteEntry,
     SubstituteMap,
 )
-from model_atlas.planning.memory_planner import (
+from cebu_profiler.planning.memory_planner import (
     PlanAssessment,
     active_expert_bytes_per_token,
     assess,
     resident_bytes_by_node,
 )
-from model_atlas.planning.realbytes import (
+from cebu_profiler.planning.realbytes import (
     RealAccount,
     RealCandidate,
     account_manifest,
     plan_candidates,
     report,
 )
-from model_atlas.planning.search import (
+from cebu_profiler.planning.search import (
     SearchInputs,
     build_candidate,
     expert_src_bytes,

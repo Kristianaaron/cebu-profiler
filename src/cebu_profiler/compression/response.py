@@ -17,10 +17,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import cast
 
-from model_atlas.atlas.counterfactual import logit_kl
-from model_atlas.atlas.runtime import MiniMoE, forward
-from model_atlas.compression.backend import BackendRegistry, SupportStatus
-from model_atlas.compression.quant import QuantMeta, float_mantissa_quant, rel_l2, uniform_int_quant
+from cebu_profiler.compression.backend import BackendRegistry, SupportStatus
+from cebu_profiler.compression.quant import (
+    QuantMeta,
+    float_mantissa_quant,
+    rel_l2,
+    uniform_int_quant,
+)
+from cebu_profiler.profiler.counterfactual import logit_kl
+from cebu_profiler.profiler.runtime import MiniMoE, forward
 
 _EXPERT_MATS = ("gate", "up", "down")
 

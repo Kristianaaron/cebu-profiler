@@ -1,4 +1,4 @@
-"""F16 tests: end-to-end Atlas compression pipeline + structural executor.
+"""F16 tests: end-to-end Cebu Profiler compression pipeline + structural executor.
 
 Covers the blueprint's first end-to-end milestone (§25):
     trace -> TENP -> stability -> causal -> grouped Taylor
@@ -10,23 +10,23 @@ protected channels).
 
 import random
 
-from model_atlas.atlas.compress import run_compression_pipeline
-from model_atlas.atlas.reap import CalibrationSample
-from model_atlas.atlas.runtime import MiniMoE, build_mini_moe, forward
-from model_atlas.executor.structural import (
+from cebu_profiler.executor.structural import (
     apply_manifest,
     build_clone,
     dry_run,
     orders_from_manifest,
     reorder_channels,
 )
-from model_atlas.planning.width_buckets import SM121_WIDTH_BUCKETS
-from model_atlas.planning.widths import build_manifest, estimate_params
-from model_atlas.registry.architectures import get_registry
-from model_atlas.schemas.manifest import validate_manifest
-from model_atlas.schemas.ontology import CapabilityLabel, TrajectoryStage
-from model_atlas.scoring.base import ChannelScore, ScoreNeed
-from model_atlas.scoring.tenp import TenpScorer
+from cebu_profiler.planning.width_buckets import SM121_WIDTH_BUCKETS
+from cebu_profiler.planning.widths import build_manifest, estimate_params
+from cebu_profiler.profiler.compress import run_compression_pipeline
+from cebu_profiler.profiler.reap import CalibrationSample
+from cebu_profiler.profiler.runtime import MiniMoE, build_mini_moe, forward
+from cebu_profiler.registry.architectures import get_registry
+from cebu_profiler.schemas.manifest import validate_manifest
+from cebu_profiler.schemas.ontology import CapabilityLabel, TrajectoryStage
+from cebu_profiler.scoring.base import ChannelScore, ScoreNeed
+from cebu_profiler.scoring.tenp import TenpScorer
 
 ARCH = get_registry().get("k3-mini")
 
@@ -54,11 +54,7 @@ def _concentrated_rows(full_width: int = 16) -> list[ChannelScore]:
     rows: list[ChannelScore] = []
     for e in range(8):
         for c in range(full_width):
-            imp = (
-                (10.0 if c == 0 else (1.0 if 1 <= c <= 7 else 0.001))
-                if e == 0
-                else 0.01
-            )
+            imp = (10.0 if c == 0 else (1.0 if 1 <= c <= 7 else 0.001)) if e == 0 else 0.01
             rows.append(ChannelScore(layer=0, expert=e, channel=c, tenp=imp))
     return rows
 
@@ -240,9 +236,7 @@ def test_permutation_equivalence_exact() -> None:
     model = _model(seed=3)
     mid = model.mid
     perm = list(reversed(range(mid)))  # non-trivial permutation of every channel
-    orders = {
-        (layer, e): perm for layer in range(len(model.layers)) for e in range(model.n_exp)
-    }
+    orders = {(layer, e): perm for layer in range(len(model.layers)) for e in range(model.n_exp)}
     clone = build_clone(model, orders, default_width=mid)
     base = forward(model, [4, 5, 6], top_k=2).logits
     reo = forward(clone, [4, 5, 6], top_k=2).logits

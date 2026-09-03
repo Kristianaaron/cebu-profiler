@@ -1,8 +1,8 @@
 """Versioned compression manifest + validator (blueprint §11, §12).
 
-Atlas's primary output: a deterministic, self-describing plan of retained
+Cebu Profiler's primary output: a deterministic, self-describing plan of retained
 channels / target widths per layer+expert, with confidence, protected reasons,
-and a per-tensor quantization recommendation. Atlas never touches weights; the
+and a per-tensor quantization recommendation. Cebu Profiler never touches weights; the
 structural executor consumes this manifest.
 """
 
@@ -63,12 +63,12 @@ class CompressionManifest(BaseModel):
     model: str
     source_checkpoint: str
     source_hash: str | None = None
-    atlas_version: str = "0.0.0"
+    profiler_version: str = "0.0.0"
     calibration_suite: str = "glm52-compression-v1"
     budget: BudgetSpec = Field(default_factory=BudgetSpec)
     allowed_widths: list[int]
     layers: dict[str, LayerPlan] = Field(default_factory=dict)
-    generated_by: str = "model-atlas"
+    generated_by: str = "cebu-profiler"
 
 
 class ManifestValidation(BaseModel):
@@ -103,14 +103,10 @@ def validate_manifest(manifest: CompressionManifest) -> ManifestValidation:
             if len(plan.keep_channels) != len(set(plan.keep_channels)):
                 errors.append(f"layer {layer_idx} expert {exp_str}: duplicate keep_channels")
             if any(c < 0 or c >= plan.original_width for c in plan.keep_channels):
-                errors.append(
-                    f"layer {layer_idx} expert {exp_str}: keep_channel out of range"
-                )
+                errors.append(f"layer {layer_idx} expert {exp_str}: keep_channel out of range")
             if plan.reorder_permutation and sorted(plan.reorder_permutation) != list(
                 range(len(plan.reorder_permutation))
             ):
-                errors.append(
-                    f"layer {layer_idx} expert {exp_str}: invalid reorder_permutation"
-                )
+                errors.append(f"layer {layer_idx} expert {exp_str}: invalid reorder_permutation")
     _ = cardinal
     return ManifestValidation(ok=not errors, errors=errors)

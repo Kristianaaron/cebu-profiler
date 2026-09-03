@@ -15,17 +15,17 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from model_atlas.scoring.base import (
-    AtlasScorer,
+from cebu_profiler.scoring.base import (
     ChannelScore,
+    ProfilerScorer,
     ScoreNeed,
     ScorerRequirements,
     ScoreTable,
 )
 
 if TYPE_CHECKING:
-    from model_atlas.atlas.collector import ChannelStatsAccumulator
-    from model_atlas.atlas.runtime import MiniMoE
+    from cebu_profiler.profiler.collector import ChannelStatsAccumulator
+    from cebu_profiler.profiler.runtime import MiniMoE
 
 
 def score_grouped_surrogate(
@@ -52,11 +52,11 @@ def score_grouped_surrogate(
                     + sum(up[c][q] ** 2 for q in range(len(up[c])))
                     + sum(down[q][c] ** 2 for q in range(len(down)))
                 )
-                out[(layer, e, c)] = (s.mean_abs ** 2) * w2
+                out[(layer, e, c)] = (s.mean_abs**2) * w2
     return out, False
 
 
-class GroupedTaylorScorer(AtlasScorer):
+class GroupedTaylorScorer(ProfilerScorer):
     """Grouped structural-unit scorer.
 
     Surrogate by default (no autograd on the synthetic runtime). When a
@@ -68,9 +68,7 @@ class GroupedTaylorScorer(AtlasScorer):
     version = "1.0"
     authoritative = False  # surrogate until graded against a BF16 parent
 
-    def __init__(
-        self, model: MiniMoE, stats: ChannelStatsAccumulator
-    ) -> None:
+    def __init__(self, model: MiniMoE, stats: ChannelStatsAccumulator) -> None:
         self._model = model
         self._scores, self._authoritative = score_grouped_surrogate(model, stats)
 

@@ -18,7 +18,7 @@ import random
 from dataclasses import dataclass, field
 from itertools import combinations
 
-from model_atlas.atlas.runtime import MiniMoE, forward
+from cebu_profiler.profiler.runtime import MiniMoE, forward
 
 
 def _softmax(x: list[float]) -> list[float]:

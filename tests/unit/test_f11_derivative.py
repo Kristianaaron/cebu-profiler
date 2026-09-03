@@ -1,12 +1,12 @@
 """F11 tests: derivative builder + validation + registration (v2 §26)."""
 
-from model_atlas.atlas.reap import make_synthetic_corpus, run_calibration
-from model_atlas.atlas.runtime import build_mini_moe, forward
-from model_atlas.builder import build_derivative, register_derivative
-from model_atlas.compression import expert_response_curve, get_backend_registry
-from model_atlas.planning import SearchInputs, build_candidate
-from model_atlas.registry.architectures import get_registry
-from model_atlas.schemas.model_asset import AssetType, ModelAsset
+from cebu_profiler.builder import build_derivative, register_derivative
+from cebu_profiler.compression import expert_response_curve, get_backend_registry
+from cebu_profiler.planning import SearchInputs, build_candidate
+from cebu_profiler.profiler.reap import make_synthetic_corpus, run_calibration
+from cebu_profiler.profiler.runtime import build_mini_moe, forward
+from cebu_profiler.registry.architectures import get_registry
+from cebu_profiler.schemas.model_asset import AssetType, ModelAsset
 
 ARCH = get_registry().get("k3-mini")
 

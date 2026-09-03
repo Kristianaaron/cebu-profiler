@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import copy
 
-from model_atlas.atlas.runtime import LayerWeights, MiniMoE
-from model_atlas.schemas.manifest import (
+from cebu_profiler.profiler.runtime import LayerWeights, MiniMoE
+from cebu_profiler.schemas.manifest import (
     CompressionManifest,
     ManifestValidation,
     validate_manifest,
@@ -56,9 +56,7 @@ def build_clone(
             if order is None and default_width is not None:
                 order = list(range(default_width))
             experts.append(_sliced(exp, order) if order is not None else copy.deepcopy(exp))
-        new_layers.append(
-            LayerWeights(ln_w=layer_w.ln_w, router=layer_w.router, experts=experts)
-        )
+        new_layers.append(LayerWeights(ln_w=layer_w.ln_w, router=layer_w.router, experts=experts))
     return MiniMoE(
         arch=model.arch,
         hidden=model.hidden,

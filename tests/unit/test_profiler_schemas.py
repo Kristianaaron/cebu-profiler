@@ -3,15 +3,20 @@
 import pytest
 from pydantic import ValidationError
 
-from model_atlas.schemas.atlas_run import AtlasRun, AtlasRunStatus
-from model_atlas.schemas.atlas_trace import AtlasTrace, Contribution, Intervention
-from model_atlas.schemas.evidence import EvidenceClaim, EvidenceGrade, EvidenceKind, is_direct_kind
-from model_atlas.schemas.model_asset import AssetType, ModelAsset
-from model_atlas.schemas.ontology import (
+from cebu_profiler.schemas.evidence import (
+    EvidenceClaim,
+    EvidenceGrade,
+    EvidenceKind,
+    is_direct_kind,
+)
+from cebu_profiler.schemas.model_asset import AssetType, ModelAsset
+from cebu_profiler.schemas.ontology import (
     CapabilityLabel,
     TraceFamily,
     TrajectoryStage,
 )
+from cebu_profiler.schemas.profiler_run import ProfilerRun, ProfilerRunStatus
+from cebu_profiler.schemas.profiler_trace import Contribution, Intervention, ProfilerTrace
 
 
 def test_ontology_cardinality():
@@ -73,8 +78,8 @@ def test_source_checkpoint_requires_path():
 
 def test_trace_family_must_match_payload():
     with pytest.raises(ValidationError):
-        AtlasTrace(
-            atlas_run_id="r1",
+        ProfilerTrace(
+            profiler_run_id="r1",
             family=TraceFamily.ROUTING,
             source_model_id="k3",
             payload=Contribution(),  # contribution under a "routing" family
@@ -83,16 +88,16 @@ def test_trace_family_must_match_payload():
 
 def test_intervention_trace_requires_layer():
     with pytest.raises(ValidationError):
-        AtlasTrace(
-            atlas_run_id="r1",
+        ProfilerTrace(
+            profiler_run_id="r1",
             family=TraceFamily.INTERVENTION,
             source_model_id="k3",
             payload=Intervention(intervention_type="expert_suppression"),
             # no layer_index -> should fail
         )
     # with layer_index it is valid
-    AtlasTrace(
-        atlas_run_id="r1",
+    ProfilerTrace(
+        profiler_run_id="r1",
         family=TraceFamily.INTERVENTION,
         source_model_id="k3",
         layer_index=3,
@@ -101,8 +106,8 @@ def test_intervention_trace_requires_layer():
 
 
 def test_routing_trace_happy_path():
-    trace = AtlasTrace(
-        atlas_run_id="r1",
+    trace = ProfilerTrace(
+        profiler_run_id="r1",
         family=TraceFamily.ROUTING,
         source_model_id="k3",
         capability_labels=[CapabilityLabel.DEBUGGING],
@@ -116,11 +121,11 @@ def test_routing_trace_happy_path():
     assert trace.payload.selected_expert_ids == [7, 2]
 
 
-def test_atlas_run_state_machine():
-    run = AtlasRun(atlas_run_id="r1", source_model_asset_id="k3", calibration_suite_id="s")
-    assert run.status == AtlasRunStatus.DRAFT
+def test_profiler_run_state_machine():
+    run = ProfilerRun(profiler_run_id="r1", source_model_asset_id="k3", calibration_suite_id="s")
+    assert run.status == ProfilerRunStatus.DRAFT
     assert run.is_pausable is False
-    run.status = AtlasRunStatus.TRACING
+    run.status = ProfilerRunStatus.TRACING
     assert run.is_pausable is True
-    run.status = AtlasRunStatus.COMPLETED
+    run.status = ProfilerRunStatus.COMPLETED
     assert run.is_terminal is True

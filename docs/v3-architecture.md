@@ -1,4 +1,4 @@
-# Atlas v3 — Fidelity-First Analyzer Architecture
+# Cebu Profiler v3 — Fidelity-First Analyzer Architecture
 
 Status: implemented 2026-08-13 against the synthetic MiniMoE (model-agnostic).
 
@@ -12,9 +12,9 @@ Status: implemented 2026-08-13 against the synthetic MiniMoE (model-agnostic).
 7. quant-interaction surrogate fit (confidence certificate)
 8. structural fallback (evidence-gated, never default-prune)
 9. Pareto frontier + knee region
-Orchestrated in `atlas/v3_pipeline.py` as `run_v3_pipeline(...)`.
+Orchestrated in `profiler/v3_pipeline.py` as `run_v3_pipeline(...)`.
 
-## Analyzers (`model_atlas/analysis/`)
+## Analyzers (`cebu_profiler/analysis/`)
 Each analyzer is a pure evidence producer; it never mutates weights and never
 turns a prediction into a measured result.
 
@@ -40,18 +40,18 @@ turns a prediction into a measured result.
 - Absence of activation is not evidence of irrelevance.
 
 ## Candidate graph
-`model_atlas/candidates/graph.py`: immutable DAG (parent→child), operator +
+`cebu_profiler/candidates/graph.py`: immutable DAG (parent→child), operator +
 provenance, per-tensor representation map, memory breakdown, routing stability,
 corpus hotspots.
 
 ## Pareto (v3)
-`model_atlas/experiments/pareto_v3.py`: nondominated frontier over active
+`cebu_profiler/experiments/pareto_v3.py`: nondominated frontier over active
 objectives, knee as a scored REGION (never a single point), and per-candidate
 neighbor deltas (fidelity/compact) with marginal quality/GiB.
 
 ## Integration
 - Dashboard: Researcher → V3 Analyzers / Candidate Graph / Corpus Evidence.
-- CLI: `model-atlas analyze`, `v3-pareto`, `v3-candidates`, `v3-corpus`.
+- CLI: `cebu-profiler analyze`, `v3-pareto`, `v3-candidates`, `v3-corpus`.
 - §27 output contract: `v3_run.json`, `v3_candidate_graph.json`,
   `v3_corpus_evidence.json`, `shared_representation.json`, `spectral_quality.json`,
   `routing_consistency.json`, `global_bit_budget.json`, `kv_ledger.json`,

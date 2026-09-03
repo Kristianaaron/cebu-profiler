@@ -1,4 +1,4 @@
-"""Six-level atlas hierarchy (v2 §9): L1 weights → L2 units → L3 experts →
+"""Six-level profiler hierarchy (v2 §9): L1 weights → L2 units → L3 experts →
 L4 coalitions → L5 pathways → L6 behaviour.
 
 The six levels are linked bottom-up (``children`` point DOWN toward weights,
@@ -25,14 +25,14 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from model_atlas.atlas.pathways import path_stats
-from model_atlas.atlas.reap import CalibrationSample
-from model_atlas.atlas.runtime import MiniMoE
-from model_atlas.atlas.traces import trace_records
-from model_atlas.schemas.ontology import SuccessState
+from cebu_profiler.profiler.pathways import path_stats
+from cebu_profiler.profiler.reap import CalibrationSample
+from cebu_profiler.profiler.runtime import MiniMoE
+from cebu_profiler.profiler.traces import trace_records
+from cebu_profiler.schemas.ontology import SuccessState
 
 
-class AtlasLevel(StrEnum):
+class ProfilerLevel(StrEnum):
     WEIGHTS = "weights"  # L1: tensors
     UNITS = "units"  # L2: channels / neurons
     EXPERTS = "experts"  # L3
@@ -41,24 +41,24 @@ class AtlasLevel(StrEnum):
     BEHAVIOUR = "behaviour"  # L6
 
 
-LEVEL_ORDER: list[AtlasLevel] = [
-    AtlasLevel.WEIGHTS,
-    AtlasLevel.UNITS,
-    AtlasLevel.EXPERTS,
-    AtlasLevel.COALITIONS,
-    AtlasLevel.PATHWAYS,
-    AtlasLevel.BEHAVIOUR,
+LEVEL_ORDER: list[ProfilerLevel] = [
+    ProfilerLevel.WEIGHTS,
+    ProfilerLevel.UNITS,
+    ProfilerLevel.EXPERTS,
+    ProfilerLevel.COALITIONS,
+    ProfilerLevel.PATHWAYS,
+    ProfilerLevel.BEHAVIOUR,
 ]
 _LEVEL_INDEX = {lv: i for i, lv in enumerate(LEVEL_ORDER)}
 
 
-def next_up(level: AtlasLevel) -> AtlasLevel | None:
+def next_up(level: ProfilerLevel) -> ProfilerLevel | None:
     """The more-abstract level directly above ``level`` (toward behaviour)."""
     i = _LEVEL_INDEX[level]
     return LEVEL_ORDER[i + 1] if i + 1 < len(LEVEL_ORDER) else None
 
 
-def next_down(level: AtlasLevel) -> AtlasLevel | None:
+def next_down(level: ProfilerLevel) -> ProfilerLevel | None:
     """The more-granular level directly below ``level`` (toward weights)."""
     i = _LEVEL_INDEX[level]
     return LEVEL_ORDER[i - 1] if i - 1 >= 0 else None
@@ -66,7 +66,7 @@ def next_down(level: AtlasLevel) -> AtlasLevel | None:
 
 @dataclass
 class HierarchyNode:
-    level: AtlasLevel
+    level: ProfilerLevel
     key: str
     label: str
     evidence: str = "measured"  # measured | estimated | predicted | inferred | causally_tested
@@ -91,7 +91,7 @@ class HierarchyMap:
     model_id: str
     nodes: dict[str, HierarchyNode] = field(default_factory=dict)
 
-    def nodes_at(self, level: AtlasLevel) -> list[HierarchyNode]:
+    def nodes_at(self, level: ProfilerLevel) -> list[HierarchyNode]:
         return [n for n in self.nodes.values() if n.level is level]
 
     def counts(self) -> dict[str, int]:
@@ -131,7 +131,7 @@ class HierarchyMap:
 
     def behaviours_of(self, key: str) -> list[str]:
         """Distinct L6 behaviours a node (tensor/unit/expert/…) supports (trace up)."""
-        return sorted({n.key for n in self.ancestors(key) if n.level is AtlasLevel.BEHAVIOUR})
+        return sorted({n.key for n in self.ancestors(key) if n.level is ProfilerLevel.BEHAVIOUR})
 
     def project_down(self, key: str) -> dict[str, list[dict[str, Any]]]:
         """Decompose a node into its per-level contributors (trace down).
@@ -141,7 +141,7 @@ class HierarchyMap:
         load-bearing" signal (AGENTS invariant 1: never cut on routing
         frequency alone).
         """
-        level_out: dict[AtlasLevel, dict[str, dict[str, Any]]] = {}
+        level_out: dict[ProfilerLevel, dict[str, dict[str, Any]]] = {}
         for n in self.descendants(key):
             behav = self.behaviours_of(n.key)
             level_out.setdefault(n.level, {})[n.key] = {
@@ -243,7 +243,7 @@ def build_hierarchy(
                 numel = len(w) * (len(w[0]) if w else 0)
                 k = f"{model_id}:tensor:L{lay}.e{e}.{part}"
                 hm.nodes[k] = HierarchyNode(
-                    level=AtlasLevel.WEIGHTS,
+                    level=ProfilerLevel.WEIGHTS,
                     key=k,
                     label=f"L{lay}·exp{e}·{part}",
                     metrics={"numel": float(numel), "bytes": float(numel * 4.0)},
@@ -255,7 +255,7 @@ def build_hierarchy(
             ek = f"{model_id}:expert:L{lay}.e{e}"
             agg = expert_agg.get((lay, e))
             hm.nodes[ek] = HierarchyNode(
-                level=AtlasLevel.EXPERTS,
+                level=ProfilerLevel.EXPERTS,
                 key=ek,
                 label=f"L{lay}·exp{e}",
                 metrics={
@@ -274,7 +274,7 @@ def build_hierarchy(
                 ck = f"{model_id}:unit:L{lay}.e{e}.c{c}"
                 ch = channel_agg.get((lay, e, c))
                 hm.nodes[ck] = HierarchyNode(
-                    level=AtlasLevel.UNITS,
+                    level=ProfilerLevel.UNITS,
                     key=ck,
                     label=f"L{lay}·exp{e}·ch{c}",
                     parents=[ek],
@@ -295,7 +295,7 @@ def build_hierarchy(
     for beh_key, vals in beh_success.items():
         bk = f"{model_id}:behaviour:{beh_key}"
         hm.nodes[bk] = HierarchyNode(
-            level=AtlasLevel.BEHAVIOUR,
+            level=ProfilerLevel.BEHAVIOUR,
             key=bk,
             label=f"behaviour {beh_key}",
             metrics={
@@ -309,7 +309,7 @@ def build_hierarchy(
         pk = _path_key(model_id, sig)
         if pk not in hm.nodes:
             hm.nodes[pk] = HierarchyNode(
-                level=AtlasLevel.PATHWAYS,
+                level=ProfilerLevel.PATHWAYS,
                 key=pk,
                 label=f"path {pk}",
                 metrics={
@@ -323,7 +323,7 @@ def build_hierarchy(
                 ck = _coalition_key(model_id, lay, tup)
                 if ck not in hm.nodes:
                     hm.nodes[ck] = HierarchyNode(
-                        level=AtlasLevel.COALITIONS,
+                        level=ProfilerLevel.COALITIONS,
                         key=ck,
                         label=f"L{lay} coalition ({','.join(map(str, tup))})",
                         metrics={"size": float(len(tup))},

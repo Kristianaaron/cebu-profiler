@@ -16,8 +16,8 @@ from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
-from model_atlas.atlas.runtime import MiniMoE, forward
-from model_atlas.schemas.ontology import (
+from cebu_profiler.profiler.runtime import MiniMoE, forward
+from cebu_profiler.schemas.ontology import (
     CapabilityLabel,
     SuccessState,
     TrajectoryStage,

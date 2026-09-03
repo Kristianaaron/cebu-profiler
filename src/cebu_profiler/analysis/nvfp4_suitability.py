@@ -12,11 +12,11 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from model_atlas.atlas.reap import CalibrationSample
-from model_atlas.atlas.runtime import MiniMoE, forward
-from model_atlas.compression.quant import rel_l2
-from model_atlas.compression.response import quantize_expert_tensor
-from model_atlas.schemas.evidence import EvidenceKind
+from cebu_profiler.compression.quant import rel_l2
+from cebu_profiler.compression.response import quantize_expert_tensor
+from cebu_profiler.profiler.reap import CalibrationSample
+from cebu_profiler.profiler.runtime import MiniMoE, forward
+from cebu_profiler.schemas.evidence import EvidenceKind
 
 _EXPERT_MATS = ("gate", "up", "down")
 

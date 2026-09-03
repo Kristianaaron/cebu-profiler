@@ -1,6 +1,6 @@
 """Structural executor consuming compression manifests (blueprint §12)."""
 
-from model_atlas.executor.structural import (
+from cebu_profiler.executor.structural import (
     apply_manifest,
     build_clone,
     dry_run,

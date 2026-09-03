@@ -1,4 +1,4 @@
-"""The `atlas_runs/<id>/` output contract (v2 §27).
+"""The `profiler_runs/<id>/` output contract (v2 §27).
 
 Declares the canonical machine-readable file set, which files each evidence
 level is expected to guarantee, and validation that a run's produced evidence
@@ -10,11 +10,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from model_atlas.schemas.atlas_run import AtlasRun
-from model_atlas.schemas.evidence import EvidenceLevel
+from cebu_profiler.schemas.evidence import EvidenceLevel
+from cebu_profiler.schemas.profiler_run import ProfilerRun
 
 # Canonical §27 file set (as declared by the contract).
-ATLAS_RUN_FILES: frozenset[str] = frozenset(
+CEBU_RUN_FILES: frozenset[str] = frozenset(
     {
         "run_manifest.json",
         "source_checkpoint_manifest.json",
@@ -61,7 +61,7 @@ ATLAS_RUN_FILES: frozenset[str] = frozenset(
         "uncertainty_report.json",
         "resource_telemetry.parquet",
         "warnings.json",
-        "atlas_summary.json",
+        "profiler_summary.json",
         "reproducibility_command.sh",
         "v3_run.json",
         "v3_candidate_graph.json",
@@ -96,7 +96,7 @@ ASSOCIATION_FILES: frozenset[str] = frozenset(
         "expert_similarity.parquet",
         "evidence_registry.parquet",
         "warnings.json",
-        "atlas_summary.json",
+        "profiler_summary.json",
         "reproducibility_command.sh",
     }
 )
@@ -108,13 +108,13 @@ def expected_run_files(evidence_level: EvidenceLevel) -> frozenset[str]:
     def _level_at_least(level: EvidenceLevel) -> bool:
         order = [
             EvidenceLevel.BASIC_SALIENCY,
-            EvidenceLevel.ENHANCED_ATLAS,
-            EvidenceLevel.CAUSAL_ATLAS,
+            EvidenceLevel.ENHANCED_PROFILER,
+            EvidenceLevel.CAUSAL_PROFILER,
         ]
         return order.index(evidence_level) >= order.index(level)
 
     base: set[str] = set(ASSOCIATION_FILES)
-    if _level_at_least(EvidenceLevel.ENHANCED_ATLAS):
+    if _level_at_least(EvidenceLevel.ENHANCED_PROFILER):
         base |= {
             "representation_trace_manifest.json",
             "route_counterfactuals.parquet",
@@ -136,7 +136,7 @@ def expected_run_files(evidence_level: EvidenceLevel) -> frozenset[str]:
             "kv_ledger.json",
             "pareto_frontier.json",
         }
-    if _level_at_least(EvidenceLevel.CAUSAL_ATLAS):
+    if _level_at_least(EvidenceLevel.CAUSAL_PROFILER):
         base |= {
             "multi_component_causal_results.parquet",
             "ablation_results.parquet",
@@ -148,7 +148,7 @@ def expected_run_files(evidence_level: EvidenceLevel) -> frozenset[str]:
     return frozenset(base)
 
 
-def validate_evidence_present(run: AtlasRun, evidence_present: list[str]) -> list[str]:
+def validate_evidence_present(run: ProfilerRun, evidence_present: list[str]) -> list[str]:
     """Return warnings for expected outputs (for the run's evidence level) that
     are not in `evidence_present`. Unknown/extra files are not errors."""
     present = set(evidence_present)
@@ -156,15 +156,15 @@ def validate_evidence_present(run: AtlasRun, evidence_present: list[str]) -> lis
     missing = sorted(expected - present)
     warnings = [f"missing expected output: {f}" for f in missing]
     # Guard: any file claimed present must be one we know about (no invented files).
-    unknown = sorted(set(evidence_present) - ATLAS_RUN_FILES)
-    warnings += [f"unknown output not in atlas contract: {f}" for f in unknown]
+    unknown = sorted(set(evidence_present) - CEBU_RUN_FILES)
+    warnings += [f"unknown output not in profiler contract: {f}" for f in unknown]
     return warnings
 
 
-def build_run_manifest(run: AtlasRun, evidence_present: list[str]) -> dict[str, Any]:
+def build_run_manifest(run: ProfilerRun, evidence_present: list[str]) -> dict[str, Any]:
     """Compose the run_manifest.json content for this run."""
     return {
-        "atlas_run_id": run.atlas_run_id,
+        "profiler_run_id": run.profiler_run_id,
         "source_model_asset_id": run.source_model_asset_id,
         "source_checkpoint_revision": run.source_checkpoint_revision,
         "calibration_suite_id": run.calibration_suite_id,

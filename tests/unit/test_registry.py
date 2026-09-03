@@ -2,8 +2,8 @@
 
 import pytest
 
-from model_atlas.registry.architectures import get_registry
-from model_atlas.schemas.architecture import DType
+from cebu_profiler.registry.architectures import get_registry
+from cebu_profiler.schemas.architecture import DType
 
 
 def test_registry_has_k3_and_mini():

@@ -19,10 +19,10 @@ import hashlib
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from model_atlas.atlas.reap import CalibrationSample
-from model_atlas.atlas.runtime import MiniMoE, forward
-from model_atlas.schemas.coverage import CapacityCoverage, EvidenceGate
-from model_atlas.schemas.evidence import EvidenceKind
+from cebu_profiler.profiler.reap import CalibrationSample
+from cebu_profiler.profiler.runtime import MiniMoE, forward
+from cebu_profiler.schemas.coverage import CapacityCoverage, EvidenceGate
+from cebu_profiler.schemas.evidence import EvidenceKind
 
 
 class SemanticCluster(BaseModel):

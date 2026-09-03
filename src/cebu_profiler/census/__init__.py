@@ -1,7 +1,7 @@
 """Tensor census and ownership."""
 
-from model_atlas.census.census import build_manifest
-from model_atlas.census.tensor_ownership import (
+from cebu_profiler.census.census import build_manifest
+from cebu_profiler.census.tensor_ownership import (
     OwnershipManifest,
     PhysicalLocation,
     PlacementPolicy,

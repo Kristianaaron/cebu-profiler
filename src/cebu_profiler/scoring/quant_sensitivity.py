@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from model_atlas.atlas.runtime import MiniMoE
-from model_atlas.compression.quant import rel_l2
-from model_atlas.compression.response import quantize_expert_tensor
+from cebu_profiler.compression.quant import rel_l2
+from cebu_profiler.compression.response import quantize_expert_tensor
+from cebu_profiler.profiler.runtime import MiniMoE
 
 _EXPERT_MATS = ("gate", "up", "down")
 _BPW_LEVELS: tuple[float, ...] = (4.0, 3.5, 3.25, 3.0)

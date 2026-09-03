@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from model_atlas.compression.quant import rel_l2, uniform_int_quant
+from cebu_profiler.compression.quant import rel_l2, uniform_int_quant
 
 
 class RefinementResult(BaseModel):

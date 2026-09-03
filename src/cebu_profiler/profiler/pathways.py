@@ -17,9 +17,9 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass
 
-from model_atlas.atlas.reap import CalibrationSample
-from model_atlas.atlas.runtime import MiniMoE, forward
-from model_atlas.schemas.ontology import SuccessState
+from cebu_profiler.profiler.reap import CalibrationSample
+from cebu_profiler.profiler.runtime import MiniMoE, forward
+from cebu_profiler.schemas.ontology import SuccessState
 
 PathSignature = tuple[tuple[int, ...], ...]  # per-layer sorted selected expert ids
 

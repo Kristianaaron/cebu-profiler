@@ -8,20 +8,20 @@ representation better than a uniform-width control at the same retained budget.
 
 import random
 
-from model_atlas.atlas.reap import CalibrationSample
-from model_atlas.atlas.runtime import MiniMoE, build_mini_moe
-from model_atlas.experiments.controls import (
+from cebu_profiler.experiments.controls import (
     budget_for,
     channel_importance,
     hetero_clone,
     matched_budget_compare,
     uniform_clone,
 )
-from model_atlas.experiments.fidelity import measure_fidelity
-from model_atlas.experiments.pareto import pareto_sweep
-from model_atlas.experiments.structured import build_structured_model
-from model_atlas.registry.architectures import get_registry
-from model_atlas.schemas.ontology import CapabilityLabel, TrajectoryStage
+from cebu_profiler.experiments.fidelity import measure_fidelity
+from cebu_profiler.experiments.pareto import pareto_sweep
+from cebu_profiler.experiments.structured import build_structured_model
+from cebu_profiler.profiler.reap import CalibrationSample
+from cebu_profiler.profiler.runtime import MiniMoE, build_mini_moe
+from cebu_profiler.registry.architectures import get_registry
+from cebu_profiler.schemas.ontology import CapabilityLabel, TrajectoryStage
 
 ARCH = get_registry().get("k3-mini")
 

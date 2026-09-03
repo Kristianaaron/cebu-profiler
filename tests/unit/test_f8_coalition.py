@@ -4,16 +4,16 @@ The causal sweeps are kept tiny (small corpus, capped pair sets) because the
 forward pass is pure Python.
 """
 
-from model_atlas.atlas.coalition import (
+from cebu_profiler.profiler.coalition import (
     coactivation_map,
     minimum_destructive_set,
     pairwise_causal,
     single_effect,
     synergic_pairs,
 )
-from model_atlas.atlas.reap import make_synthetic_corpus
-from model_atlas.atlas.runtime import build_mini_moe, forward
-from model_atlas.registry.architectures import get_registry
+from cebu_profiler.profiler.reap import make_synthetic_corpus
+from cebu_profiler.profiler.runtime import build_mini_moe, forward
+from cebu_profiler.registry.architectures import get_registry
 
 ARCH = get_registry().get("k3-mini")
 

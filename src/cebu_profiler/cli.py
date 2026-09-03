@@ -1,4 +1,4 @@
-"""model-atlas command-line interface."""
+"""cebu-profiler command-line interface."""
 
 from __future__ import annotations
 
@@ -7,21 +7,17 @@ from pathlib import Path
 
 import typer
 
-from model_atlas import __version__
-from model_atlas.analysis import (
+from cebu_profiler import __version__
+from cebu_profiler.analysis import (
     build_corpus_semantic_map,
 )
-from model_atlas.atlas.export import export_run
-from model_atlas.atlas.reap import make_synthetic_corpus, run_calibration
-from model_atlas.atlas.runtime import build_mini_moe
-from model_atlas.atlas.v3_pipeline import run_v3_pipeline
-from model_atlas.candidates import CandidateGraph, CandidateNode, CandidateStage
-from model_atlas.census.census import build_manifest
-from model_atlas.checkpoint.source_manifest import load_manifest
-from model_atlas.checkpoint.structural_graph import build_structural_graph
-from model_atlas.dashboard import write_dashboard
-from model_atlas.experiments.pareto_v3 import restrict_frontier
-from model_atlas.kernels import (
+from cebu_profiler.candidates import CandidateGraph, CandidateNode, CandidateStage
+from cebu_profiler.census.census import build_manifest
+from cebu_profiler.checkpoint.source_manifest import load_manifest
+from cebu_profiler.checkpoint.structural_graph import build_structural_graph
+from cebu_profiler.dashboard import write_dashboard
+from cebu_profiler.experiments.pareto_v3 import restrict_frontier
+from cebu_profiler.kernels import (
     KernelManifestRequest,
     KernelQuery,
     build_execution_manifest,
@@ -29,11 +25,15 @@ from model_atlas.kernels import (
     rankability_reasons,
     write_catalog,
 )
-from model_atlas.planning.memory_planner import GIB, assess
-from model_atlas.planning.realbytes import account_manifest, plan_candidates, report
-from model_atlas.registry.architectures import get_registry
+from cebu_profiler.planning.memory_planner import GIB, assess
+from cebu_profiler.planning.realbytes import account_manifest, plan_candidates, report
+from cebu_profiler.profiler.export import export_run
+from cebu_profiler.profiler.reap import make_synthetic_corpus, run_calibration
+from cebu_profiler.profiler.runtime import build_mini_moe
+from cebu_profiler.profiler.v3_pipeline import run_v3_pipeline
+from cebu_profiler.registry.architectures import get_registry
 
-app = typer.Typer(no_args_is_help=True, help="Model-agnostic Atlas platform CLI.")
+app = typer.Typer(no_args_is_help=True, help="Model-agnostic Cebu Profiler platform CLI.")
 
 
 @app.command()
@@ -55,7 +55,7 @@ def doctor() -> None:
     else:
         yaml_ver = yaml.__version__
 
-    print(f"model-atlas {__version__}")
+    print(f"cebu-profiler {__version__}")
     print(f"python {platform.python_version()} ({platform.machine()})")
     print(f"pydantic {pydantic_ver}")
     print(f"pyyaml {yaml_ver}")
@@ -71,14 +71,14 @@ def export(
         ..., "--eval-lab-root", help="eval-lab repo root with tasks/ tree"
     ),
     out: str = typer.Option(
-        "atlas_runs", "--out", help="output root that receives atlas_runs/<run_id>/"
+        "profiler_runs", "--out", help="output root that receives profiler_runs/<run_id>/"
     ),
     build: bool = typer.Option(False, "--build", help="also build + register a derivative"),
     arch: str = typer.Option("k3-mini", "--arch"),
     seed: int = typer.Option(0, "--seed"),
     keep_per_layer: int = typer.Option(4, "--keep-per-layer"),
 ) -> None:
-    """Export an atlas run dir over an eval-lab task corpus (atlas-bridge)."""
+    """Export a profiler run dir over an eval-lab task corpus (cebu-bridge)."""
     result = export_run(
         out,
         eval_lab_root=eval_lab_root,
@@ -87,13 +87,13 @@ def export(
         keep_per_layer=keep_per_layer,
         build=build,
     )
-    print(f"wrote atlas run: {result['run_dir']}")
+    print(f"wrote profiler run: {result['run_dir']}")
     print(f"  plans: {', '.join(result['plan_names'])}")
 
 
 @app.command()
 def dashboard(
-    out: str = typer.Option("atlas_dashboard.html", "--out", help="output HTML path"),
+    out: str = typer.Option("cebu_dashboard.html", "--out", help="output HTML path"),
     seed: int = typer.Option(0, "--seed"),
     kernel_receipt: list[str] | None = typer.Option(  # noqa: B008
         None,
@@ -101,7 +101,7 @@ def dashboard(
         help="Runtime-kernel receipt or catalog; repeat to import several",
     ),
 ) -> None:
-    """Render the Atlas Lab interactive dashboard from measured data."""
+    """Render the Cebu Lab interactive dashboard from measured data."""
     path = write_dashboard(out, seed=seed, kernel_receipts=kernel_receipt)
     print(f"wrote interactive dashboard: {path}")
 
@@ -111,7 +111,7 @@ def kernel_import(
     receipts: list[str] = typer.Argument(..., help="Receipt/catalog JSON files"),  # noqa: B008
     out: str = typer.Option("kernel-evidence.json", "--out", help="Normalized catalog path"),
 ) -> None:
-    """Validate runtime receipts and write a deterministic Atlas catalog."""
+    """Validate runtime receipts and write a deterministic Cebu Profiler catalog."""
     catalog = load_catalog(receipts)
     path = write_catalog(out, catalog)
     eligible = sum(not rankability_reasons(receipt) for receipt in catalog.receipts)
@@ -355,13 +355,16 @@ def v3_pareto(
     seed: int = typer.Option(0, "--seed"),
 ) -> None:
     """Compute the v3 Pareto frontier + knee region over an idealized candidate sweep."""
-    from model_atlas.experiments.pareto_v3 import FrontierPoint
+    from cebu_profiler.experiments.pareto_v3 import FrontierPoint
 
     pts = [
         FrontierPoint(
             candidate_id="A",
             values={
-                "quality": 0.99, "resident_gib": 214.0, "decode_tps": 21.0, "context": 256000,
+                "quality": 0.99,
+                "resident_gib": 214.0,
+                "decode_tps": 21.0,
+                "context": 256000,
             },
         ),
         FrontierPoint(
@@ -433,7 +436,7 @@ def v3_corpus(
     samples: int = typer.Option(12, "--samples"),
 ) -> None:
     """Build the corpus-semantic bidirectional map + coverage gate."""
-    from model_atlas.schemas.coverage import EvidenceGate
+    from cebu_profiler.schemas.coverage import EvidenceGate
 
     spec = get_registry().get(arch)
     model = build_mini_moe(spec, seed=seed)

@@ -16,17 +16,17 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from model_atlas.atlas.collector import ChannelStatsAccumulator
-from model_atlas.scoring.base import (
-    AtlasScorer,
+from cebu_profiler.profiler.collector import ChannelStatsAccumulator
+from cebu_profiler.scoring.base import (
     ChannelScore,
+    ProfilerScorer,
     ScoreNeed,
     ScorerRequirements,
     ScoreTable,
 )
 
 if TYPE_CHECKING:
-    from model_atlas.atlas.runtime import MiniMoE
+    from cebu_profiler.profiler.runtime import MiniMoE
 
 
 class Boundary(StrEnum):
@@ -76,7 +76,7 @@ def triage(
         keys_sorted = sorted(keys, key=lambda k: importance[k], reverse=True)
         n = len(keys_sorted)
         keep_n = max(1, round(n * keep_share))
-        prune_n = max(0, n - round(n * (1 - keep_share)) )
+        prune_n = max(0, n - round(n * (1 - keep_share)))
         # band around the boundary
         band = max(1, n // 4)
         for idx, key in enumerate(keys_sorted):
@@ -103,7 +103,7 @@ def _median(vals: list[float]) -> float:
     return s[m] if len(s) % 2 else (s[m - 1] + s[m]) / 2.0
 
 
-class CausalScorer(AtlasScorer):
+class CausalScorer(ProfilerScorer):
     name = "causal"
     version = "1.0"
 

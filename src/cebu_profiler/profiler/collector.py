@@ -32,7 +32,7 @@ class ChannelStat:
 
 @dataclass
 class ChannelStatsAccumulator:
-    """Online aggregator keyed by (layer, expert, channel). """
+    """Online aggregator keyed by (layer, expert, channel)."""
 
     _sum_abs: dict[tuple[int, int, int], float] = field(default_factory=dict)
     _sum_sq: dict[tuple[int, int, int], float] = field(default_factory=dict)

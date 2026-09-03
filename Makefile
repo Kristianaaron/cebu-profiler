@@ -14,4 +14,4 @@ type:
 	mypy src
 
 doctor:
-	model-atlas doctor
+	model-profiler doctor

@@ -1,6 +1,6 @@
 """Candidate lineage and candidate graph (v3 "Candidate graph requirements")."""
 
-from model_atlas.candidates.graph import (
+from cebu_profiler.candidates.graph import (
     CandidateGraph,
     CandidateGraphError,
     CandidateMetricSet,

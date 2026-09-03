@@ -1,8 +1,8 @@
 # Architecture
 
-Model-agnostic parent-to-derivative platform. Atlas is part of the same product
+Model-agnostic parent-to-derivative platform. Cebu Profiler is part of the same product
 goal as the evaluation harness but is a **separate execution subsystem**: the
-harness asks "what can a completed model do?", the Atlas asks "which internal
+harness asks "what can a completed model do?", the Cebu Profiler asks "which internal
 parent-model components are associated with / necessary for / causally
 responsible for those behaviours?"
 
@@ -31,11 +31,11 @@ that checkpoint's census and are `None` until measured — never invented.
 
 ## Boundary discipline
 
-- Atlas must not become the evaluation runner.
-- Never do heavy Atlas analysis in frontend components; serve stored artifacts.
-- Long Atlas jobs must not depend on the GUI (persistent orchestrator pattern).
+- Cebu Profiler must not become the evaluation runner.
+- Never do heavy Cebu Profiler analysis in frontend components; serve stored artifacts.
+- Long Cebu Profiler jobs must not depend on the GUI (persistent orchestrator pattern).
 
-## Target atlas hierarchy (not yet implemented)
+## Target profiler hierarchy (not yet implemented)
 
 Weights/tensors → internal units (channels/neurons/tiles/latent directions/
 sparse features) → experts → coalitions → cross-layer pathways → behaviour.

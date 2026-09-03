@@ -2,28 +2,28 @@
 
 import random
 
-from model_atlas.atlas.compress import run_compression_pipeline
-from model_atlas.atlas.reap import CalibrationSample
-from model_atlas.atlas.runtime import MiniMoE, build_mini_moe
-from model_atlas.atlas.traces import trace_records
-from model_atlas.experiments import compare_controls
-from model_atlas.planning.optimizer import rate_distortion_manifest
-from model_atlas.registry.architectures import get_registry
-from model_atlas.schemas.manifest import validate_manifest
-from model_atlas.schemas.ontology import CapabilityLabel, TrajectoryStage
-from model_atlas.scoring.quant_sensitivity import (
+from cebu_profiler.experiments import compare_controls
+from cebu_profiler.planning.optimizer import rate_distortion_manifest
+from cebu_profiler.profiler.compress import run_compression_pipeline
+from cebu_profiler.profiler.reap import CalibrationSample
+from cebu_profiler.profiler.runtime import MiniMoE, build_mini_moe
+from cebu_profiler.profiler.traces import trace_records
+from cebu_profiler.registry.architectures import get_registry
+from cebu_profiler.schemas.manifest import validate_manifest
+from cebu_profiler.schemas.ontology import CapabilityLabel, TrajectoryStage
+from cebu_profiler.scoring.quant_sensitivity import (
     SensitivityReport,
     expert_quant_sensitivity,
     recommend_bpw,
     sensitivity_report,
 )
-from model_atlas.scoring.redundancy import (
+from cebu_profiler.scoring.redundancy import (
     RedundancyScorer,
     channel_kvalue,
     channel_uniqueness,
     expert_uniqueness,
 )
-from model_atlas.scoring.semantic import SemanticScorer, expert_semantic_score, semantic_map
+from cebu_profiler.scoring.semantic import SemanticScorer, expert_semantic_score, semantic_map
 
 ARCH = get_registry().get("k3-mini")
 
@@ -106,7 +106,7 @@ def test_quant_sensitivity_recommends_levels() -> None:
 
 def test_rate_distortion_manifest_respects_budget() -> None:
     model = build_mini_moe(ARCH, seed=1)
-    from model_atlas.experiments.controls import channel_importance
+    from cebu_profiler.experiments.controls import channel_importance
 
     imp = channel_importance(model, _samples_n(model))
     n_slots = len(model.layers) * model.n_exp

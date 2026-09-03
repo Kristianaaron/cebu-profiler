@@ -8,9 +8,9 @@ average importance is low.
 
 from __future__ import annotations
 
-from model_atlas.scoring.base import (
-    AtlasScorer,
+from cebu_profiler.scoring.base import (
     ChannelScore,
+    ProfilerScorer,
     ScorerRequirements,
     ScoreTable,
 )
@@ -46,7 +46,7 @@ def _spearman(a: list[float], b: list[float]) -> float:
     return 1.0 - 6.0 * d2 / (n * (n * n - 1))
 
 
-class StabilityAggregator(AtlasScorer):
+class StabilityAggregator(ProfilerScorer):
     name = "stability"
     version = "1.0"
 
@@ -70,7 +70,7 @@ class StabilityAggregator(AtlasScorer):
         out: list[ChannelScore] = []
         # group by expert to get within-expert rankings/stability
         by_expert: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
-        for (layer, e, c) in channels:
+        for layer, e, c in channels:
             by_expert.setdefault((layer, e), []).append((layer, e, c))
 
         for (layer, e), chans in by_expert.items():

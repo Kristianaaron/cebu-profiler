@@ -1,4 +1,4 @@
-"""Derivative architecture search over measured atlas evidence (v2 §24–§25).
+"""Derivative architecture search over measured profiler evidence (v2 §24–§25).
 
 Consumes measured saliency (F3), coalitions (F8), paths (F9), and per-expert
 compression response curves (F7) to generate MULTIPLE Pareto-ish candidates —
@@ -10,10 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from model_atlas.atlas.reap import SaliencyAccumulator
-from model_atlas.atlas.runtime import MiniMoE
-from model_atlas.compression.response import ResponsePoint
-from model_atlas.planning.maps import (
+from cebu_profiler.compression.response import ResponsePoint
+from cebu_profiler.planning.maps import (
     CandidatePlan,
     CoalitionProtectionMap,
     KeepEntry,
@@ -26,7 +24,9 @@ from model_atlas.planning.maps import (
     SubstituteEntry,
     SubstituteMap,
 )
-from model_atlas.schemas.architecture import DTYPE_BYTES, TensorRole
+from cebu_profiler.profiler.reap import SaliencyAccumulator
+from cebu_profiler.profiler.runtime import MiniMoE
+from cebu_profiler.schemas.architecture import DTYPE_BYTES, TensorRole
 
 
 def expert_src_bytes(model: MiniMoE, _layer: int, _expert: int) -> float:

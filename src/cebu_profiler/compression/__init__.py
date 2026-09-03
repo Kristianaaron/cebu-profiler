@@ -1,13 +1,18 @@
 """Compression backends, quantization math, and per-expert response curves."""
 
-from model_atlas.compression.backend import (
+from cebu_profiler.compression.backend import (
     BackendRegistry,
     CompressionBackend,
     SupportStatus,
     _registry,
 )
-from model_atlas.compression.quant import QuantMeta, float_mantissa_quant, rel_l2, uniform_int_quant
-from model_atlas.compression.response import (
+from cebu_profiler.compression.quant import (
+    QuantMeta,
+    float_mantissa_quant,
+    rel_l2,
+    uniform_int_quant,
+)
+from cebu_profiler.compression.response import (
     ResponsePoint,
     expert_response_curve,
 )

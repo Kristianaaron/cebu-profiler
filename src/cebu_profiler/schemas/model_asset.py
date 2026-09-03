@@ -39,10 +39,10 @@ class ModelAsset(BaseModel):
     stored_size_bytes: int | None = Field(default=None, ge=0)
     estimated_resident_bytes: int | None = Field(default=None, ge=0)
     runtime_compatibility: bool | None = None
-    atlas_compatibility: bool | None = None
+    profiler_compatibility: bool | None = None
     validation_status: str | None = None
     parent_model_id: str | None = None
-    source_atlas_id: str | None = None
+    source_profiler_id: str | None = None
     source_experiment_id: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = Field(default_factory=dict)

@@ -17,9 +17,9 @@ import random
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from model_atlas.atlas.reap import CalibrationSample
-from model_atlas.atlas.runtime import MiniMoE, forward
-from model_atlas.schemas.ontology import CapabilityLabel
+from cebu_profiler.profiler.reap import CalibrationSample
+from cebu_profiler.profiler.runtime import MiniMoE, forward
+from cebu_profiler.schemas.ontology import CapabilityLabel
 
 
 def _dot(u: list[float], v: list[float]) -> float:

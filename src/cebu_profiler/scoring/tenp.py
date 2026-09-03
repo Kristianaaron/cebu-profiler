@@ -12,17 +12,17 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-from model_atlas.atlas.collector import ChannelStatsAccumulator
-from model_atlas.scoring.base import (
-    AtlasScorer,
+from cebu_profiler.profiler.collector import ChannelStatsAccumulator
+from cebu_profiler.scoring.base import (
     ChannelScore,
+    ProfilerScorer,
     ScoreNeed,
     ScorerRequirements,
     ScoreTable,
 )
 
 if TYPE_CHECKING:
-    from model_atlas.atlas.runtime import MiniMoE
+    from cebu_profiler.profiler.runtime import MiniMoE
 
 
 def _col_norm(down: list[list[float]], c: int) -> float:
@@ -51,7 +51,7 @@ def tenp_rank(
     return out
 
 
-class TenpScorer(AtlasScorer):
+class TenpScorer(ProfilerScorer):
     name = "tenp"
     version = "1.0"
 

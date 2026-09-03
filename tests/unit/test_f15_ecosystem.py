@@ -1,14 +1,14 @@
-"""Ecosystem bridge tests: eval-lab task corpus -> Atlas calibration (deterministic)."""
+"""Ecosystem bridge tests: eval-lab task corpus -> Cebu Profiler calibration (deterministic)."""
 
 from pathlib import Path
 
-from model_atlas.ecosystem import (
+from cebu_profiler.ecosystem import (
     label_for_path,
     pipeline_summary,
     prompt_corpus,
     tokens_from_text,
 )
-from model_atlas.schemas.ontology import CapabilityLabel, DataPartition
+from cebu_profiler.schemas.ontology import CapabilityLabel, DataPartition
 
 
 def _make_tasks(tmp_path: Path) -> Path:

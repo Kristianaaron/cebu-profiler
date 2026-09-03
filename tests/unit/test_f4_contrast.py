@@ -1,13 +1,13 @@
 """F4 tests: success/failure/recovery contrasts + representation traces."""
 
-from model_atlas.atlas.reap import (
+from cebu_profiler.profiler.reap import (
     ContrastAccumulator,
     make_synthetic_corpus,
     run_contrast,
 )
-from model_atlas.atlas.runtime import build_mini_moe, forward, representation_profile
-from model_atlas.registry.architectures import get_registry
-from model_atlas.schemas.ontology import CapabilityLabel, SuccessState, TrajectoryStage
+from cebu_profiler.profiler.runtime import build_mini_moe, forward, representation_profile
+from cebu_profiler.registry.architectures import get_registry
+from cebu_profiler.schemas.ontology import CapabilityLabel, SuccessState, TrajectoryStage
 
 ARCH = get_registry().get("k3-mini")
 

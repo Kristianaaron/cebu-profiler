@@ -10,9 +10,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from model_atlas.atlas.counterfactual import final_utility, logit_kl
-from model_atlas.atlas.reap import CalibrationSample
-from model_atlas.atlas.runtime import MiniMoE, forward
+from cebu_profiler.profiler.counterfactual import final_utility, logit_kl
+from cebu_profiler.profiler.reap import CalibrationSample
+from cebu_profiler.profiler.runtime import MiniMoE, forward
 
 
 @dataclass

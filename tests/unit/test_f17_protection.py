@@ -2,17 +2,17 @@
 
 import random
 
-from model_atlas.atlas.compress import run_compression_pipeline
-from model_atlas.atlas.reap import CalibrationSample
-from model_atlas.atlas.runtime import MiniMoE, build_mini_moe
-from model_atlas.experiments.structured import build_structured_model
-from model_atlas.planning.protection import (
+from cebu_profiler.experiments.structured import build_structured_model
+from cebu_profiler.planning.protection import (
     coalition_protected_experts,
     full_channel_protection,
 )
-from model_atlas.registry.architectures import get_registry
-from model_atlas.schemas.manifest import validate_manifest
-from model_atlas.schemas.ontology import CapabilityLabel, TrajectoryStage
+from cebu_profiler.profiler.compress import run_compression_pipeline
+from cebu_profiler.profiler.reap import CalibrationSample
+from cebu_profiler.profiler.runtime import MiniMoE, build_mini_moe
+from cebu_profiler.registry.architectures import get_registry
+from cebu_profiler.schemas.manifest import validate_manifest
+from cebu_profiler.schemas.ontology import CapabilityLabel, TrajectoryStage
 
 ARCH = get_registry().get("k3-mini")
 

@@ -1,4 +1,4 @@
-"""F22 tests: Atlas v3 fidelity-first analyzers + candidate graph.
+"""F22 tests: Cebu Profiler v3 fidelity-first analyzers + candidate graph.
 
 Covers each new v3 analyzer (shared-representation, spectral, conditional
 sensitivity, routing-consistency, global EXL3 bit budget, quant-interaction,
@@ -7,8 +7,7 @@ structural fallback) plus the candidate-graph immutability rules. All run on
 the deterministic synthetic MiniMoE — no checkpoint required.
 """
 
-
-from model_atlas.analysis import (
+from cebu_profiler.analysis import (
     analyze_shared_representation,
     analyze_spectral,
     conditional_sensitivity,
@@ -17,21 +16,21 @@ from model_atlas.analysis import (
     nvfp4_suitability,
     routing_consistency,
 )
-from model_atlas.analysis.kv_memory import MemoryLedger, plan_kv_budget
-from model_atlas.analysis.quant_interaction import predict_global_error
-from model_atlas.analysis.refiner import refine_expert_tensors
-from model_atlas.analysis.residual_correction import residual_correction_plan
-from model_atlas.analysis.structural_fallback import structural_fallback_plans
-from model_atlas.atlas.reap import make_synthetic_corpus
-from model_atlas.atlas.runtime import build_mini_moe
-from model_atlas.candidates import (
+from cebu_profiler.analysis.kv_memory import MemoryLedger, plan_kv_budget
+from cebu_profiler.analysis.quant_interaction import predict_global_error
+from cebu_profiler.analysis.refiner import refine_expert_tensors
+from cebu_profiler.analysis.residual_correction import residual_correction_plan
+from cebu_profiler.analysis.structural_fallback import structural_fallback_plans
+from cebu_profiler.candidates import (
     CandidateGraph,
     CandidateGraphError,
     CandidateNode,
     CandidateStage,
 )
-from model_atlas.registry.architectures import get_registry
-from model_atlas.schemas.coverage import (
+from cebu_profiler.profiler.reap import make_synthetic_corpus
+from cebu_profiler.profiler.runtime import build_mini_moe
+from cebu_profiler.registry.architectures import get_registry
+from cebu_profiler.schemas.coverage import (
     CapacityCoverage,
     CoverageThresholds,
     EvidenceGate,
@@ -91,7 +90,7 @@ def test_global_bit_maps_respect_budget_and_bpw_bounds() -> None:
     model = _model()
     maps = enumerate_global_bit_maps(model, budgets=(0.001, 0.002))
     for budget, bm in maps.items():
-        assert bm.total_bytes <= budget * 1024 ** 3
+        assert bm.total_bytes <= budget * 1024**3
         for a in bm.assignments:
             assert 3.0 <= a.bpw <= 4.0
             assert a.memory_bytes >= 0.0
@@ -139,9 +138,9 @@ def test_nvfp4_suitability_rows_and_recovery_flag() -> None:
 def test_kv_ledger_recommends_with_headroom_and_context() -> None:
     led = MemoryLedger(
         rank="node_a",
-        physical_bytes=128 * 1024 ** 3,
-        weights_bytes=100 * 1024 ** 3,
-        safety_reserve_bytes=5 * 1024 ** 3,
+        physical_bytes=128 * 1024**3,
+        weights_bytes=100 * 1024**3,
+        safety_reserve_bytes=5 * 1024**3,
     )
     r = plan_kv_budget(led, arch_hidden=128, n_layers=2, context_target_tokens=32000)
     assert led.free_bytes > 0

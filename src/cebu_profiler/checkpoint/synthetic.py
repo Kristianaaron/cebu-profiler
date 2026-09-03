@@ -12,7 +12,7 @@ import json
 import os
 from pathlib import Path
 
-from model_atlas.checkpoint.safetensors import write_safetensors
+from cebu_profiler.checkpoint.safetensors import write_safetensors
 
 _NAMES = [
     "model.embed_tokens",  # EMBEDDING

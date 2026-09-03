@@ -1,6 +1,6 @@
-"""Atlas analysis subsystem: contracts + synthetic analysis runtime."""
+"""Cebu Profiler analysis subsystem: contracts + synthetic analysis runtime."""
 
-from model_atlas.atlas.coalition import (
+from cebu_profiler.profiler.coalition import (
     CoalitionMap,
     PairAnalysis,
     coactivation_map,
@@ -9,7 +9,7 @@ from model_atlas.atlas.coalition import (
     single_effect,
     synergic_pairs,
 )
-from model_atlas.atlas.counterfactual import (
+from cebu_profiler.profiler.counterfactual import (
     AlternativeRoute,
     RouteRegretResult,
     counterfactual_scan,
@@ -17,7 +17,7 @@ from model_atlas.atlas.counterfactual import (
     logit_kl,
     sample_topk_subsets,
 )
-from model_atlas.atlas.features import (
+from cebu_profiler.profiler.features import (
     Feature,
     FeatureDictionary,
     VocabProjection,
@@ -28,13 +28,13 @@ from model_atlas.atlas.features import (
     promoted_suppressed,
     residual_direction,
 )
-from model_atlas.atlas.output_layout import (
-    ATLAS_RUN_FILES,
+from cebu_profiler.profiler.output_layout import (
+    CEBU_RUN_FILES,
     build_run_manifest,
     expected_run_files,
     validate_evidence_present,
 )
-from model_atlas.atlas.pathways import (
+from cebu_profiler.profiler.pathways import (
     ChannelSensitivity,
     DivergenceResult,
     PathRecord,
@@ -46,7 +46,7 @@ from model_atlas.atlas.pathways import (
     route_path,
     success_failure_divergence,
 )
-from model_atlas.atlas.reap import (
+from cebu_profiler.profiler.reap import (
     CalibrationSample,
     ContrastAccumulator,
     SaliencyAccumulator,
@@ -54,7 +54,7 @@ from model_atlas.atlas.reap import (
     run_calibration,
     run_contrast,
 )
-from model_atlas.atlas.runtime import (
+from cebu_profiler.profiler.runtime import (
     ForwardResult,
     LayerTrace,
     LayerWeights,
@@ -65,7 +65,7 @@ from model_atlas.atlas.runtime import (
 )
 
 __all__ = [
-    "ATLAS_RUN_FILES",
+    "CEBU_RUN_FILES",
     "AlternativeRoute",
     "RouteRegretResult",
     "counterfactual_scan",

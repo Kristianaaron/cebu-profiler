@@ -13,7 +13,7 @@ Routed-expert geometry (blueprint §4):
 
 from __future__ import annotations
 
-from model_atlas.schemas.architecture import (
+from cebu_profiler.schemas.architecture import (
     ArchitectureSpec,
     DType,
     LayerKind,

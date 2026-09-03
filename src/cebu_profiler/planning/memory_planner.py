@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from model_atlas.census.tensor_ownership import OwnershipManifest, PhysicalLocation
-from model_atlas.schemas.architecture import DTYPE_BYTES, ArchitectureSpec, TensorRole
+from cebu_profiler.census.tensor_ownership import OwnershipManifest, PhysicalLocation
+from cebu_profiler.schemas.architecture import DTYPE_BYTES, ArchitectureSpec, TensorRole
 
 GIB = 1024**3
 

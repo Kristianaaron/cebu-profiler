@@ -12,8 +12,8 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 
-from model_atlas.atlas.runtime import MiniMoE, forward
-from model_atlas.serving.runtime import per_expert_bytes
+from cebu_profiler.profiler.runtime import MiniMoE, forward
+from cebu_profiler.serving.runtime import per_expert_bytes
 
 
 @dataclass

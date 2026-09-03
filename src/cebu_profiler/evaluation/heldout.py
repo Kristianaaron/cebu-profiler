@@ -11,10 +11,10 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 
-from model_atlas.atlas.counterfactual import final_utility
-from model_atlas.atlas.reap import CalibrationSample, SaliencyAccumulator
-from model_atlas.atlas.runtime import MiniMoE, forward
-from model_atlas.planning.maps import CandidatePlan
+from cebu_profiler.planning.maps import CandidatePlan
+from cebu_profiler.profiler.counterfactual import final_utility
+from cebu_profiler.profiler.reap import CalibrationSample, SaliencyAccumulator
+from cebu_profiler.profiler.runtime import MiniMoE, forward
 
 
 @dataclass

@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import math
 
-from model_atlas.atlas.runtime import MiniMoE
-from model_atlas.scoring.base import (
-    AtlasScorer,
+from cebu_profiler.profiler.runtime import MiniMoE
+from cebu_profiler.scoring.base import (
     ChannelScore,
+    ProfilerScorer,
     ScoreNeed,
     ScorerRequirements,
     ScoreTable,
@@ -44,9 +44,7 @@ def channel_uniqueness(model: MiniMoE) -> dict[tuple[int, int, int], float]:
                 if mid <= 1:
                     uniq[(layer, e, c)] = 1.0
                     continue
-                overlap = sum(
-                    abs(_col_cos(cols[c], cols[d])) for d in range(mid) if d != c
-                )
+                overlap = sum(abs(_col_cos(cols[c], cols[d])) for d in range(mid) if d != c)
                 uniq[(layer, e, c)] = 1.0 - overlap / (mid - 1)
     return uniq
 
@@ -81,7 +79,7 @@ def channel_kvalue(
     return k
 
 
-class RedundancyScorer(AtlasScorer):
+class RedundancyScorer(ProfilerScorer):
     name = "redundancy"
     version = "1.0"
 

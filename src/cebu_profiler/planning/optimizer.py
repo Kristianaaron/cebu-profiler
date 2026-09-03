@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from model_atlas.atlas.runtime import MiniMoE
-from model_atlas.schemas.manifest import (
+from cebu_profiler.profiler.runtime import MiniMoE
+from cebu_profiler.schemas.manifest import (
     BudgetSpec,
     CompressionManifest,
     ExpertPlan,
@@ -34,6 +34,7 @@ def allocate_under_budget(
     """
     n_slots = len(model.layers) * model.n_exp
     budget_channels = min(max(budget_channels, n_slots), n_slots * model.mid)
+
     # global order by importance desc
     def _channels() -> list[tuple[int, int, int, float]]:
         return [
@@ -79,11 +80,9 @@ def rate_distortion_manifest(
     quant_bpw: dict[tuple[int, int], float] | None = None,
 ) -> BudgetPlan:
     """Build a CompressionManifest from a channel budget, rounded to allowed buckets."""
-    from model_atlas.planning.width_buckets import SM121_WIDTH_BUCKETS
+    from cebu_profiler.planning.width_buckets import SM121_WIDTH_BUCKETS
 
-    allowed = [b for b in (allowed_widths or SM121_WIDTH_BUCKETS) if b <= model.mid] or [
-        model.mid
-    ]
+    allowed = [b for b in (allowed_widths or SM121_WIDTH_BUCKETS) if b <= model.mid] or [model.mid]
     orders = allocate_under_budget(model, importance, budget_channels)
     kept = sum(len(o) for o in orders.values())
     # per-expert top-`width` ranked channels so keep cardinality == bucket width
@@ -119,8 +118,6 @@ def rate_distortion_manifest(
         layers=layers,
     )
     est = sum(
-        p.target_width * 3 * model.hidden
-        for lp in layers.values()
-        for p in lp.experts.values()
+        p.target_width * 3 * model.hidden for lp in layers.values() for p in lp.experts.values()
     )
     return BudgetPlan(manifest=manifest, kept_channels=kept, estimated_params=est)

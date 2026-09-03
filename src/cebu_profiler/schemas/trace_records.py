@@ -1,7 +1,7 @@
 """Normalized trace/score data contracts (blueprint §10).
 
 Pure data containers decoupled from Python object identity and from the runtime
-(builder lives in ``atlas/traces.py``): ``RouterRecord`` (per token+layer),
+(builder lives in ``profiler/traces.py``): ``RouterRecord`` (per token+layer),
 ``ExpertAggregate`` (per layer+expert), ``ChannelAggregate`` (per
 layer+expert+channel). All fields are *measured* from a real forward pass.
 """

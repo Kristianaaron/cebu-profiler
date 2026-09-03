@@ -1,10 +1,10 @@
-"""Atlas export executor — write the canonical `atlas_runs/<id>/` run dir.
+"""Cebu Profiler export executor — write the canonical `profiler_runs/<id>/` run dir.
 
-Implements §1 + §3 of the atlas-bridge contract. Runs the real mini-MoE REAP
+Implements §1 + §3 of the cebu-bridge contract. Runs the real mini-MoE REAP
 pipeline over an eval-lab task corpus, generates candidate keep-map plans,
 optionally builds + registers a derivative, and writes the frozen JSON files
 (``run_manifest.json`` / ``layer_saliency.json`` / ``plans.json`` /
-``derivative.json``). This realizes the existing ``output_layout.ATLAS_RUN_FILES``
+``derivative.json``). This realizes the existing ``output_layout.CEBU_RUN_FILES``
 contract, which previously had no writer.
 """
 
@@ -16,29 +16,29 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from model_atlas.atlas.coalition import coactivation_map
-from model_atlas.atlas.compress import run_compression_pipeline
-from model_atlas.atlas.hierarchy import build_hierarchy
-from model_atlas.atlas.reap import SaliencyAccumulator, run_calibration
-from model_atlas.atlas.runtime import MiniMoE
-from model_atlas.builder import build_derivative, register_derivative
-from model_atlas.ecosystem import build_mini_moe_for, prompt_corpus
-from model_atlas.planning import CandidatePlan, SearchInputs, generate_candidates
-from model_atlas.planning.maps_build import build_planning_maps
-from model_atlas.schemas.model_asset import AssetType, ModelAsset
-from model_atlas.schemas.ontology import DataPartition
+from cebu_profiler.builder import build_derivative, register_derivative
+from cebu_profiler.ecosystem import build_mini_moe_for, prompt_corpus
+from cebu_profiler.planning import CandidatePlan, SearchInputs, generate_candidates
+from cebu_profiler.planning.maps_build import build_planning_maps
+from cebu_profiler.profiler.coalition import coactivation_map
+from cebu_profiler.profiler.compress import run_compression_pipeline
+from cebu_profiler.profiler.hierarchy import build_hierarchy
+from cebu_profiler.profiler.reap import SaliencyAccumulator, run_calibration
+from cebu_profiler.profiler.runtime import MiniMoE
+from cebu_profiler.schemas.model_asset import AssetType, ModelAsset
+from cebu_profiler.schemas.ontology import DataPartition
 
 # A deliberately generous per-node budget so every generated plan "fits"; the
 # search is over value/coverage/coalition, not a hard memory constraint.
 _NODE_BUDGET_BYTES = 1e12
 _ACTIVE_BYTES_PER_TOKEN = 100.0
 _TOP_K = 2
-_CALIBRATION_SUITE = "atlas_calibration"
-_SCHEMA_VERSION = "atlas-bridge-v1"
+_CALIBRATION_SUITE = "cebu_calibration"
+_SCHEMA_VERSION = "cebu-bridge-v1"
 
 
 def _short_run_id() -> str:
-    return f"atlas-{secrets.token_hex(4)}"
+    return f"cebu-{secrets.token_hex(4)}"
 
 
 def _saliency_rows(saliency: SaliencyAccumulator) -> list[dict[str, Any]]:
@@ -129,9 +129,7 @@ def _planning_maps_payload(
                 "resident_bytes_b": p.resident_bytes_b,
                 "stored_bytes": p.stored_bytes,
                 "coverage": (
-                    round(p.keep.kept_count() / len(p.keep.entries), 4)
-                    if p.keep.entries
-                    else 0.0
+                    round(p.keep.kept_count() / len(p.keep.entries), 4) if p.keep.entries else 0.0
                 ),
                 "precision": [
                     {
@@ -186,11 +184,11 @@ def export_run(
     arch_name: str = "k3-mini",
     seed: int = 0,
     keep_per_layer: int = 4,
-    partition: DataPartition = DataPartition.ATLAS_CALIBRATION,
+    partition: DataPartition = DataPartition.CEBU_CALIBRATION,
     build: bool = False,
     run_id: str | None = None,
 ) -> dict[str, Any]:
-    """Run the atlas pipeline and write the canonical ``atlas_runs/<run_id>/`` dir.
+    """Run the profiler pipeline and write the canonical ``profiler_runs/<run_id>/`` dir.
 
     Returns ``{run_dir, run_manifest, plan_names}``.
     """
@@ -215,7 +213,7 @@ def export_run(
     )
 
     run_id = run_id or _short_run_id()
-    run_dir = Path(out_root) / "atlas_runs" / run_id
+    run_dir = Path(out_root) / "profiler_runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
     started_at = datetime.now(UTC).isoformat()
@@ -236,14 +234,10 @@ def export_run(
 
     # §27 compression artifact: trace -> TENP -> stability -> causal -> Taylor
     # -> SM121 width-bucket planner, over the same calibration corpus.
-    compression, _cv = run_compression_pipeline(
-        model, corpus, n_stability_runs=3
-    )
-    (run_dir / "compression_manifest.json").write_text(
-        compression.model_dump_json(indent=2)
-    )
+    compression, _cv = run_compression_pipeline(model, corpus, n_stability_runs=3)
+    (run_dir / "compression_manifest.json").write_text(compression.model_dump_json(indent=2))
 
-    # §27 hierarchy artifact: the six-level atlas map (v2 §9) built from the
+    # §27 hierarchy artifact: the six-level profiler map (v2 §9) built from the
     # same measured calibration corpus — traceable up (weights→behaviour) and
     # down (behaviour→weights).
     hierarchy = build_hierarchy(model, corpus, top_k=_TOP_K)
@@ -275,17 +269,17 @@ def export_run(
 
     # §25 consolidated planning-maps artifact: the seven granular §25 maps plus
     # per-candidate precision/residency — surfaced natively by the eval-harness
-    # Atlas Lab via the manifest bridge.
+    # Cebu Lab via the manifest bridge.
     (run_dir / "planning_maps.json").write_text(
         json.dumps(_planning_maps_payload(model, saliency, plans), indent=2, sort_keys=True)
     )
     evidence.append("planning_maps.json")
 
     # --- V3 fidelity-first artifacts (analyzers + candidate graph + corpus) ---
-    from model_atlas.analysis import build_corpus_semantic_map
-    from model_atlas.atlas.v3_pipeline import run_v3_pipeline, v3_run_to_jsonable
-    from model_atlas.candidates import CandidateGraph, CandidateNode, CandidateStage
-    from model_atlas.schemas.coverage import EvidenceGate
+    from cebu_profiler.analysis import build_corpus_semantic_map
+    from cebu_profiler.candidates import CandidateGraph, CandidateNode, CandidateStage
+    from cebu_profiler.profiler.v3_pipeline import run_v3_pipeline, v3_run_to_jsonable
+    from cebu_profiler.schemas.coverage import EvidenceGate
 
     v3run = run_v3_pipeline(model, corpus, seed=seed)
     (run_dir / "v3_run.json").write_text(
@@ -334,7 +328,7 @@ def export_run(
 
     manifest: dict[str, Any] = {
         "schema_version": _SCHEMA_VERSION,
-        "atlas_run_id": run_id,
+        "profiler_run_id": run_id,
         "source_arch": arch_name,
         "calibration_suite_id": _CALIBRATION_SUITE,
         "evidence_level": "basic_saliency",

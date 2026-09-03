@@ -1,6 +1,6 @@
-"""Typed schemas for the model-atlas platform."""
+"""Typed schemas for the cebu-profiler platform."""
 
-from model_atlas.schemas.architecture import (
+from cebu_profiler.schemas.architecture import (
     DTYPE_BYTES,
     ArchitectureSpec,
     DType,
@@ -8,21 +8,7 @@ from model_atlas.schemas.architecture import (
     MoELayout,
     TensorRole,
 )
-from model_atlas.schemas.atlas_run import (
-    AtlasRun,
-    AtlasRunProgress,
-    AtlasRunStatus,
-)
-from model_atlas.schemas.atlas_trace import (
-    AtlasTrace,
-    Contribution,
-    Intervention,
-    Representation,
-    RepresentationStorage,
-    RoutedSelection,
-    TracePayload,
-)
-from model_atlas.schemas.coverage import (
+from cebu_profiler.schemas.coverage import (
     CapacityCoverage,
     CoverageReport,
     CoverageStatus,
@@ -30,7 +16,7 @@ from model_atlas.schemas.coverage import (
     EvidenceGate,
     ExplicitOverride,
 )
-from model_atlas.schemas.evidence import (
+from cebu_profiler.schemas.evidence import (
     CausalValidation,
     EvidenceClaim,
     EvidenceGrade,
@@ -41,8 +27,8 @@ from model_atlas.schemas.evidence import (
     Uncertainty,
     is_direct_kind,
 )
-from model_atlas.schemas.model_asset import AssetType, ModelAsset
-from model_atlas.schemas.ontology import (
+from cebu_profiler.schemas.model_asset import AssetType, ModelAsset
+from cebu_profiler.schemas.ontology import (
     CapabilityLabel,
     DataPartition,
     GenerationMode,
@@ -50,6 +36,20 @@ from model_atlas.schemas.ontology import (
     SuccessState,
     TraceFamily,
     TrajectoryStage,
+)
+from cebu_profiler.schemas.profiler_run import (
+    ProfilerRun,
+    ProfilerRunProgress,
+    ProfilerRunStatus,
+)
+from cebu_profiler.schemas.profiler_trace import (
+    Contribution,
+    Intervention,
+    ProfilerTrace,
+    Representation,
+    RepresentationStorage,
+    RoutedSelection,
+    TracePayload,
 )
 
 __all__ = [
@@ -59,10 +59,10 @@ __all__ = [
     "MoELayout",
     "TensorRole",
     "ArchitectureSpec",
-    "AtlasRun",
-    "AtlasRunProgress",
-    "AtlasRunStatus",
-    "AtlasTrace",
+    "ProfilerRun",
+    "ProfilerRunProgress",
+    "ProfilerRunStatus",
+    "ProfilerTrace",
     "Contribution",
     "Intervention",
     "Representation",

@@ -23,8 +23,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from model_atlas.checkpoint.classifier import classify_tensor
-from model_atlas.checkpoint.source_manifest import CheckpointManifest
+from cebu_profiler.checkpoint.classifier import classify_tensor
+from cebu_profiler.checkpoint.source_manifest import CheckpointManifest
 
 GIB = 1024**3
 
@@ -190,7 +190,8 @@ def plan_candidates(
                     backbone_bpw / account.backbone_achieved_bpw
                 )
                 shortest = (
-                    (env_bytes - backbone_after) * account.expert_achieved_bpw
+                    (env_bytes - backbone_after)
+                    * account.expert_achieved_bpw
                     / account.expert_bytes
                 )
                 if infeasible is None:
@@ -228,8 +229,7 @@ def plan_candidates(
             if best is None or (
                 cand.mean_expert_bpw > best.mean_expert_bpw
                 or (
-                    cand.mean_expert_bpw == best.mean_expert_bpw
-                    and cand.keep_frac > best.keep_frac
+                    cand.mean_expert_bpw == best.mean_expert_bpw and cand.keep_frac > best.keep_frac
                 )
             ):
                 best = cand

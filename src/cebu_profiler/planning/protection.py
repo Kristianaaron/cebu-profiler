@@ -9,9 +9,9 @@ than cutting them (blueprint §8.2 preserves important trajectories).
 
 from __future__ import annotations
 
-from model_atlas.atlas.coalition import coactivation_map
-from model_atlas.atlas.reap import CalibrationSample
-from model_atlas.atlas.runtime import MiniMoE
+from cebu_profiler.profiler.coalition import coactivation_map
+from cebu_profiler.profiler.reap import CalibrationSample
+from cebu_profiler.profiler.runtime import MiniMoE
 
 
 def coalition_protected_experts(

@@ -1,4 +1,4 @@
-# AGENTS.md — operating invariants for model-atlas
+# AGENTS.md — operating invariants for cebu-profiler
 
 These are non-negotiable. Read fully before changing code. Model-agnostic by
 construction; Kimi K3 is one registered instance, never the only one.
@@ -37,7 +37,7 @@ construction; Kimi K3 is one registered instance, never the only one.
     produced it.
 13. **Reproducibility.** Every experiment reproduces from config, source
     commit, checkpoint hashes, calibration manifest, and seed.
-14. **Optionality.** Atlas functionality must never break generic evaluation of
+14. **Optionality.** Cebu Profiler functionality must never break generic evaluation of
     other architectures.
 
 ## Phasing
@@ -57,7 +57,7 @@ later milestones against real evidence.
 
 ## Methods
 
-The atlas is compression-method-agnostic. Candidate families (REAP; AQLM
+The profiler is compression-method-agnostic. Candidate families (REAP; AQLM
 low-bit; EXL3/EXO quant; maestro-style orchestration) are scored on the same
 evidence base; none is hard-wired. When a method is evaluated, record the exact
 method, version, config, and its own evidence/error — do not claim one method

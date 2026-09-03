@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from model_atlas.kernels import (
+from cebu_profiler.kernels import (
     KernelBackend,
     KernelBenchmarkReceipt,
     KernelBottleneck,
@@ -30,7 +30,7 @@ from model_atlas.kernels import (
     summarize_catalog,
     write_catalog,
 )
-from model_atlas.schemas.evidence import EvidenceKind
+from cebu_profiler.schemas.evidence import EvidenceKind
 
 
 def _receipt(
@@ -72,7 +72,7 @@ def _receipt(
             tp_world_size=2,
         ),
         backend=KernelBackend(
-            name="atlas-exl3-sm121",
+            name="cebu-exl3-sm121",
             kernel_name="k3_decode_small_m",
             repository="https://github.com/example/runtime",
             commit="0123456789abcdef",
@@ -198,7 +198,7 @@ def test_unseen_model_and_native_non_exl3_representation_need_no_registration() 
                 full_precision_materialized=False,
             ),
             "workload": KernelWorkload(
-                model_id="publisher/model-released-after-atlas",
+                model_id="publisher/model-released-after-cebu",
                 operator="novel_moe.branch_17.projection_z",
                 phase="vision_encode_v2",
                 m=2,
@@ -225,9 +225,7 @@ def test_first_branch_v1_field_names_remain_import_compatible() -> None:
     payload = _receipt().model_dump(mode="json")
     representation = payload["representation"]
     representation["fused_reconstruction"] = representation.pop("fused_transform")
-    representation["full_dequant_materialized"] = representation.pop(
-        "full_precision_materialized"
-    )
+    representation["full_dequant_materialized"] = representation.pop("full_precision_materialized")
     workload = payload["workload"]
     workload["model_family"] = workload.pop("model_id")
     workload["projection"] = workload.pop("operator")

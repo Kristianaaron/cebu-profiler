@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from model_atlas.schemas.evidence import EvidenceKind
+from cebu_profiler.schemas.evidence import EvidenceKind
 
 GIB = 1024**3
 

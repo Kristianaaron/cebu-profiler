@@ -1,6 +1,6 @@
 # Tensor ownership
 
-Ownership is the invariant backbone of the Atlas: **every tensor is accounted
+Ownership is the invariant backbone of the Cebu Profiler: **every tensor is accounted
 for, mapped to exactly one role and one physical location, and its source
 identity is preserved.**
 

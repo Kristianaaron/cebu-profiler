@@ -13,9 +13,9 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 
-from model_atlas.checkpoint.classifier import classify_tensor
-from model_atlas.checkpoint.source_manifest import CheckpointManifest
-from model_atlas.schemas.architecture import TensorRole
+from cebu_profiler.checkpoint.classifier import classify_tensor
+from cebu_profiler.checkpoint.source_manifest import CheckpointManifest
+from cebu_profiler.schemas.architecture import TensorRole
 
 
 @dataclass

@@ -1,8 +1,8 @@
-# ATLAS_GAP_ANALYSIS.md
+# CEBU_GAP_ANALYSIS.md
 
 **Contract:** Parent-to-Derivative Model Foundry v2 (Kimi K3 Semantic, Causal,
-Geometric, Compression, and Deployment Atlas).
-**Scope reviewed:** current `model-atlas` repository (the Atlas subsystem),
+Geometric, Compression, and Deployment Cebu Profiler).
+**Scope reviewed:** current `cebu-profiler` repository (the Cebu Profiler subsystem),
 plus `eval-lab` (the evaluation harness, referenced as the plugin/shared
 substrate). Generated 2026-08-01.
 **Status:** gap analysis only. No code changes beyond the scaffold already
@@ -12,11 +12,11 @@ present. Stopping for review per contract §30.
 
 ## 1. Current architecture (actual state)
 
-`model-atlas` is a brand-new, model-agnostic package. As of this analysis only
+`cebu-profiler` is a brand-new, model-agnostic package. As of this analysis only
 the foundation slice exists — no git repo, no tests, no CLI, no runtime:
 
 ```
-src/model_atlas/
+src/cebu_profiler/
   schemas/architecture.py     # DType, LayerKind, TensorRole, MoELayout, ArchitectureSpec
   schemas/__init__.py
   census/tensor_ownership.py  # TensorOwnership, PhysicalLocation, PlacementPolicy, OwnershipManifest
@@ -41,8 +41,8 @@ CLI, tests, docs beyond the two foundation modules.
 `eval-lab` (separate repo, option-A dependency) already contains: model-asset
 schema/registry, task/suite + label ontology, evaluation service, job
 orchestrator with persistent state machine, leakage guard, comparison engine,
-and a Svelte GUI (M1/M2). It is the evaluation harness the Atlas plugs into;
-it is **not** the Atlas.
+and a Svelte GUI (M1/M2). It is the evaluation harness the Cebu Profiler plugs into;
+it is **not** the Cebu Profiler.
 
 ---
 
@@ -61,7 +61,7 @@ Oversized parent checkpoint
   -> two-DGX-Spark deployment -> regression-driven iteration
 ```
 
-Backed by six linked atlas levels (weights→units→experts→coalitions→pathways→
+Backed by six linked profiler levels (weights→units→experts→coalitions→pathways→
 behaviour), ten required maps, seven trace families, a staging funnel, evidence
 grades + negative controls, an extensible compression-backend interface
 (source MXFP4 / BF16 / FP16 / FP8 / NVFP4 / INT8 / INT4 / EXL3 / AQLM /
@@ -74,13 +74,13 @@ complete GUI.
 ## 3. Implemented / partial / missing matrix
 
 Legend: **IMP** implemented · **PAR** partial · **MISS** missing
-Where a capability exists, its owner is noted (MA = model-atlas, EL = eval-lab).
+Where a capability exists, its owner is noted (Cebu = cebu-profiler, EL = eval-lab).
 
 | Contract capability (§30 list) | Status | Notes |
 |---|---|---|
-| Persistent job orchestration | PAR | EL has a persistent eval-job state machine; **none** in MA for atlas jobs |
-| Structural model / schemas | PAR | MA: ArchitectureSpec + ownership; no full §6 structural graph, vision/quant classes |
-| Routing **beyond frequency** | MISS | No atlas runtime; no routing traces |
+| Persistent job orchestration | PAR | EL has a persistent eval-job state machine; **none** in Cebu for profiler jobs |
+| Structural model / schemas | PAR | Cebu: ArchitectureSpec + ownership; no full §6 structural graph, vision/quant classes |
+| Routing **beyond frequency** | MISS | No profiler runtime; no routing traces |
 | Contribution tracing | MISS | — |
 | Residual tracing | MISS | — |
 | Representation tracing | MISS | — |
@@ -99,8 +99,8 @@ Where a capability exists, its owner is noted (MA = model-atlas, EL = eval-lab).
 | Expert response curves | MISS | §23 |
 | Uncertainty and negative controls | MISS | §20 none |
 | Automated derivative architecture search | MISS | §24 |
-| All required machine-readable outputs | MISS | MA emits only ownership manifest; no `atlas_runs/<id>/` layouts |
-| Complete GUI workflows | PAR | EL has M1/M2 GUI; no Atlas Lab views |
+| All required machine-readable outputs | MISS | Cebu emits only ownership manifest; no `profiler_runs/<id>/` layouts |
+| Complete GUI workflows | PAR | EL has M1/M2 GUI; no Cebu Lab views |
 
 ### Foundational candidate (pre-milestone) — what the current scaffold buys
 
@@ -119,9 +119,9 @@ Where a capability exists, its owner is noted (MA = model-atlas, EL = eval-lab).
 
 ## 4. Data-contract gaps
 
-1. **No AtlasRun / AtlasTrace schemas in MA.** eval-lab `schemas/atlas.py`
-   reserves (`AtlasRunManifest`, `AtlasTraceField`, `ExpertIdentity`,
-   `EvidenceLevel/Kind`) — must be adopted/extended in MA (or shared via the
+1. **No ProfilerRun / ProfilerTrace schemas in Cebu.** eval-lab `schemas/profiler.py`
+   reserves (`ProfilerRunManifest`, `ProfilerTraceField`, `ExpertIdentity`,
+   `EvidenceLevel/Kind`) — must be adopted/extended in Cebu (or shared via the
    bridge) to match v2 §8 trace record (adds `generation_mode`,
    `success_state`, `trace_schema_version`) and §9 six-level hierarchy.
 2. **No trace families.** §11 defines routing/contribution/representation/
@@ -129,31 +129,31 @@ Where a capability exists, its owner is noted (MA = model-atlas, EL = eval-lab).
 3. **No maps.** §10 requires structural, activation, contribution, functional,
    causal, redundancy/substitution, coalition, cross-layer, compression,
    deployment maps. Only an ownership manifest exists.
-4. **No behaviour/trajectory ontology in MA.** Labels + stages exist in eval-lab
+4. **No behaviour/trajectory ontology in Cebu.** Labels + stages exist in eval-lab
    (§8 v1 ontology); v2 adds success states (`success/failure/recovered/
    partially_recovered/unknown`). Needs to be shared via the plugin bridge.
-5. **No data-partition model in MA.** `atlas_calibration / development_evaluation /
+5. **No data-partition model in Cebu.** `cebu_calibration / development_evaluation /
    held_out_evaluation` + leakage detection live in eval-lab; not surfaced here.
 6. **No evidence-grades model.** §20 grades and §31 no-fabrication rules have no
-   typed carrier in MA.
-7. **No machine-readable output contract.** §27 `atlas_runs/<id>/` layout
+   typed carrier in Cebu.
+7. **No machine-readable output contract.** §27 `profiler_runs/<id>/` layout
    (run_manifest, parquet set, evidence_registry, uncertainty_report) absent.
-8. **No model-asset lifecycle in MA.** §5 fields exist in eval-lab; derivative
+8. **No model-asset lifecycle in Cebu.** §5 fields exist in eval-lab; derivative
    asset types (`derivative_checkpoint`, `student_model`) need extension.
 
 ---
 
 ## 5. Runtime gaps
 
-1. **No layerwise checkpoint execution** — the core Atlas runtime. Must stream
+1. **No layerwise checkpoint execution** — the core Cebu Profiler runtime. Must stream
    one layer at a time from an oversized checkpoint without materializing the
    full model (REAP-style loop, skill `reap-compression`).
 2. **No streaming census** against a real oversized checkpoint (safe-tensor
    header reads only; needs shard enumeration + hashing + structural graph).
 3. **No memory-planner** (byte-accurate, per-node go/no-go) — priority gap.
-4. **No job orchestrator scoped to atlas jobs** — MA has none; eval-lab's
+4. **No job orchestrator scoped to profiler jobs** — Cebu has none; eval-lab's
    orchestrator supports safe pause/resume/cancel at chunk/layer boundaries but
-   is wired for eval jobs, not atlas layerwise chunks.
+   is wired for eval jobs, not profiler layerwise chunks.
 5. **No compression backend interface** — no quantization/EXL3/AQLM support,
    no support-status model (conversion vs probe vs inference).
 6. **No tracing I/O** — token-trace index, parquet writers, artifact store,
@@ -201,21 +201,21 @@ Where a capability exists, its owner is noted (MA = model-atlas, EL = eval-lab).
 
 ## 8. GUI gaps
 
-All §28 views are missing in MA: atlas summary, capability/success-failure/
+All §28 views are missing in Cebu: profiler summary, capability/success-failure/
 trajectory/layer/expert/neuron-feature/coalition/path/route-regret/
 compression/quant-compat/response-curve/keep-map/architecture-search/memory /
-regression-to-atlas / evidence explorers.
+regression-to-profiler / evidence explorers.
 
 `eval-lab` provides the dashboard shell (M1/M2) and model-asset + job-monitor
-views. The Atlas Lab is a distinct surface to be added — per v2 §31:22, long
-atlas jobs must not depend on the GUI; heavy analysis never runs in frontend
+views. The Cebu Lab is a distinct surface to be added — per v2 §31:22, long
+profiler jobs must not depend on the GUI; heavy analysis never runs in frontend
 components (§31:23).
 
 ---
 
 ## 9. Testing gaps
 
-1. **No tests yet** in MA (no pytest config, no runner). Foundation modules are
+1. **No tests yet** in Cebu (no pytest config, no runner). Foundation modules are
    untested as written (census logic is untested).
 2. **No synthetic miniature MoE** — the deterministic unit-test substrate
    required for every milestone (real K3 is 1.56 TB and must never be used in
@@ -233,34 +233,34 @@ components (§31:23).
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| Building ranking-only Atlas (violates §31:1, "one saliency score") | **High** | Keep contribution/representation/counterfactual/coalition in scope from milestone 2 onward |
+| Building ranking-only Cebu Profiler (violates §31:1, "one saliency score") | **High** | Keep contribution/representation/counterfactual/coalition in scope from milestone 2 onward |
 | Correlation presented as causation (§31:4) | **High** | Evidence grades + negative controls as typed, gated outputs |
 | Losing source expert identity during renumbering (§31:17,18) | **High** | Ownership already identity-preserving; extend to maps + builder |
 | Real checkpoint resist measurement (census parity) | **Medium** | Model-agnostic spec + synthetic fixtures; verify 100% tensor-key on a real sample before relying |
 | EXL3/AQLM on K3 unsupported (§31:12) | **Medium** | Probe minimum viable experts first; never report skipped tests as passing |
 | Derivative promoted without held-out validation (§31:25) | **Medium** | Held-out + leakage gate mandatory before promotion |
-| Scope bloat ("one huge application") | Medium | Keep eval-lab = harness, model-atlas = Atlas/derivative; plugin bridge one-way |
+| Scope bloat ("one huge application") | Medium | Keep eval-lab = harness, cebu-profiler = Cebu Profiler/derivative; plugin bridge one-way |
 | Two-Spark latency/memory assumptions untested | Medium | Byte-accurate planner + go/no-go before any candidate build |
 
 ---
 
 ## 11. Recommended milestone sequence
 
-Derived from v2 §29, re-scoped to the current near-empty MA repo. Milestones M[1-9]
-are foundation/atlas; M10+ are the derivative/repair/deployment surface.
+Derived from v2 §29, re-scoped to the current near-empty Cebu repo. Milestones M[1-9]
+are foundation/profiler; M10+ are the derivative/repair/deployment surface.
 
 1. **F0 — Finish commit-1 foundation:** memory-planner (go/no-go), architecture
    registry (register K3 lay-out + mini synthetic MoE), CLI (`doctor`,
    `census`, `plan`), pytest config + deterministic tests, tensor-ownership and
    benchmark. *(existing §21 first commit, unfinished)*
-2. **F1 — Data-contract substrate (v2 §10/§8):** AtlasRun/AtlasTrace, trace
+2. **F1 — Data-contract substrate (v2 §10/§8):** ProfilerRun/ProfilerTrace, trace
    families, behaviour/stage/success ontology (share via eval-lab bridge),
-   evidence grades, negative controls, `atlas_runs/<id>/` output contract,
+   evidence grades, negative controls, `profiler_runs/<id>/` output contract,
    model-asset lifecycle extension.
 3. **F2 — Streaming layerwise census + structural graph** (§6): shard
    enumeration, hashing, tensor classification incl. vision/quant metadata,
    structural_model_graph.json. No full model materialization.
-4. **F3 — Streamed REAP routing atlas** (§19 stage A/B, \routing + contribution):
+4. **F3 — Streamed REAP routing profile** (§19 stage A/B, \routing + contribution):
    per-label/per-stage saliency, activation & contribution maps; memory-safe
    layerwise loop.
 5. **F4 — Representation + success/failure/recovery contrasts** (§11–§12);
@@ -278,7 +278,7 @@ are foundation/atlas; M10+ are the derivative/repair/deployment surface.
 12. **F11 — Derivative builder + renumbering + validation** (§26).
 13. **F12 — Repair/distillation runtime** (§26) + held-out evaluation + leakage gate.
 14. **F13 — Two-DGX-Spark serving + elasticity**; latency/memory evidence gates.
-15. **F14 — Complete Atlas Lab GUI** (§28) over stored artifacts (never heavy
+15. **F14 — Complete Cebu Lab GUI** (§28) over stored artifacts (never heavy
     compute in browser).
 
 Early priorities (biggest unblocking, lowest risk):
@@ -288,10 +288,10 @@ Early priorities (biggest unblocking, lowest risk):
 - **F1 contracts** (typed evidence discipline so nothing later is fabricated).
 
 ### Cross-cutting decisions to confirm before building
-- Confirm `model-atlas` is the sole home of the Atlas subsystem (option A) and
+- Confirm `cebu-profiler` is the sole home of the Cebu Profiler subsystem (option A) and
   eval-lab integration is a one-way plugin (labels, suites, eval reporting).
-- Confirm which trace/research meat is in-scope for the first atlas milestone:
-  F3 (routing+contribution) is the honest minimal "basic layerwise Atlas," not
+- Confirm which trace/research meat is in-scope for the first profiler milestone:
+  F3 (routing+contribution) is the honest minimal "basic layerwise Cebu Profiler," not
   just frequency.
 - Memory budget envelopes (190/210/225 GB) and two-Spark assumptions come from
   v2 §3; keep them config, not code.
@@ -304,7 +304,7 @@ Early priorities (biggest unblocking, lowest risk):
 
 Every requirement group in the pasted v2 contract, with current status and
 where it should land. IMP/PAR/MISS = implemented / partial / missing today.
-Owner: MA = `model-atlas`, EL = `eval-lab`. Milestone = recommended F-stage from §11.
+Owner: Cebu = `cebu-profiler`, EL = `eval-lab`. Milestone = recommended F-stage from §11.
 
 | v2 § | Requirement group | Status | Notes / location |
 |---|---|---|---|
@@ -314,13 +314,13 @@ Owner: MA = `model-atlas`, EL = `eval-lab`. Milestone = recommended F-stage from
 | §2 | Core hypothesis + **explicit preservation of negative findings** (distributed functions, frequency≠importance, local-router suboptimality, label→expert mismatch, polysemanticity, similarity≠substitutability, cross-layer dependence, removal hurting coordination, low-bit slower, student beating pruned parent) | MISS | §20 evidence + negative-controls regime must record these; currently nothing |
 | §3.1 | Parent K3: 2.8T/104B, 93 layers, KDA/MLA, 896×top-16, shared, Stable LatentMoE, Attention Residuals, MXFP4 | PAR | facts captured in ArchitectureSpec design, **K3 not yet registered** |
 | §3.2 | Hardware: DGX Spark A/B, GB10, ConnectX-7; reserve-memory list; envelopes 190/210/225 GB | PAR | factored into planned memory planner; envelopes not yet config/dates |
-| §4 | Platform architecture tree (GUI, model-asset, task/suite registry, harness, Atlas Lab, search, builder, repair, serving, orchestrator, artifact store, provenance) | MISS | diagram-level only; no modules beyond census |
-| §4 | **Critical subsystem boundary**: Atlas same product, not the eval runner | PAR | principle documented in MA README/AGENTS; not enforced in code (no runtime) |
-| §5 | Model asset lifecycle types + minimum fields | PAR | EL has model-asset registry; MA needs derivative/student/teacher types + atlas fields |
+| §4 | Platform architecture tree (GUI, model-asset, task/suite registry, harness, Cebu Lab, search, builder, repair, serving, orchestrator, artifact store, provenance) | MISS | diagram-level only; no modules beyond census |
+| §4 | **Critical subsystem boundary**: Cebu Profiler same product, not the eval runner | PAR | principle documented in Cebu README/AGENTS; not enforced in code (no runtime) |
+| §5 | Model asset lifecycle types + minimum fields | PAR | EL has model-asset registry; Cebu needs derivative/student/teacher types + profiler fields |
 | §6 | Checkpoint registration + structural mapping (13-step, metadata-first, no body loads) | MISS | F2; EL does header-only SafeTensors inspection (PAR), no structural graph/hash/shard logic |
 | §6 | Outputs: checkpoint_manifest(.json/.parquet), hashes, tensor_relationships, structural_model_graph, validation report | MISS | F2 |
-| §7 | Data partitions (atlas_calibration / development_eval / held_out_eval) | PAR | EL has leakage guard + `data_partition`; must surface in MA plans |
-| §7 | Leakage detection (dup/reuse/overlap/lineage/near-dup) + block promotion | PAR | EL `leakage.py`; not in MA |
+| §7 | Data partitions (cebu_calibration / development_eval / held_out_eval) | PAR | EL has leakage guard + `data_partition`; must surface in Cebu plans |
+| §7 | Leakage detection (dup/reuse/overlap/lineage/near-dup) + block promotion | PAR | EL `leakage.py`; not in Cebu |
 | §8 | Behaviour ontology (21 labels) + trajectory stages (10) | PAR | EL v1 labels; v2 adds success states |
 | §8 | Trace record fields (task, sample, suite, partition, labels, stage, token_range, mode, success, source ids, layer, expert, run_id, schema_version) | MISS | F1 |
 | §8 | Success states (success/failure/recovered/partially_recovered/unknown) | MISS | F1 |
@@ -347,7 +347,7 @@ Owner: MA = `model-atlas`, EL = `eval-lab`. Milestone = recommended F-stage from
 | §25 | **13 planning artifacts**: keep_map, precision_map, residency_map, channel_map, tile_map, coalition_protection_map, path_preservation_map, substitute_map, node_ownership_map, overflow_pack_map, router_repair_map, residual_repair_map, distillation_target_map | MISS | F10; only keep/precision/residency/substitute currently noted — must add the other nine |
 | §25 | Candidate families at 190/210/225 GB + per-candidate report (bytes by node, active bytes/token, coverage, risks, kernel compat, repair needs, uncertainty) | MISS | F10 |
 | §26 | Derivative construction (17 stages) + repair (router/bias/residual/repr/sparse-feature/expert-adapt/LoRA/PV-tuning/white-box distill) | MISS | F11/F12 |
-| §27 | **Machine-readable outputs**: ~45-file `atlas_runs/<id>/` layout (manifests, parquet set incl. routing_traces, counterfactuals, regret, activation, contribution, sparse_features, vocabulary_projection, layer/label saliency, contrasts, coactivation, transitions, similarity, substitutes, coalitions, multi_component_causal, cross_layer_paths, quantization_probes, expert_response_curves, channel/neuron/tile maps, projection_sensitivity, ablation, negative_controls, evidence_registry, uncertainty_report, resource_telemetry, warnings, summary, reproducibility_command.sh) | MISS | F1 defines contract; produced across F3–F12 |
+| §27 | **Machine-readable outputs**: ~45-file `profiler_runs/<id>/` layout (manifests, parquet set incl. routing_traces, counterfactuals, regret, activation, contribution, sparse_features, vocabulary_projection, layer/label saliency, contrasts, coactivation, transitions, similarity, substitutes, coalitions, multi_component_causal, cross_layer_paths, quantization_probes, expert_response_curves, channel/neuron/tile maps, projection_sensitivity, ablation, negative_controls, evidence_registry, uncertainty_report, resource_telemetry, warnings, summary, reproducibility_command.sh) | MISS | F1 defines contract; produced across F3–F12 |
 | §28 | GUI: 25 views + label glossary (measured/estimated/predicted/correlated/locally causal/downstream causal/held-out/unsupported/not tested) | MISS | F14; EL shell reusable |
 | §29 | 15 milestones | — | mapped to F0–F14 in §11 / §14 |
 | §30 | Gap analysis this report | IMP | this document |
@@ -359,7 +359,7 @@ Owner: MA = `model-atlas`, EL = `eval-lab`. Milestone = recommended F-stage from
 
 | §31 rule | Status | Enforced by |
 |---|---|---|
-| 1. Atlas ≠ one saliency score | MISS | evidence families §10–§11 (none yet) |
+| 1. Cebu Profiler ≠ one saliency score | MISS | evidence families §10–§11 (none yet) |
 | 2. Routing frequency ≠ causal importance | MISS | counterfactual + causal traces |
 | 3. Don't assume router chose best route | MISS | §13 counterfactual/regret |
 | 4. Correlation ≠ causation | PAR(design) | evidence grades §20 must gate all claims |
@@ -377,11 +377,11 @@ Owner: MA = `model-atlas`, EL = `eval-lab`. Milestone = recommended F-stage from
 | 16. Immutable parent checkpoint | PAR(design) | manifest/hash + builder never mutates source (F2/F11) |
 | 17. Don't lose source expert identity | PAR(design) | ownership already preserves; extend to maps/builder |
 | 18. Don't hide router/bias remapping | MISS | F11 renumber/remap must be auditable |
-| 19. Don't mix calibration + held-out | PAR | EL leakage guard; MA must honor |
+| 19. Don't mix calibration + held-out | PAR | EL leakage guard; Cebu must honor |
 | 20. Predictions ≠ measured results | MISS | evidence grades + glossary |
 | 21. No custom kernels before profiling | PAR(design) | AGENTS invariant; funnel stage E before any kernel |
-| 22. Long jobs ≠ depend on GUI | PAR | EL orchestrator pattern; MA atlas jobs must match |
-| 23. No heavy Atlas analysis in frontend | MISS | F14 serves stored artifacts only |
+| 22. Long jobs ≠ depend on GUI | PAR | EL orchestrator pattern; Cebu profiler jobs must match |
+| 23. No heavy Cebu Profiler analysis in frontend | MISS | F14 serves stored artifacts only |
 | 24. Don't report skipped compat tests as passing | MISS | §22/§21 support-status discipline |
 | 25. No promotion without held-out validation | MISS | F12 leakage gate + held-out required |
 | 26. Winner need not be pruned K3 | PAR(design) | student route must stay first-class |
@@ -392,15 +392,15 @@ Owner: MA = `model-atlas`, EL = `eval-lab`. Milestone = recommended F-stage from
 ## 14. Summary of newly confirmed gaps (added in this audit)
 
 1. Derivative-candidate family (§1) + negative-findings preservation (§2) — not yet explicit targets.
-2. Six-level atlas hierarchy (§9) — L1 only (ownership); L2 units, L3 experts, L4 coalitions, L5 pathways, L6 behaviour all absent.
+2. Six-level profiler hierarchy (§9) — L1 only (ownership); L2 units, L3 experts, L4 coalitions, L5 pathways, L6 behaviour all absent.
 3. Representation storage options (§11) — PCA/random-projection/principal-directions/sparse-feature avenues unspecified.
 4. Full planning-artifact set (§25) — nine maps beyond keep/precision/residency/substitute are unlisted: channel, tile, coalition-protection, path-preservation, node-ownership, overflow-pack, router-repair, residual-repair, distillation-target.
-5. Machine-readable output catalogue (§27) — the ~45-file `atlas_runs/<id>/` contract is not yet scoped in MA.
+5. Machine-readable output catalogue (§27) — the ~45-file `profiler_runs/<id>/` contract is not yet scoped in Cebu.
 6. §31 compliance — 27 rules, mostly PAR(design) or MISS; no current code enforces the discipline.
 
 *End of gap analysis. Stopping for review per contract §30.*
 
-## 15. Atlas v3 phase status (2026-08-13)
+## 15. Cebu Profiler v3 phase status (2026-08-13)
 
 The v3 fidelity-first implementation instruction + GLM-5.2 blueprint have been
 implemented against the synthetic MiniMoE. The previously-missing first-class
@@ -414,7 +414,7 @@ analyzers, system modules, and integration surfaces now exist:
 | Per-rank memory/KV ledger | `analysis/kv_memory.py` (`MemoryLedger`, `plan_kv_budget`) |
 | Pareto engine (v3) | `experiments/pareto_v3.py` — nondominated frontier, knee as scored region, neighbor deltas w/ marginal quality/GiB |
 | Corpus-semantic bidirectional | `analysis/corpus_semantic.py` + quality-delta projection |
-| Canonical pipeline | `atlas/v3_pipeline.py` orchestrating all analyzers |
+| Canonical pipeline | `profiler/v3_pipeline.py` orchestrating all analyzers |
 | Dashboard surfaces | Researcher section: V3 Analyzers / Candidate Graph / Corpus Evidence tabs |
 | CLI | `analyze`, `v3-pareto`, `v3-candidates`, `v3-corpus` |
 | Output contract | §27 extended with 9 v3 artifacts; `export_run` emits them |
@@ -425,4 +425,4 @@ path measurement, EXL3 materialization, BF16-parent authoritative rankings, and
 two-Spark runtime profiling. All decision logic is model-agnostic and runs on
 the synthetic MiniMoE today.
 
-*End of gap analysis (updated for Atlas v3).*
+*End of gap analysis (updated for Cebu Profiler v3).*

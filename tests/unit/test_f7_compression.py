@@ -1,13 +1,13 @@
 """F7 tests: compression backends, quantization math, response curves."""
 
-from model_atlas.atlas.runtime import build_mini_moe
-from model_atlas.compression import (
+from cebu_profiler.compression import (
     SupportStatus,
     expert_response_curve,
     get_backend_registry,
 )
-from model_atlas.compression.quant import float_mantissa_quant, rel_l2, uniform_int_quant
-from model_atlas.registry.architectures import get_registry
+from cebu_profiler.compression.quant import float_mantissa_quant, rel_l2, uniform_int_quant
+from cebu_profiler.profiler.runtime import build_mini_moe
+from cebu_profiler.registry.architectures import get_registry
 
 ARCH = get_registry().get("k3-mini")
 

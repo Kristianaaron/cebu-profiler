@@ -16,8 +16,8 @@ import math
 import random
 from dataclasses import dataclass, field
 
-from model_atlas.atlas.collector import ChannelStatsAccumulator
-from model_atlas.schemas.architecture import ArchitectureSpec
+from cebu_profiler.profiler.collector import ChannelStatsAccumulator
+from cebu_profiler.schemas.architecture import ArchitectureSpec
 
 
 # a: [n, m] x b: [m, p] -> [n, p]

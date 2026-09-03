@@ -11,8 +11,8 @@ import os
 
 import pytest
 
-from model_atlas.checkpoint.source_manifest import CheckpointManifest, TensorEntry
-from model_atlas.planning.realbytes import (
+from cebu_profiler.checkpoint.source_manifest import CheckpointManifest, TensorEntry
+from cebu_profiler.planning.realbytes import (
     GIB,
     account_manifest,
     plan_candidates,
@@ -43,8 +43,7 @@ def _synthetic_manifest(expert_gib: float = 80.0, backbone_gib: float = 10.0) ->
     per_expert = expert_bytes // 4
     backbone_bytes = int(backbone_gib * GIB)
     tensors = [
-        _tensor(f"model.layers.0.experts.{e}.gate.weight", per_expert, EXPERT_BPW)
-        for e in range(4)
+        _tensor(f"model.layers.0.experts.{e}.gate.weight", per_expert, EXPERT_BPW) for e in range(4)
     ]
     tensors += [
         _tensor("model.layers.0.self_attn.q_proj.weight", backbone_bytes // 3, 16.0),
@@ -122,7 +121,7 @@ _REAL = "/media/glm52/models/nvidia/GLM-5.2-NVFP4"
 def test_real_glm52_candidates_when_mounted():
     if not os.path.isfile(os.path.join(_REAL, "config.json")):
         pytest.skip("GLM-5.2 NVFP4 not mounted")
-    from model_atlas.checkpoint.source_manifest import load_manifest
+    from cebu_profiler.checkpoint.source_manifest import load_manifest
 
     manifest = load_manifest(_REAL)
     acc = account_manifest(manifest)

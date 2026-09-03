@@ -1,6 +1,6 @@
 """Derivative checkpoint builder and validation."""
 
-from model_atlas.builder.derivative import (
+from cebu_profiler.builder.derivative import (
     DerivativeResult,
     DerivativeValidation,
     RenumberedExpert,

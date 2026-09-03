@@ -1,28 +1,28 @@
-# Milestone E Handoff — Atlas quality-size experiment (blueprint §17/§20)
+# Milestone E Handoff — Cebu Profiler quality-size experiment (blueprint §17/§20)
 
 _Status snapshot 2026-08-07. Created before a temporary loss of connectivity;
 the detached run below completes the mechanical verification + commit offline._
 
 ## What this is
-Blueprint **Milestone E**: a matched-budget experiment proving whether Atlas's
+Blueprint **Milestone E**: a matched-budget experiment proving whether Cebu Profiler's
 measured **heterogeneous** per-expert width allocation beats a **uniform**
 width control at equal retained-channel budget. Fully runnable offline on the
 synthetic MiniMoE (no GLM-5.2 checkpoint needed — that stays gated).
 
 ## New files (this session; committed by the detached run when green)
 ```
-src/model_atlas/experiments/
+src/cebu_profiler/experiments/
   __init__.py      # public exports
   fidelity.py      # FidelityReport: utility, retention, logit KL, topk, hidden drift
   controls.py      # channel_importance, uniform_clone, hetero_clone,
                    #   matched_budget_compare, budget_for, ExperimentOutcome
   pareto.py        # pareto_sweep -> [ParetoPoint]
   structured.py    # build_structured_model (injected importance; down-only scaling)
-src/model_atlas/planning/protection.py  # §8.2 coalition-driven protected experts
+src/cebu_profiler/planning/protection.py  # §8.2 coalition-driven protected experts
 tests/unit/test_f17_experiments.py  # 6 tests
 tests/unit/test_f17_protection.py   # 3 tests
 ```
-They reuse existing infra: `final_utility`/`logit_kl` (atlas/counterfactual.py),
+They reuse existing infra: `final_utility`/`logit_kl` (profiler/counterfactual.py),
 `build_clone` (executor/structural.py), `tenp_rank` (scoring/tenp.py).
 
 ## Key design decisions / gotchas
@@ -48,8 +48,8 @@ frac=0.3  uniform 0.0383  hetero 0.0342   (largest gap)
 Conclusion the experiment supports: **measured heterogeneous allocation wins at
 equal budget, more so at higher compression** — the FlexMoE/blueprint thesis.
 
-## Detached run (tmux session `atlas_build`)
-A detached tmux session runs `run_atlas_build.sh` which (offline-safe):
+## Detached run (tmux session `cebu_build`)
+A detached tmux session runs `run_cebu_build.sh` which (offline-safe):
 1. Runs the new tests (`test_f16` + `test_f17_experiments` + `test_f17_protection`);
    gates the commit on these passing.
 2. Runs full pytest suite + repo-wide ruff + mypy on the new modules.
@@ -60,19 +60,19 @@ A detached tmux session runs `run_atlas_build.sh` which (offline-safe):
      (branch ends up ahead; re-push when back online).
 6. Appends the frontier + pass/fail verdict to this file's "Results" section.
 
-Log: `/home/kristianaaron/tmp/atlas_build.log`
+Log: `/home/kristianaaron/tmp/cebu_build.log`
 
 ## How to resume (when back online)
-1. `tmux attach -t atlas_build`  (or read `atlas_build.log` — runs to completion regardless)
-2. `cd /home/kristianaaron/tmp/model-atlas && git status && git log --oneline -3`
+1. `tmux attach -t cebu_build`  (or read `cebu_build.log` — runs to completion regardless)
+2. `cd /home/kristianaaron/tmp/cebu-profiler && git status && git log --oneline -3`
 3. If push failed while offline: `git push origin main`
 4. Full blueprint feature/gap matrix lands in the log's [6/6] section for the next session.
 
 ## Running the experiment / tests by hand
 ```
-cd /home/kristianaaron/tmp/model-atlas
+cd /home/kristianaaron/tmp/cebu-profiler
 .venv/bin/python -m pytest tests/unit/test_f17_experiments.py -q
-.venv/bin/python -c "from model_atlas.experiments import pareto_sweep; ..."
+.venv/bin/python -c "from cebu_profiler.experiments import pareto_sweep; ..."
 ```
 
 ## Build-out results (auto, detached run Fri Aug  7 07:01:25 PM UTC 2026)
@@ -96,7 +96,7 @@ DONE-EXP
 
 **status:** all new tests PASS; committed & pushed below.
 
-## Results (auto, from completed detached run `atlas_build`)
+## Results (auto, from completed detached run `cebu_build`)
 New tests (f16 + f17 experiments + f17 protection) **PASSED**; full suite + ruff + mypy clean; commit + push succeeded (`10faa6b`).
 
 ### Milestone E frontier — structured synthetic (drift: lower=better; delta=hetero−uniform)
@@ -117,7 +117,7 @@ coalition-protected experts detected: 16 across 2 layers
 
 ### Blueprint feature / gap matrix
 ```
-Atlas v1 modules A-F (§7): DONE
+Cebu Profiler v1 modules A-F (§7): DONE
 SM121 width planner (§14.2): DONE
 Compression manifest + validator (§11): DONE
 Structural executor + §12.2 tests: DONE

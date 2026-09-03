@@ -1,15 +1,15 @@
 """F9 tests: cross-layer pathways + neuron/channel sensitivity (v2 §14, §18)."""
 
-from model_atlas.atlas.pathways import (
+from cebu_profiler.profiler.pathways import (
     capability_paths,
     channel_sensitivity,
     path_stats,
     route_path,
     success_failure_divergence,
 )
-from model_atlas.atlas.reap import make_synthetic_corpus
-from model_atlas.atlas.runtime import build_mini_moe
-from model_atlas.registry.architectures import get_registry
+from cebu_profiler.profiler.reap import make_synthetic_corpus
+from cebu_profiler.profiler.runtime import build_mini_moe
+from cebu_profiler.registry.architectures import get_registry
 
 ARCH = get_registry().get("k3-mini")
 

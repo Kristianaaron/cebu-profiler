@@ -9,13 +9,13 @@ census stays model-agnostic (a dense model simply omits the MoE/MLA/KDA roles).
 
 from __future__ import annotations
 
-from model_atlas.census.tensor_ownership import (
+from cebu_profiler.census.tensor_ownership import (
     OwnershipManifest,
     PhysicalLocation,
     PlacementPolicy,
     TensorOwnership,
 )
-from model_atlas.schemas.architecture import (
+from cebu_profiler.schemas.architecture import (
     ArchitectureSpec,
     DType,
     LayerKind,

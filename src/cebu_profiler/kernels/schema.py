@@ -1,4 +1,4 @@
-"""Versioned runtime-kernel evidence contracts for Atlas.
+"""Versioned runtime-kernel evidence contracts for Cebu Profiler.
 
 The profiler consumes receipts; it does not own CUDA kernel implementation.  A
 receipt is eligible for runtime decisions only when it describes a measured,
@@ -13,7 +13,7 @@ from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from model_atlas.schemas.evidence import EvidenceKind
+from cebu_profiler.schemas.evidence import EvidenceKind
 
 
 class KernelPhase(StrEnum):
@@ -82,9 +82,7 @@ class KernelRepresentation(BaseModel):
         validation_alias=AliasChoices("fused_transform", "fused_reconstruction")
     )
     full_precision_materialized: bool = Field(
-        validation_alias=AliasChoices(
-            "full_precision_materialized", "full_dequant_materialized"
-        )
+        validation_alias=AliasChoices("full_precision_materialized", "full_dequant_materialized")
     )
 
 
@@ -130,7 +128,7 @@ class KernelMetrics(BaseModel):
 class KernelProvenance(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    producer_schema: str = "atlas.kernel-benchmark/v1"
+    producer_schema: str = "cebu.kernel-benchmark/v1"
     source_repository: str
     source_commit: str
     command: list[str] = Field(default_factory=list)
@@ -144,7 +142,7 @@ class KernelBenchmarkReceipt(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["atlas.kernel-benchmark/v1"] = "atlas.kernel-benchmark/v1"
+    schema_version: Literal["cebu.kernel-benchmark/v1"] = "cebu.kernel-benchmark/v1"
     receipt_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$")
     generated_at: datetime
     evidence_kind: EvidenceKind
@@ -171,7 +169,7 @@ class KernelBenchmarkReceipt(BaseModel):
 
 
 class KernelQuery(BaseModel):
-    """The exact kernel requirement emitted by an Atlas candidate."""
+    """The exact kernel requirement emitted by an Cebu Profiler candidate."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -270,8 +268,8 @@ class KernelExecutionManifest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["atlas.kernel-execution-manifest/v1"] = (
-        "atlas.kernel-execution-manifest/v1"
+    schema_version: Literal["cebu.kernel-execution-manifest/v1"] = (
+        "cebu.kernel-execution-manifest/v1"
     )
     candidate_id: str
     generated_at: datetime

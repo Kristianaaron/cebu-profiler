@@ -13,8 +13,8 @@ set and the next allowed width bucket, so the manifest always validates.
 
 from __future__ import annotations
 
-from model_atlas.planning.width_buckets import SM121_WIDTH_BUCKETS
-from model_atlas.schemas.manifest import (
+from cebu_profiler.planning.width_buckets import SM121_WIDTH_BUCKETS
+from cebu_profiler.schemas.manifest import (
     BudgetSpec,
     CompressionManifest,
     ExpertPlan,
@@ -22,7 +22,7 @@ from model_atlas.schemas.manifest import (
     LayerPlan,
     QuantRecommendation,
 )
-from model_atlas.scoring.base import ChannelScore
+from cebu_profiler.scoring.base import ChannelScore
 
 _ROW = ChannelScore
 
@@ -64,7 +64,7 @@ def plan_expert(
         total = sum(comp for _, comp, _ in ranked)
         if not ranked or total <= 0.0:
             # No measured evidence for this expert -> keep it at full width.
-            # Atlas removes capacity only on evidence (AGENTS.md invariant #1),
+            # Cebu Profiler removes capacity only on evidence (AGENTS.md invariant #1),
             # and the manifest must always validate against its own contract.
             chosen = full_width
             keep_ids = list(range(full_width))
@@ -106,11 +106,7 @@ def plan_expert(
             kvalue=_mean([r.kvalue for r in kept if r.kvalue is not None]),
         )
         confidence = _mean([r.confidence for r in kept if r.confidence is not None]) or 1.0
-        reasons = (
-            ["protected_recovery_path"]
-            if any(ch in prot for ch in keep_ids)
-            else []
-        )
+        reasons = ["protected_recovery_path"] if any(ch in prot for ch in keep_ids) else []
         plans[(layer, e)] = ExpertPlan(
             original_width=full_width,
             target_width=chosen,
@@ -134,7 +130,7 @@ def build_manifest(
     coverage_target: float = 0.9,
     protected: dict[tuple[int, int], set[int]] | None = None,
     quant_bpw: dict[tuple[int, int], float] | None = None,
-    atlas_version: str = "0.0.0",
+    profiler_version: str = "0.0.0",
     deployment: str = "2x-dgx-spark-sm121",
 ) -> CompressionManifest:
     """Emit a deterministic CompressionManifest from a measured ScoreTable."""
@@ -158,7 +154,7 @@ def build_manifest(
     return CompressionManifest(
         model=model_name,
         source_checkpoint=source_checkpoint,
-        atlas_version=atlas_version,
+        profiler_version=profiler_version,
         calibration_suite="glm52-compression-v1",
         budget=BudgetSpec(deployment=deployment),
         allowed_widths=[b for b in allowed if b <= full_width],

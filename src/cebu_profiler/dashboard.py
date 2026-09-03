@@ -1,5 +1,5 @@
 # ruff: noqa: E501  (large embedded HTML/JS template lines)
-"""Atlas Lab dashboard (v2 §28): interactive HTML over real measured artifacts.
+"""Cebu Lab dashboard (v2 §28): interactive HTML over real measured artifacts.
 
 Runs the synthetic pipeline end-to-end and renders a self-contained, interactive
 HTML page (no frontend build, no external deps) with honest evidence labels:
@@ -13,31 +13,31 @@ import json
 import os
 from typing import Any
 
-from model_atlas.atlas.hierarchy import build_hierarchy
-from model_atlas.atlas.pathways import path_stats
-from model_atlas.atlas.reap import (
+from cebu_profiler.builder import build_derivative
+from cebu_profiler.compression import expert_response_curve, get_backend_registry
+from cebu_profiler.evaluation import detect_leakage, evaluate_heldout, promote_allowed
+from cebu_profiler.kernels import load_catalog, summarize_catalog
+from cebu_profiler.planning import SearchInputs, generate_candidates
+from cebu_profiler.profiler.hierarchy import build_hierarchy
+from cebu_profiler.profiler.pathways import path_stats
+from cebu_profiler.profiler.reap import (
     CalibrationSample,
     SaliencyAccumulator,
     make_synthetic_corpus,
     run_calibration,
     run_contrast,
 )
-from model_atlas.atlas.runtime import MiniMoE, build_mini_moe, forward
-from model_atlas.builder import build_derivative
-from model_atlas.compression import expert_response_curve, get_backend_registry
-from model_atlas.evaluation import detect_leakage, evaluate_heldout, promote_allowed
-from model_atlas.kernels import load_catalog, summarize_catalog
-from model_atlas.planning import SearchInputs, generate_candidates
-from model_atlas.registry.architectures import get_registry
-from model_atlas.schemas.evidence import EvidenceKind
-from model_atlas.schemas.ontology import CapabilityLabel, SuccessState
+from cebu_profiler.profiler.runtime import MiniMoE, build_mini_moe, forward
+from cebu_profiler.registry.architectures import get_registry
+from cebu_profiler.schemas.evidence import EvidenceKind
+from cebu_profiler.schemas.ontology import CapabilityLabel, SuccessState
 
 SEED = 0
 ARCH = get_registry().get("k3-mini")
 
 
 # Lucide icon inner-SVG (viewBox 0 0 24 24) for each side-nav tab.
-_LUCIDE = "fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\""
+_LUCIDE = 'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'
 _ICONS: dict[str, str] = {
     "summary": '<rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>',
     "capability": '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
@@ -68,7 +68,9 @@ def _capability_rows(model: MiniMoE, saliency: SaliencyAccumulator) -> list[dict
         rows.append(
             {
                 "label": label.value,
-                "top": [{"layer": lay, "expert": e, "score": round(s / mx, 3)} for lay, e, s in ranked],
+                "top": [
+                    {"layer": lay, "expert": e, "score": round(s / mx, 3)} for lay, e, s in ranked
+                ],
             }
         )
     return rows
@@ -92,9 +94,7 @@ def _capability_voxels(model: MiniMoE, saliency: SaliencyAccumulator) -> dict[st
             continue
         mx = max(s for _, _, s in ranked)
         for lay, e, s in ranked:
-            voxels.append(
-                {"label": li, "layer": lay, "expert": e, "score": round(s / mx, 3)}
-            )
+            voxels.append({"label": li, "layer": lay, "expert": e, "score": round(s / mx, 3)})
     return {"labels": labels, "n_layers": n_layers, "n_experts": n_exp, "voxels": voxels}
 
 
@@ -155,32 +155,37 @@ def _real_bytes_payload() -> dict[str, Any]:
     so the section always renders. Retention fractions are estimates (a routing
     census needs inference); the byte math is measured.
     """
-    from model_atlas.planning.realbytes import GIB, account_manifest, plan_candidates
+    from cebu_profiler.planning.realbytes import GIB, account_manifest, plan_candidates
 
     _REAL = "/media/glm52/models/nvidia/GLM-5.2-NVFP4"
     out: dict[str, Any] = {"source": None, "measured_gib": 0.0, "candidates": []}
     try:
         if os.path.isfile(os.path.join(_REAL, "config.json")):
-            from model_atlas.checkpoint.source_manifest import load_manifest
+            from cebu_profiler.checkpoint.source_manifest import load_manifest
 
             acc = account_manifest(load_manifest(_REAL))
             out["source"] = _REAL
         else:  # synthetic caret so the section still renders offline
-            from model_atlas.checkpoint.source_manifest import CheckpointManifest
+            from cebu_profiler.checkpoint.source_manifest import CheckpointManifest
 
             def _tensor(name: str, size_gib: float, bpw: float) -> Any:
-                from model_atlas.checkpoint.source_manifest import TensorEntry
+                from cebu_profiler.checkpoint.source_manifest import TensorEntry
 
                 size = int(size_gib * GIB)
                 numel = int(size * 8 / bpw)
                 return TensorEntry(
-                    name=name, dtype="bf16", shape=[numel], numel=numel,
-                    byte_size=size, shard="s", offset_start=0, offset_end=size,
+                    name=name,
+                    dtype="bf16",
+                    shape=[numel],
+                    numel=numel,
+                    byte_size=size,
+                    shard="s",
+                    offset_start=0,
+                    offset_end=size,
                 )
 
             tensors = [
-                _tensor(f"model.layers.0.experts.{e}.gate.weight", 20.0 / 4, 8.19)
-                for e in range(4)
+                _tensor(f"model.layers.0.experts.{e}.gate.weight", 20.0 / 4, 8.19) for e in range(4)
             ]
             tensors += [
                 _tensor("model.layers.0.self_attn.q_proj.weight", 3.33, 16.0),
@@ -227,7 +232,7 @@ def build_dashboard_data(
     contrast = run_contrast(model, corpus, top_k=2)
 
     # coalitions (coactivation) for one layer
-    from model_atlas.atlas.coalition import coactivation_map
+    from cebu_profiler.profiler.coalition import coactivation_map
 
     cmap = coactivation_map(model, corpus, layer=0, top_k=2)
     coalitions: list[dict[str, Any]] = [
@@ -238,7 +243,7 @@ def build_dashboard_data(
         # how often each expert appears in ANY route across the corpus (solo presence)
         from collections import Counter
 
-        from model_atlas.atlas.coalition import pairwise_causal
+        from cebu_profiler.profiler.coalition import pairwise_causal
 
         active = Counter[int]()
         for s in corpus:
@@ -358,7 +363,7 @@ def build_dashboard_data(
         ]
 
     # §25 planning-artifact maps (measured/estimated, see maps_build)
-    from model_atlas.planning.maps_build import (
+    from cebu_profiler.planning.maps_build import (
         build_planning_maps,
         build_real_planning_maps,
     )
@@ -391,9 +396,9 @@ def build_dashboard_data(
         "example": {},
     }
     # a concrete trace-down example: contributors to the first behaviour
-    from model_atlas.atlas.hierarchy import AtlasLevel
+    from cebu_profiler.profiler.hierarchy import ProfilerLevel
 
-    behs = hm.nodes_at(AtlasLevel.BEHAVIOUR)
+    behs = hm.nodes_at(ProfilerLevel.BEHAVIOUR)
     if behs:
         proj = hm.project_down(behs[0].key)
         hierarchy_payload["example"] = {
@@ -411,7 +416,7 @@ def build_dashboard_data(
 
     ecosystem_payload = {
         "eval_host": 8100,
-        "note": "Eval Harness = standalone benchmarking app, Atlas = profiling/fit platform",
+        "note": "Eval Harness = standalone benchmarking app, Cebu Profiler = profiling/fit platform",
     }
     kernel_evidence_payload = summarize_catalog(load_catalog(kernel_receipts or []))
 
@@ -438,14 +443,17 @@ def build_dashboard_data(
         "ecosystem": ecosystem_payload,
         "kernel_evidence": kernel_evidence_payload,
         "pareto": '<path d="M3 3v18h18"/><path d="M3 17 9 11 13 15 21 7"/>',
-    "v3": _v3_pipeline_payload(model, corpus, seed),
+        "v3": _v3_pipeline_payload(model, corpus, seed),
         "candidates_graph": _candidate_graph_payload(model, corpus, seed),
         "corpus": _corpus_payload(model, corpus, seed),
     }
 
-def _candidate_graph_payload(model: MiniMoE, corpus: list[CalibrationSample], seed: int) -> dict[str, Any]:
+
+def _candidate_graph_payload(
+    model: MiniMoE, corpus: list[CalibrationSample], seed: int
+) -> dict[str, Any]:
     """Demonstration candidate graph with predicted-vs-measured discipline."""
-    from model_atlas.candidates import (
+    from cebu_profiler.candidates import (
         CandidateGraph,
         CandidateMetricSet,
         CandidateNode,
@@ -461,7 +469,9 @@ def _candidate_graph_payload(model: MiniMoE, corpus: list[CalibrationSample], se
             stage=CandidateStage.P0_REFERENCE,
             predicted=False,
             deployed=True,
-            quality_vector=CandidateMetricSet(quality_retention=1.0, evidence_kind=EvidenceKind.MEASURED),
+            quality_vector=CandidateMetricSet(
+                quality_retention=1.0, evidence_kind=EvidenceKind.MEASURED
+            ),
         )
     )
     g.add(
@@ -472,7 +482,9 @@ def _candidate_graph_payload(model: MiniMoE, corpus: list[CalibrationSample], se
             stage=CandidateStage.P4_EXL3,
             predicted=True,
             operators=[OperatorKind.GLOBAL_BIT_BUDGET, OperatorKind.EXL3_EXPRESS],
-            quality_vector=CandidateMetricSet(quality_retention=0.98, evidence_kind=EvidenceKind.PREDICTED),
+            quality_vector=CandidateMetricSet(
+                quality_retention=0.98, evidence_kind=EvidenceKind.PREDICTED
+            ),
         )
     )
     g.add(
@@ -483,23 +495,29 @@ def _candidate_graph_payload(model: MiniMoE, corpus: list[CalibrationSample], se
             stage=CandidateStage.P6_SM121_ALLOCATION,
             predicted=True,
             operators=[OperatorKind.NVFP4_SUITABILITY],
-            quality_vector=CandidateMetricSet(quality_retention=0.95, evidence_kind=EvidenceKind.PREDICTED),
+            quality_vector=CandidateMetricSet(
+                quality_retention=0.95, evidence_kind=EvidenceKind.PREDICTED
+            ),
         )
     )
     return g.model_dump(mode="json")
 
+
 def _corpus_payload(model: MiniMoE, corpus: list[CalibrationSample], seed: int) -> dict[str, Any]:
-    from model_atlas.analysis import build_corpus_semantic_map, project_corpus_delta
-    from model_atlas.schemas.coverage import EvidenceGate
+    from cebu_profiler.analysis import build_corpus_semantic_map, project_corpus_delta
+    from cebu_profiler.schemas.coverage import EvidenceGate
 
     report = build_corpus_semantic_map(model, corpus, top_k=2, gate=EvidenceGate())
     project_corpus_delta(report, candidate_id="mk-exl3", per_sample_delta={0: -0.05, 1: -0.03})
     return report.model_dump(mode="json")
 
-def _v3_pipeline_payload(model: MiniMoE, corpus: list[CalibrationSample], seed: int) -> dict[str, Any]:
+
+def _v3_pipeline_payload(
+    model: MiniMoE, corpus: list[CalibrationSample], seed: int
+) -> dict[str, Any]:
     """Run the canonical v3 pipeline and emit a JSON-safe payload for the
     V3 dashboard surface. Predictions are never styled as measured."""
-    from model_atlas.atlas.v3_pipeline import run_v3_pipeline, v3_run_to_jsonable
+    from cebu_profiler.profiler.v3_pipeline import run_v3_pipeline, v3_run_to_jsonable
 
     run = run_v3_pipeline(model, corpus, seed=seed)
     return v3_run_to_jsonable(run)
@@ -887,7 +905,6 @@ _CONTRAST_JS = r"""
 _TAB_TEMPLATE = """<div class="tab" data-tab="{id}"><svg viewBox="0 0 24 24" width="15" height="15" {_LUCIDE} style="flex:0 0 auto">{icon}</svg><span>{title}</span></div>"""
 
 
-
 def render_dashboard(data: dict[str, Any]) -> str:
     """Return a self-contained interactive HTML page embedding measured data."""
     payload = json.dumps(data).replace("</", "<\\/")
@@ -946,7 +963,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
-<title>Atlas Lab — model-atlas</title>
+<title>Cebu Lab — cebu-profiler</title>
 <style>
  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
  body{{font-family:'Inter',ui-sans-serif,system-ui,sans-serif;margin:0;background:#121212;color:#dcdcdc}}
@@ -1141,7 +1158,7 @@ def render_dashboard(data: dict[str, Any]) -> str:
 <div class="col">
 <main class="main">
  <div class="panel" id="panel-summary">
-   <p>End-to-end parent→derivative Atlas over a genuine synthetic mini-MoE. Everything below is computed by the same measured code paths as the test suite. This is the <strong>Atlas Profile Platform</strong>: use <em>Profiling</em> to understand the model, <em>Quantization &amp; Fit</em> to shrink/score it, and the <strong>Eval Harness</strong> link (bottom of the nav) for independent benchmarking.</p>
+   <p>End-to-end parent→derivative Cebu Profiler over a genuine synthetic mini-MoE. Everything below is computed by the same measured code paths as the test suite. This is the <strong>Cebu Profile Platform</strong>: use <em>Profiling</em> to understand the model, <em>Quantization &amp; Fit</em> to shrink/score it, and the <strong>Eval Harness</strong> link (bottom of the nav) for independent benchmarking.</p>
  </div>
  <div class="panel" id="panel-capability">
    <p class="note">Experts × layers saliency map: one dithered cube per scored <code>(layer, expert)</code> cell, capability labels run along the depth axis; brightness = measured saliency (per-label normalised).</p>
@@ -1579,8 +1596,8 @@ def render_dashboard(data: dict[str, Any]) -> str:
    var panels = [];
    DATA.contrast.forEach(function(r){{
      var div = document.createElement('div'); div.className = 'c-panel closed';
-     div.innerHTML = "<div class='c-head'><span class='c-caret'>\u25B6</span><span class='c-cap'></span></div><div class='c-body'></div>";
-     div.querySelector('.c-cap').textContent = r.label + '   \u00B7   ' + r.top.length + ' cells';
+     div.innerHTML = "<div class='c-head'><span class='c-caret'>\u25b6</span><span class='c-cap'></span></div><div class='c-body'></div>";
+     div.querySelector('.c-cap').textContent = r.label + '   \u00b7   ' + r.top.length + ' cells';
      div.querySelector('.c-head').addEventListener('click', function(){{
        var opened = div.classList.toggle('open');
        if (opened && !div.querySelector('.c-body').dataset.rendered) renderContrastBody(div, contrRows(r), CONTR_ROW_BATCH);

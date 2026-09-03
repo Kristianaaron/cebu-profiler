@@ -5,7 +5,7 @@ full K3 counts must come from the real checkpoint, not from here.
 
 from __future__ import annotations
 
-from model_atlas.schemas.architecture import (
+from cebu_profiler.schemas.architecture import (
     ArchitectureSpec,
     DType,
     LayerKind,

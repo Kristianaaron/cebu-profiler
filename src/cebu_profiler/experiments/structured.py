@@ -10,9 +10,9 @@ measured TENP scorer has real signal to act on.
 
 from __future__ import annotations
 
-from model_atlas.atlas.runtime import MiniMoE, build_mini_moe
-from model_atlas.registry.architectures import get_registry
-from model_atlas.schemas.architecture import ArchitectureSpec
+from cebu_profiler.profiler.runtime import MiniMoE, build_mini_moe
+from cebu_profiler.registry.architectures import get_registry
+from cebu_profiler.schemas.architecture import ArchitectureSpec
 
 
 def build_structured_model(

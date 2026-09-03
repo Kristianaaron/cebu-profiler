@@ -1,6 +1,6 @@
 """SM121 hardware-friendly width vocabulary (blueprint §14.2).
 
-Atlas should only emit expert widths from this supported set; it can change
+Cebu Profiler should only emit expert widths from this supported set; it can change
 after CUTLASS/SM121 profiling, but never silently.
 """
 

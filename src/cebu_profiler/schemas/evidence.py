@@ -17,8 +17,8 @@ class EvidenceLevel(StrEnum):
     """Analysis depth (v2): Basic = correlation, not causation."""
 
     BASIC_SALIENCY = "basic_saliency"
-    ENHANCED_ATLAS = "enhanced_atlas"
-    CAUSAL_ATLAS = "causal_atlas"
+    ENHANCED_PROFILER = "enhanced_profiler"
+    CAUSAL_PROFILER = "causal_profiler"
 
 
 class EvidenceKind(StrEnum):

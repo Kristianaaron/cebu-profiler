@@ -1,12 +1,12 @@
-"""Atlas export executor tests: canonical `atlas_runs/<id>/` run dir (§1/§3)."""
+"""Cebu Profiler export executor tests: canonical `profiler_runs/<id>/` run dir (§1/§3)."""
 
 import json
 from pathlib import Path
 
 import pytest
 
-from model_atlas.atlas.export import export_run
-from model_atlas.atlas.output_layout import ATLAS_RUN_FILES
+from cebu_profiler.profiler.export import export_run
+from cebu_profiler.profiler.output_layout import CEBU_RUN_FILES
 
 
 def _write_fixture_corpus(root: Path) -> None:
@@ -47,7 +47,7 @@ def test_export_writes_parseable_run_files(tmp_path):
     n_extra = len(list(run_dir.iterdir())) - len(fnames)
     # every extra file must be declared in the §27 output contract
     for p in run_dir.iterdir():
-        assert p.name in ATLAS_RUN_FILES or p.name in fnames, p.name
+        assert p.name in CEBU_RUN_FILES or p.name in fnames, p.name
     assert n_extra >= 0
 
 
@@ -60,8 +60,13 @@ def test_export_writes_planning_maps_artifact(tmp_path):
     pm = _read_json(run_dir / "planning_maps.json")
     assert pm["source_arch"] == "k3-mini"
     for name in (
-        "channel", "tile", "node_ownership", "overflow_pack",
-        "router_repair", "residual_repair", "distillation_target",
+        "channel",
+        "tile",
+        "node_ownership",
+        "overflow_pack",
+        "router_repair",
+        "residual_repair",
+        "distillation_target",
     ):
         assert pm["maps"][name], f"empty maps.{name}"
     assert pm["candidates"]

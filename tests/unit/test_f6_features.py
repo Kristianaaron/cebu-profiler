@@ -1,6 +1,6 @@
 """F6 tests: sparse features + vocabulary projections (v2 §15–§16)."""
 
-from model_atlas.atlas.features import (
+from cebu_profiler.profiler.features import (
     directional_projection,
     expert_direction,
     learn_features,
@@ -8,9 +8,9 @@ from model_atlas.atlas.features import (
     promoted_suppressed,
     residual_direction,
 )
-from model_atlas.atlas.reap import make_synthetic_corpus
-from model_atlas.atlas.runtime import build_mini_moe
-from model_atlas.registry.architectures import get_registry
+from cebu_profiler.profiler.reap import make_synthetic_corpus
+from cebu_profiler.profiler.runtime import build_mini_moe
+from cebu_profiler.registry.architectures import get_registry
 
 ARCH = get_registry().get("k3-mini")
 

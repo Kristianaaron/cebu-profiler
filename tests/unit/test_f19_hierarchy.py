@@ -1,4 +1,4 @@
-"""F19 tests: six-level atlas hierarchy (v2 §9) — up/down traceability.
+"""F19 tests: six-level profiler hierarchy (v2 §9) — up/down traceability.
 
 Checks that build_hierarchy produces all six levels, links them in adjacency
 order, is traceable up (weight/unit/expert -> behaviours) and down
@@ -9,16 +9,16 @@ machine-readable form.
 
 import json
 
-from model_atlas.atlas.hierarchy import (
+from cebu_profiler.profiler.hierarchy import (
     LEVEL_ORDER,
-    AtlasLevel,
+    ProfilerLevel,
     build_hierarchy,
     next_down,
     next_up,
 )
-from model_atlas.atlas.reap import make_synthetic_corpus
-from model_atlas.atlas.runtime import build_mini_moe
-from model_atlas.registry.architectures import get_registry
+from cebu_profiler.profiler.reap import make_synthetic_corpus
+from cebu_profiler.profiler.runtime import build_mini_moe
+from cebu_profiler.registry.architectures import get_registry
 
 ARCH = get_registry().get("k3-mini")
 
@@ -43,31 +43,31 @@ def test_all_six_levels_populated_and_ordered():
 
 
 def test_level_adjacency_helpers():
-    assert next_up(AtlasLevel.WEIGHTS) is AtlasLevel.UNITS
-    assert next_up(AtlasLevel.PATHWAYS) is AtlasLevel.BEHAVIOUR
-    assert next_up(AtlasLevel.BEHAVIOUR) is None
-    assert next_down(AtlasLevel.BEHAVIOUR) is AtlasLevel.PATHWAYS
-    assert next_down(AtlasLevel.WEIGHTS) is None
+    assert next_up(ProfilerLevel.WEIGHTS) is ProfilerLevel.UNITS
+    assert next_up(ProfilerLevel.PATHWAYS) is ProfilerLevel.BEHAVIOUR
+    assert next_up(ProfilerLevel.BEHAVIOUR) is None
+    assert next_down(ProfilerLevel.BEHAVIOUR) is ProfilerLevel.PATHWAYS
+    assert next_down(ProfilerLevel.WEIGHTS) is None
 
 
 def test_up_traceability_weight_to_behaviour():
     hm = _hierarchy()
     # every ROUTED expert (one that appears in a coalition) is linked up to a
     # behaviour; never-routed experts legitimately carry no measured link.
-    routed = [e for e in hm.nodes_at(AtlasLevel.EXPERTS) if e.parents]
+    routed = [e for e in hm.nodes_at(ProfilerLevel.EXPERTS) if e.parents]
     assert routed, "expected at least one routed expert"
     for exp in routed:
         behavs = hm.behaviours_of(exp.key)
         assert behavs, f"routed expert {exp.key} not linked to any behaviour"
         # ancestors walk up through coalitions/pathways before behaviour
         levels = {n.level for n in hm.ancestors(exp.key)}
-        assert AtlasLevel.COALITIONS in levels
-        assert AtlasLevel.BEHAVIOUR in levels
+        assert ProfilerLevel.COALITIONS in levels
+        assert ProfilerLevel.BEHAVIOUR in levels
 
 
 def test_down_traceability_behaviour_to_weights():
     hm = _hierarchy()
-    beh = hm.nodes_at(AtlasLevel.BEHAVIOUR)[0]
+    beh = hm.nodes_at(ProfilerLevel.BEHAVIOUR)[0]
     proj = hm.project_down(beh.key)
     # a behaviour decomposes all the way down to weights
     assert "experts" in proj and proj["experts"]
@@ -82,10 +82,10 @@ def test_shared_components_are_load_bearing():
     hm = _hierarchy()
     # units under a ROUTED expert are each linked up (share/load-bearing is
     # expressed by prevalence, not by a hard routing frequency threshold)
-    routed = [e for e in hm.nodes_at(AtlasLevel.EXPERTS) if e.parents]
+    routed = [e for e in hm.nodes_at(ProfilerLevel.EXPERTS) if e.parents]
     for exp in routed:
         for unit in hm.descendants(exp.key):
-            if unit.level is AtlasLevel.UNITS:
+            if unit.level is ProfilerLevel.UNITS:
                 assert hm.behaviours_of(unit.key), "unlinked unit"
                 break
 

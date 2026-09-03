@@ -1,12 +1,12 @@
 """Two-node serving runtime + elastic overflow."""
 
-from model_atlas.serving.elastic import (
+from cebu_profiler.serving.elastic import (
     ElasticPolicy,
     MissResult,
     build_resident_policy,
     simulate_overflow,
 )
-from model_atlas.serving.runtime import (
+from cebu_profiler.serving.runtime import (
     DistributedRun,
     FitResult,
     NodeAssignment,

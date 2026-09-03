@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from model_atlas.atlas.runtime import MiniMoE, forward
-from model_atlas.schemas.architecture import DTYPE_BYTES, TensorRole
+from cebu_profiler.profiler.runtime import MiniMoE, forward
+from cebu_profiler.schemas.architecture import DTYPE_BYTES, TensorRole
 
 BYTES_PER_ACTIVATION = 2.0  # BF16-style activation bytes for the estimate
 

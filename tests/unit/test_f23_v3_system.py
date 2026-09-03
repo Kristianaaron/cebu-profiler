@@ -3,15 +3,15 @@ v3 pipeline orchestrator, and output-contract additions."""
 
 import json
 
-from model_atlas.analysis import build_corpus_semantic_map, project_corpus_delta
-from model_atlas.atlas.output_layout import ATLAS_RUN_FILES, expected_run_files
-from model_atlas.atlas.reap import make_synthetic_corpus
-from model_atlas.atlas.runtime import build_mini_moe
-from model_atlas.atlas.v3_pipeline import run_v3_pipeline, v3_run_to_jsonable
-from model_atlas.experiments.pareto_v3 import FrontierPoint, restrict_frontier
-from model_atlas.registry.architectures import get_registry
-from model_atlas.schemas.coverage import EvidenceGate
-from model_atlas.schemas.evidence import EvidenceLevel
+from cebu_profiler.analysis import build_corpus_semantic_map, project_corpus_delta
+from cebu_profiler.experiments.pareto_v3 import FrontierPoint, restrict_frontier
+from cebu_profiler.profiler.output_layout import CEBU_RUN_FILES, expected_run_files
+from cebu_profiler.profiler.reap import make_synthetic_corpus
+from cebu_profiler.profiler.runtime import build_mini_moe
+from cebu_profiler.profiler.v3_pipeline import run_v3_pipeline, v3_run_to_jsonable
+from cebu_profiler.registry.architectures import get_registry
+from cebu_profiler.schemas.coverage import EvidenceGate
+from cebu_profiler.schemas.evidence import EvidenceLevel
 
 ARCH = get_registry().get("k3-mini")
 
@@ -122,7 +122,7 @@ def test_output_contract_declares_v3_artifacts() -> None:
         "kv_ledger.json",
         "pareto_frontier.json",
     }
-    assert v3_files <= ATLAS_RUN_FILES
-    enhanced = expected_run_files(EvidenceLevel.ENHANCED_ATLAS)
+    assert v3_files <= CEBU_RUN_FILES
+    enhanced = expected_run_files(EvidenceLevel.ENHANCED_PROFILER)
     assert "v3_run.json" in enhanced
     assert "kv_ledger.json" in enhanced

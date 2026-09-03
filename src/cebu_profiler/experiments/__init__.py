@@ -1,6 +1,6 @@
-"""Blueprint §17 / Milestone E: quality-size experiments (Atlas adds value?).
+"""Blueprint §17 / Milestone E: quality-size experiments (Cebu Profiler adds value?).
 
-Matched-budget comparison of Atlas heterogeneous per-expert width allocation
+Matched-budget comparison of Cebu Profiler heterogeneous per-expert width allocation
 against a uniform-width control, measured by held-out utility retention and
 logit fidelity (blueprint §18.1). Submodules:
 
@@ -13,7 +13,7 @@ logit fidelity (blueprint §18.1). Submodules:
 
 from __future__ import annotations
 
-from model_atlas.experiments.controls import (
+from cebu_profiler.experiments.controls import (
     ExperimentOutcome,
     channel_importance,
     compare_controls,
@@ -22,9 +22,9 @@ from model_atlas.experiments.controls import (
     matched_budget_compare,
     uniform_clone,
 )
-from model_atlas.experiments.fidelity import FidelityReport, measure_fidelity
-from model_atlas.experiments.pareto import ParetoPoint, pareto_sweep
-from model_atlas.experiments.structured import build_structured_model
+from cebu_profiler.experiments.fidelity import FidelityReport, measure_fidelity
+from cebu_profiler.experiments.pareto import ParetoPoint, pareto_sweep
+from cebu_profiler.experiments.structured import build_structured_model
 
 __all__ = [
     "ExperimentOutcome",

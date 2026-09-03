@@ -12,27 +12,27 @@ against the same contracts (the adapter supplies the geometry).
 
 from __future__ import annotations
 
-from model_atlas.atlas.collector import ChannelStatsAccumulator
-from model_atlas.atlas.reap import CalibrationSample
-from model_atlas.atlas.runtime import MiniMoE, forward
-from model_atlas.planning.width_buckets import SM121_WIDTH_BUCKETS
-from model_atlas.planning.widths import build_manifest
-from model_atlas.schemas.manifest import (
+from cebu_profiler.planning.width_buckets import SM121_WIDTH_BUCKETS
+from cebu_profiler.planning.widths import build_manifest
+from cebu_profiler.profiler.collector import ChannelStatsAccumulator
+from cebu_profiler.profiler.reap import CalibrationSample
+from cebu_profiler.profiler.runtime import MiniMoE, forward
+from cebu_profiler.schemas.manifest import (
     CompressionManifest,
     ManifestValidation,
     validate_manifest,
 )
-from model_atlas.scoring.base import ChannelScore
-from model_atlas.scoring.causal import causal_scores
-from model_atlas.scoring.quant_sensitivity import (
+from cebu_profiler.scoring.base import ChannelScore
+from cebu_profiler.scoring.causal import causal_scores
+from cebu_profiler.scoring.quant_sensitivity import (
     expert_quant_sensitivity,
     recommend_bpw,
 )
-from model_atlas.scoring.redundancy import channel_kvalue, channel_uniqueness
-from model_atlas.scoring.semantic import expert_semantic_score
-from model_atlas.scoring.stability import StabilityAggregator
-from model_atlas.scoring.taylor_grouped import score_grouped_surrogate
-from model_atlas.scoring.tenp import tenp_rank
+from cebu_profiler.scoring.redundancy import channel_kvalue, channel_uniqueness
+from cebu_profiler.scoring.semantic import expert_semantic_score
+from cebu_profiler.scoring.stability import StabilityAggregator
+from cebu_profiler.scoring.taylor_grouped import score_grouped_surrogate
+from cebu_profiler.scoring.tenp import tenp_rank
 
 _COVERAGE_TARGET = 0.9
 
@@ -64,9 +64,7 @@ def run_compression_pipeline(
     protected: dict[tuple[int, int], set[int]] | None = None,
 ) -> tuple[CompressionManifest, ManifestValidation]:
     """Trace -> score -> plan -> manifest over the synthetic MiniMoE."""
-    buckets = [b for b in (allowed_widths or SM121_WIDTH_BUCKETS) if b <= model.mid] or [
-        model.mid
-    ]
+    buckets = [b for b in (allowed_widths or SM121_WIDTH_BUCKETS) if b <= model.mid] or [model.mid]
 
     # stability: independent per-split runs of channel importance
     splits = _split_corpora(samples, n_stability_runs)
@@ -88,9 +86,7 @@ def run_compression_pipeline(
 
     # §8.1 semantic, §8.3 uniqueness / KEEP_VALUE, §8.4 quant-sensitivity views
     uniqueness_map = channel_uniqueness(model)
-    st_vals = {
-        key: st.stability for key, st in stability_rows.items() if st.stability is not None
-    }
+    st_vals = {key: st.stability for key, st in stability_rows.items() if st.stability is not None}
     kvalue_map = channel_kvalue(mean_tenp, uniqueness_map, causal, st_vals)
     sem_map = expert_semantic_score(model, samples)
     quant_bpw = recommend_bpw(expert_quant_sensitivity(model))
@@ -129,7 +125,7 @@ def run_compression_pipeline(
         coverage_target=coverage_target,
         protected=protected,
         quant_bpw=quant_bpw,
-        atlas_version="0.1.0",
+        profiler_version="0.1.0",
     )
     validation = validate_manifest(manifest)
     return manifest, validation

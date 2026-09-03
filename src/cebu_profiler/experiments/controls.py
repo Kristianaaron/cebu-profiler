@@ -1,4 +1,4 @@
-"""Matched-budget controls: Atlas heterogeneous vs uniform width (blueprint §17, Milestone E).
+"""Matched-budget controls: Cebu heterogeneous vs uniform width (blueprint §17, Milestone E).
 
 At an equal total retained-channel budget ``B`` over all (layer, expert) slots:
 
@@ -9,7 +9,7 @@ At an equal total retained-channel budget ``B`` over all (layer, expert) slots:
   (automatically a nested per-expert prefix, FlexMoE-style), so more-important
   experts keep more width.
 
-Importance comes from the real Atlas TENP scorer (forward-activation x projected
+Importance comes from the real Cebu Profiler TENP scorer (forward-activation x projected
 output-norm), so the heterogeneous arm is anchored in the measured pipeline
 rather than a hand-picked mask. Quality/fidelity are measured on held-out data.
 """
@@ -18,12 +18,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from model_atlas.atlas.collector import ChannelStatsAccumulator
-from model_atlas.atlas.reap import CalibrationSample
-from model_atlas.atlas.runtime import MiniMoE, forward
-from model_atlas.executor.structural import build_clone
-from model_atlas.experiments.fidelity import FidelityReport, measure_fidelity
-from model_atlas.scoring.tenp import tenp_rank
+from cebu_profiler.executor.structural import build_clone
+from cebu_profiler.experiments.fidelity import FidelityReport, measure_fidelity
+from cebu_profiler.profiler.collector import ChannelStatsAccumulator
+from cebu_profiler.profiler.reap import CalibrationSample
+from cebu_profiler.profiler.runtime import MiniMoE, forward
+from cebu_profiler.scoring.tenp import tenp_rank
 
 
 @dataclass
@@ -173,7 +173,7 @@ def compare_controls(
     budget: int,
     layer_power: float = 1.0,
 ) -> dict[str, FidelityReport]:
-    """Uniform (Control B), TENP-depth-aware (Control C), Atlas heterogeneous
+    """Uniform (Control B), TENP-depth-aware (Control C), Cebu Profiler heterogeneous
     (Experiment D) at an equal budget."""
     importance = channel_importance(model, calibration)
     return {

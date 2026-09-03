@@ -7,10 +7,10 @@ checkpoint's census, never fabricated here).
 
 from __future__ import annotations
 
-from model_atlas.integrations.glm52 import glm52_spec
-from model_atlas.integrations.k3 import k3_spec
-from model_atlas.schemas.architecture import ArchitectureSpec
-from model_atlas.synthetic.mini_moe import mini_moe_spec
+from cebu_profiler.integrations.glm52 import glm52_spec
+from cebu_profiler.integrations.k3 import k3_spec
+from cebu_profiler.schemas.architecture import ArchitectureSpec
+from cebu_profiler.synthetic.mini_moe import mini_moe_spec
 
 
 class ArchitectureRegistry:

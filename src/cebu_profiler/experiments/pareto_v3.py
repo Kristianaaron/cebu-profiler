@@ -17,7 +17,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from model_atlas.schemas.evidence import EvidenceKind
+from cebu_profiler.schemas.evidence import EvidenceKind
 
 
 class ParetoObjective(StrEnum):
@@ -124,9 +124,7 @@ def restrict_frontier(
             if _dominates(a.values, b.values, obs):
                 dominated_by[b.candidate_id].append(a.candidate_id)
 
-    frontier_ids = sorted(
-        p.candidate_id for p in points if not dominated_by[p.candidate_id]
-    )
+    frontier_ids = sorted(p.candidate_id for p in points if not dominated_by[p.candidate_id])
     for p in points:
         p.frontier = p.candidate_id in frontier_ids
         p.dominated_by = dominated_by[p.candidate_id]
@@ -134,9 +132,7 @@ def restrict_frontier(
     # neighborhood along the frontier for neighbor deltas (compact vs fidelity):
     # sort frontier by resident_gib ascending.
     _resident = ParetoObjective.RESIDENT_GIB.value
-    frontier = sorted(
-        (p for p in points if p.frontier), key=lambda p: p.values[_resident]
-    )
+    frontier = sorted((p for p in points if p.frontier), key=lambda p: p.values[_resident])
     neighbor_deltas: dict[str, list[NeighborDelta]] = {p.candidate_id: [] for p in points}
     for i, p in enumerate(frontier):
         q = p.values.get(ParetoObjective.QUALITY.value, 0.0)

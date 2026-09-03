@@ -1,13 +1,13 @@
 """F5 tests: counterfactual routing + route regret (v2 §13)."""
 
-from model_atlas.atlas.counterfactual import (
+from cebu_profiler.profiler.counterfactual import (
     counterfactual_scan,
     final_utility,
     logit_kl,
     sample_topk_subsets,
 )
-from model_atlas.atlas.runtime import build_mini_moe, forward
-from model_atlas.registry.architectures import get_registry
+from cebu_profiler.profiler.runtime import build_mini_moe, forward
+from cebu_profiler.registry.architectures import get_registry
 
 ARCH = get_registry().get("k3-mini")
 

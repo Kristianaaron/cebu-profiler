@@ -1,21 +1,21 @@
 # Kernel Evidence Bridge
 
-Status: model-agnostic Milestone 0 Atlas integration, 2026-08-31
+Status: model-agnostic Milestone 0 Cebu Profiler integration, 2026-08-31
 
 ## Purpose and boundary
 
-Atlas owns model profiling, representation choices, candidate evidence, and
+Cebu Profiler owns model profiling, representation choices, candidate evidence, and
 promotion gates. Runtime repositories own CUDA kernels, kernel builds, and
 benchmarks. The bridge between them is a versioned benchmark receipt.
 
 This split keeps runtime optimization connected to the profiler without moving
-CUDA infrastructure into Atlas or allowing unverified speed estimates to leak
+CUDA infrastructure into Cebu Profiler or allowing unverified speed estimates to leak
 onto the candidate decision surface.
 
 The contract has no model-name, architecture-family, operator-name, phase, or
 quantization-format allowlist. `model_id`, `operator`, `phase`, `format`, and
 `abi_name` are producer-supplied strings. A model released after this schema can
-use the bridge without an Atlas code change: it emits receipts for its actual
+use the bridge without an Cebu Profiler code change: it emits receipts for its actual
 operators and shapes. Kernel compatibility is determined by hardware/software,
 representation ABI, execution phase, M/N/K, tensor parallelism, grouped state,
 and backend commit—not by recognizing a model name.
@@ -33,9 +33,9 @@ receipts use the representation-neutral names.
 
 ## What landed
 
-`model_atlas.kernels` provides four pieces:
+`cebu_profiler.kernels` provides four pieces:
 
-1. `atlas.kernel-benchmark/v1`, a strict receipt schema that pins hardware,
+1. `cebu.kernel-benchmark/v1`, a strict receipt schema that pins hardware,
    representation ABI, exact workload, backend commit, metrics, and provenance.
 2. A deterministic catalog importer, including a conservative adapter for the
    existing Kernel Lab `schema_version: 1` receipt.
@@ -50,7 +50,7 @@ objective is the sum of exact measured required-kernel latencies. It does not
 invent end-to-end tokens/second from component timings; a model-level speed
 claim still requires its own measured serving run.
 
-The Atlas dashboard has a **Runtime Kernels** panel. It distinguishes:
+The Cebu Profiler dashboard has a **Runtime Kernels** panel. It distinguishes:
 
 - `measured`: eligible for speed ranking and manifest binding;
 - `estimated`: nearby M-bucket evidence, visible but ineligible;
@@ -77,7 +77,7 @@ as an estimate, but it cannot satisfy an execution manifest. This prevents a
 measurement at M=2 from silently becoming a claimed measurement at M=4.
 
 The existing CPU oracle receipt therefore imports as `compatibility_only`. It
-validates packed reconstruction correctness but cannot change Atlas speed
+validates packed reconstruction correctness but cannot change Cebu Profiler speed
 rankings. The GB10 compatibility checks also do not become K3 latency evidence.
 
 ## Commands
@@ -85,22 +85,22 @@ rankings. The GB10 compatibility checks also do not become K3 latency evidence.
 Normalize one or more runtime receipts:
 
 ```text
-model-atlas kernel-import receipt.json --out kernel-evidence.json
+cebu-profiler kernel-import receipt.json --out kernel-evidence.json
 ```
 
 Render the profiler with imported evidence:
 
 ```text
-model-atlas dashboard \
+cebu-profiler dashboard \
   --kernel-receipt kernel-evidence.json \
-  --out atlas_dashboard.html
+  --out cebu_dashboard.html
 ```
 
 Ask the oracle for an exact kernel requirement. The format, ABI, phase, and
 shape come from the candidate rather than a model registry:
 
 ```text
-model-atlas kernel-query \
+cebu-profiler kernel-query \
   --catalog kernel-evidence.json \
   --device "NVIDIA GB10" --compute-capability 12.1 \
   --cuda-version 13.0 --driver-version DRIVER_VERSION \
@@ -117,7 +117,7 @@ requirement resolves to exact measured evidence.
 
 The first legacy receipt adapter targets the existing SM121 Kernel Lab. This is
 an input adapter and validation fixture, not the bridge's supported-model list.
-It reuses ExLlamaV3's K3 MCG ABI without defining an Atlas-specific format:
+It reuses ExLlamaV3's K3 MCG ABI without defining an Cebu Profiler-specific format:
 
 - ABI name: `exllamav3.exl3.mcg`
 - ABI version: `1`
@@ -141,14 +141,14 @@ Not measured:
   representative real expert shapes on SM121.
 
 Both available Sparks were occupied by an unrelated two-node service, so the
-current evidence remains compatibility-only. Atlas must continue to show the
+current evidence remains compatibility-only. Cebu Profiler must continue to show the
 direct K3 path as unmeasured for performance.
 
 ## Next measured action
 
 Run the checked-in Kernel Lab decode sweep at the M/N/K/TP shapes emitted by the
 model currently being profiled during an isolated GB10 window, then emit canonical
-`atlas.kernel-benchmark/v1` receipts with the runtime repository commit and
+`cebu.kernel-benchmark/v1` receipts with the runtime repository commit and
 hardware identity.
 
 - Reconstruction-bound: optimize the direct decode schedule before grouped MoE.

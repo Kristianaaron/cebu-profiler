@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from model_atlas.kernels.schema import (
+from cebu_profiler.kernels.schema import (
     CandidateKernelAssessment,
     KernelBackend,
     KernelBenchmarkReceipt,
@@ -33,7 +33,7 @@ from model_atlas.kernels.schema import (
     KernelRunStatus,
     KernelWorkload,
 )
-from model_atlas.schemas.evidence import EvidenceKind
+from cebu_profiler.schemas.evidence import EvidenceKind
 
 _MAX_RECEIPT_BYTES = 4 * 1024 * 1024
 _DIRECT_EXECUTION_PATHS = frozenset(
@@ -52,7 +52,7 @@ class KernelEvidenceError(ValueError):
 class KernelEvidenceCatalog(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["atlas.kernel-catalog/v1"] = "atlas.kernel-catalog/v1"
+    schema_version: Literal["cebu.kernel-catalog/v1"] = "cebu.kernel-catalog/v1"
     receipts: list[KernelBenchmarkReceipt] = Field(default_factory=list)
 
     def normalized(self) -> KernelEvidenceCatalog:
@@ -145,7 +145,7 @@ def rankability_reasons(receipt: KernelBenchmarkReceipt) -> list[str]:
         reasons.append("a full-precision weight tensor was materialized")
     if not receipt.backend.commit:
         reasons.append("backend commit is missing")
-    if receipt.provenance.producer_schema != "atlas.kernel-benchmark/v1":
+    if receipt.provenance.producer_schema != "cebu.kernel-benchmark/v1":
         reasons.append("legacy producer schema is compatibility-only")
     if not receipt.provenance.source_commit:
         reasons.append("runtime source commit is missing")
@@ -345,9 +345,9 @@ def _parse_payload(payload: Any, *, source_sha256: str) -> list[KernelBenchmarkR
     if not isinstance(payload, dict):
         raise KernelEvidenceError("kernel receipt root must be an object")
     try:
-        if payload.get("schema_version") == "atlas.kernel-benchmark/v1":
+        if payload.get("schema_version") == "cebu.kernel-benchmark/v1":
             return [KernelBenchmarkReceipt.model_validate(payload)]
-        if payload.get("schema_version") == "atlas.kernel-catalog/v1":
+        if payload.get("schema_version") == "cebu.kernel-catalog/v1":
             return KernelEvidenceCatalog.model_validate(payload).receipts
         if (
             payload.get("schema_version") == 1
@@ -401,9 +401,7 @@ def _adapt_milestone0(
             KernelExecutionPath.CPU_REFERENCE
             if is_cpu
             else (
-                KernelExecutionPath.DIRECT_PACKED
-                if direct_proof
-                else KernelExecutionPath.UNKNOWN
+                KernelExecutionPath.DIRECT_PACKED if direct_proof else KernelExecutionPath.UNKNOWN
             )
         )
         bottleneck_map = {

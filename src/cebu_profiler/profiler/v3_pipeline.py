@@ -17,23 +17,23 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from model_atlas.analysis.corpus_semantic import (
+from cebu_profiler.analysis.corpus_semantic import (
     CorpusSemanticReport,
     build_corpus_semantic_map,
 )
-from model_atlas.analysis.global_bit_budget import enumerate_global_bit_maps
-from model_atlas.analysis.kv_memory import MemoryLedger, plan_kv_budget
-from model_atlas.analysis.nvfp4_suitability import nvfp4_suitability
-from model_atlas.analysis.quant_interaction import fit_quant_interaction
-from model_atlas.analysis.routing_consistency import routing_consistency
-from model_atlas.analysis.shared_representation import analyze_shared_representation
-from model_atlas.analysis.spectral import analyze_spectral
-from model_atlas.analysis.structural_fallback import structural_fallback_plans
-from model_atlas.atlas.reap import CalibrationSample
-from model_atlas.atlas.runtime import MiniMoE
-from model_atlas.experiments.pareto_v3 import restrict_frontier
-from model_atlas.schemas.coverage import CapacityCoverage, EvidenceGate
-from model_atlas.schemas.evidence import EvidenceKind
+from cebu_profiler.analysis.global_bit_budget import enumerate_global_bit_maps
+from cebu_profiler.analysis.kv_memory import MemoryLedger, plan_kv_budget
+from cebu_profiler.analysis.nvfp4_suitability import nvfp4_suitability
+from cebu_profiler.analysis.quant_interaction import fit_quant_interaction
+from cebu_profiler.analysis.routing_consistency import routing_consistency
+from cebu_profiler.analysis.shared_representation import analyze_shared_representation
+from cebu_profiler.analysis.spectral import analyze_spectral
+from cebu_profiler.analysis.structural_fallback import structural_fallback_plans
+from cebu_profiler.experiments.pareto_v3 import restrict_frontier
+from cebu_profiler.profiler.reap import CalibrationSample
+from cebu_profiler.profiler.runtime import MiniMoE
+from cebu_profiler.schemas.coverage import CapacityCoverage, EvidenceGate
+from cebu_profiler.schemas.evidence import EvidenceKind
 
 
 class V3Run(BaseModel):
@@ -118,9 +118,7 @@ def run_v3_pipeline(
     stages.append("quant_interaction")
 
     # 8. structural fallback (evidence-gated; under-observed never reduced)
-    widths = {
-        (li, e): model.mid for li in range(len(model.layers)) for e in range(model.n_exp)
-    }
+    widths = {(li, e): model.mid for li in range(len(model.layers)) for e in range(model.n_exp)}
     _cov_map: dict[str, CapacityCoverage] = {}
     for c in semantic.cluster_expert_coverage:
         _cov_map[c.capacity_id] = CapacityCoverage(
@@ -142,7 +140,7 @@ def run_v3_pipeline(
     #    demonstration on the minature; real measured numbers replace these).
     #    Sized so the nondominated frontier has several points -> the explorer's
     #    scatter, knee band, and neighbor-delta views are meaningfully populated.
-    from model_atlas.experiments.pareto_v3 import FrontierPoint
+    from cebu_profiler.experiments.pareto_v3 import FrontierPoint
 
     candidates = []
     family = (
@@ -182,8 +180,7 @@ def run_v3_pipeline(
         "pareto": EvidenceKind.MEASURED.value,
     }
     result.notes = (
-        "fidelity-first pipeline; predictions are never deployable "
-        "until materialized+measured"
+        "fidelity-first pipeline; predictions are never deployable until materialized+measured"
     )
     return result
 

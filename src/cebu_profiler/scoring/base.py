@@ -3,7 +3,7 @@
 Defines `ScoreNeed` / `ScorerRequirements` (what each scorer needs to run) and
 the versioned `ScoreTable` score-table format that every scorer emits. Scorers
 are pure functions/aggregators over measured telemetry — they never touch model
-weights (`Atlas` observes, scores, plans; it does not mutate).
+weights (`Cebu Profiler` observes, scores, plans; it does not mutate).
 """
 
 from __future__ import annotations
@@ -75,16 +75,14 @@ class ScoreTable(BaseModel):
     rows: list[ChannelScore] = Field(default_factory=list)
 
 
-class AtlasScorer(ABC):
+class ProfilerScorer(ABC):
     """Base scorer interface (blueprint §9.1)."""
 
     name: str
     version: str
 
     @abstractmethod
-    def requirements(self) -> ScorerRequirements:
-        ...
+    def requirements(self) -> ScorerRequirements: ...
 
     @abstractmethod
-    def finalize(self) -> ScoreTable:
-        ...
+    def finalize(self) -> ScoreTable: ...

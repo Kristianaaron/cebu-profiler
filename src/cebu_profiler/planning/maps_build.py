@@ -15,10 +15,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from model_atlas.atlas.reap import SaliencyAccumulator
-from model_atlas.atlas.runtime import MiniMoE
-from model_atlas.census.census import build_manifest
-from model_atlas.planning.maps import (
+from cebu_profiler.census.census import build_manifest
+from cebu_profiler.planning.maps import (
     ChannelEntry,
     ChannelMap,
     DistillationTargetEntry,
@@ -34,7 +32,9 @@ from model_atlas.planning.maps import (
     TileEntry,
     TileMap,
 )
-from model_atlas.scoring.redundancy import channel_uniqueness
+from cebu_profiler.profiler.reap import SaliencyAccumulator
+from cebu_profiler.profiler.runtime import MiniMoE
+from cebu_profiler.scoring.redundancy import channel_uniqueness
 
 
 @dataclass
@@ -51,9 +51,7 @@ class PlanningMapSet:
     distillation_target: DistillationTargetMap = field(default_factory=DistillationTargetMap)
 
 
-def _expert_saliency(
-    saliency: SaliencyAccumulator, layer: int, expert: int
-) -> float:
+def _expert_saliency(saliency: SaliencyAccumulator, layer: int, expert: int) -> float:
     return saliency.total_value(layer, expert)
 
 
@@ -63,9 +61,7 @@ def _kept_experts(
     """Kept expert set per layer = the top-`keep_frac` by measured saliency."""
     kept: dict[int, set[int]] = {}
     for layer in range(len(model.layers)):
-        order = sorted(
-            range(model.n_exp), key=lambda e: -_expert_saliency(saliency, layer, e)
-        )
+        order = sorted(range(model.n_exp), key=lambda e: -_expert_saliency(saliency, layer, e))
         n = max(1, round(model.n_exp * keep_frac))
         kept[layer] = set(order[:n])
     return kept
@@ -141,9 +137,7 @@ def build_overflow_pack_map(
 ) -> OverflowPackMap:
     entries: list[OverflowPackEntry] = []
     for layer in range(len(model.layers)):
-        order = sorted(
-            range(model.n_exp), key=lambda e: -_expert_saliency(saliency, layer, e)
-        )
+        order = sorted(range(model.n_exp), key=lambda e: -_expert_saliency(saliency, layer, e))
         resident_n = max(1, round(model.n_exp * resident_frac))
         for rank, e in enumerate(order):
             if rank >= resident_n:
@@ -208,9 +202,7 @@ def build_distillation_target_map(
 ) -> DistillationTargetMap:
     entries: list[DistillationTargetEntry] = []
     for layer in range(len(model.layers)):
-        order = sorted(
-            range(model.n_exp), key=lambda e: -_expert_saliency(saliency, layer, e)
-        )
+        order = sorted(range(model.n_exp), key=lambda e: -_expert_saliency(saliency, layer, e))
         for e in order[:per_layer]:
             entries.append(
                 DistillationTargetEntry(
@@ -254,7 +246,7 @@ def build_real_planning_maps(checkpoint_dir: str) -> PlanningMapSet:
     maps rank by the same real byte signal. Every number here is drawn from
     the mounted checkpoint's safetensors index + headers -- nothing synthetic.
     """
-    from model_atlas.checkpoint.source_manifest import load_manifest
+    from cebu_profiler.checkpoint.source_manifest import load_manifest
 
     manifest = load_manifest(checkpoint_dir)
 

@@ -1,6 +1,6 @@
-"""Atlas bridge for typed runtime-kernel benchmark evidence."""
+"""Cebu Profiler bridge for typed runtime-kernel benchmark evidence."""
 
-from model_atlas.kernels.catalog import (
+from cebu_profiler.kernels.catalog import (
     KernelEvidenceCatalog,
     KernelEvidenceError,
     assess_candidate_kernels,
@@ -10,7 +10,7 @@ from model_atlas.kernels.catalog import (
     summarize_catalog,
     write_catalog,
 )
-from model_atlas.kernels.schema import (
+from cebu_profiler.kernels.schema import (
     CandidateKernelAssessment,
     KernelBackend,
     KernelBenchmarkReceipt,

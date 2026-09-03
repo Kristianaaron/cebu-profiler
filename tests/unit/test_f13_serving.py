@@ -1,8 +1,8 @@
 """F13 tests: two-node serving + elastic overflow (v2 §14, §5)."""
 
-from model_atlas.atlas.runtime import build_mini_moe, forward
-from model_atlas.registry.architectures import get_registry
-from model_atlas.serving import (
+from cebu_profiler.profiler.runtime import build_mini_moe, forward
+from cebu_profiler.registry.architectures import get_registry
+from cebu_profiler.serving import (
     assign_nodes,
     build_resident_policy,
     cross_node_activation_bytes_per_token,

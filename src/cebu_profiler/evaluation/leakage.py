@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from model_atlas.atlas.reap import CalibrationSample
+from cebu_profiler.profiler.reap import CalibrationSample
 
 
 @dataclass

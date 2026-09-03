@@ -11,12 +11,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from model_atlas.atlas.reap import CalibrationSample, run_calibration
-from model_atlas.atlas.runtime import MiniMoE
-from model_atlas.schemas.ontology import CapabilityLabel
-from model_atlas.scoring.base import (
-    AtlasScorer,
+from cebu_profiler.profiler.reap import CalibrationSample, run_calibration
+from cebu_profiler.profiler.runtime import MiniMoE
+from cebu_profiler.schemas.ontology import CapabilityLabel
+from cebu_profiler.scoring.base import (
     ChannelScore,
+    ProfilerScorer,
     ScoreNeed,
     ScorerRequirements,
     ScoreTable,
@@ -82,7 +82,7 @@ def expert_semantic_score(
     return best
 
 
-class SemanticScorer(AtlasScorer):
+class SemanticScorer(ProfilerScorer):
     name = "semantic"
     version = "1.0"
 

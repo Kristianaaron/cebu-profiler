@@ -2,7 +2,7 @@
 
 import json
 
-from model_atlas.dashboard import build_dashboard_data, render_dashboard, write_dashboard
+from cebu_profiler.dashboard import build_dashboard_data, render_dashboard, write_dashboard
 
 
 def test_build_dashboard_data_has_sections():
@@ -17,8 +17,7 @@ def test_build_dashboard_data_has_sections():
     vox = data["contrast3d"]["voxels"][0]
     assert {"delta", "pos", "neg"} <= set(vox)
     assert all(
-        0.0 <= v["pos"] <= 1.0 and 0.0 <= v["neg"] <= 1.0
-        for v in data["contrast3d"]["voxels"]
+        0.0 <= v["pos"] <= 1.0 and 0.0 <= v["neg"] <= 1.0 for v in data["contrast3d"]["voxels"]
     )
     assert data["coalitions"]
     assert data["paths"]
@@ -26,7 +25,12 @@ def test_build_dashboard_data_has_sections():
     assert data["candidates"]
     assert data["heldout"]
     assert set(data["hierarchy"]["levels"]) == {
-        "weights", "units", "experts", "coalitions", "pathways", "behaviour"
+        "weights",
+        "units",
+        "experts",
+        "coalitions",
+        "pathways",
+        "behaviour",
     }
     assert all(data["hierarchy"]["counts"][lv] > 0 for lv in data["hierarchy"]["levels"])
     assert data["reality"]["candidates"], "real-bytes envelopes must be non-empty"
@@ -40,7 +44,7 @@ def test_render_dashboard_is_self_contained_html():
     data = build_dashboard_data(seed=0)
     html = render_dashboard(data)
     assert html.startswith("<!doctype html>")
-    assert "Atlas Lab" in html
+    assert "Cebu Lab" in html
     assert html.rstrip().endswith("</html>")
     # both 3D canvases must carry an explicit responsive size rule; a bare canvas
     # collapses to its intrinsic 300x150 size and the cells render invisibly.

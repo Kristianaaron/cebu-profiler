@@ -16,9 +16,9 @@ from __future__ import annotations
 import itertools
 from dataclasses import dataclass, field
 
-from model_atlas.atlas.counterfactual import final_utility
-from model_atlas.atlas.reap import CalibrationSample
-from model_atlas.atlas.runtime import MiniMoE, forward
+from cebu_profiler.profiler.counterfactual import final_utility
+from cebu_profiler.profiler.reap import CalibrationSample
+from cebu_profiler.profiler.runtime import MiniMoE, forward
 
 
 def _mean_utility(

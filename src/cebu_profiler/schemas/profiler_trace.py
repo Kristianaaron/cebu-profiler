@@ -1,4 +1,4 @@
-"""Atlas trace schema (v2 §8, §11) with typed per-family payloads.
+"""Cebu Profiler trace schema (v2 §8, §11) with typed per-family payloads.
 
 A single trace record links one observation to its identity (task, sample,
 suite, labels, stage, token, mode, success), to the source model/layer/expert,
@@ -13,8 +13,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from model_atlas.schemas.evidence import EvidenceClaim
-from model_atlas.schemas.ontology import (
+from cebu_profiler.schemas.evidence import EvidenceClaim
+from cebu_profiler.schemas.ontology import (
     CapabilityLabel,
     DataPartition,
     GenerationMode,
@@ -100,19 +100,19 @@ TracePayload = Annotated[
 ]
 
 
-class AtlasTrace(BaseModel):
+class ProfilerTrace(BaseModel):
     """One trace record with full identity + typed payload (v2 §8)."""
 
     model_config = ConfigDict(extra="forbid")
 
-    atlas_run_id: str
+    profiler_run_id: str
     trace_schema_version: str = "1.0"
     family: TraceFamily
 
     task_id: str | None = None
     sample_id: str | None = None
     suite_id: str | None = None
-    data_partition: DataPartition = DataPartition.ATLAS_CALIBRATION
+    data_partition: DataPartition = DataPartition.CEBU_CALIBRATION
     capability_labels: list[CapabilityLabel] = Field(default_factory=list)
     trajectory_stage: TrajectoryStage | None = None
     token_index: int | None = Field(default=None, ge=0)
@@ -130,13 +130,13 @@ class AtlasTrace(BaseModel):
     evidence: EvidenceClaim | None = None
 
     @model_validator(mode="after")
-    def _family_matches_payload(self) -> AtlasTrace:
+    def _family_matches_payload(self) -> ProfilerTrace:
         if self.payload.kind != self.family.value:
             raise ValueError(f"family {self.family!s} != payload kind {self.payload.kind}")
         return self
 
     @model_validator(mode="after")
-    def _intervention_needs_layer(self) -> AtlasTrace:
+    def _intervention_needs_layer(self) -> ProfilerTrace:
         if self.payload.kind == "intervention" and self.layer_index is None:
             raise ValueError("intervention trace requires layer_index")
         return self

@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from model_atlas.checkpoint.classifier import Classification, classify_tensor
-from model_atlas.checkpoint.source_manifest import CheckpointManifest
-from model_atlas.schemas.architecture import TensorRole
+from cebu_profiler.checkpoint.classifier import Classification, classify_tensor
+from cebu_profiler.checkpoint.source_manifest import CheckpointManifest
+from cebu_profiler.schemas.architecture import TensorRole
 
 
 class GraphNode(BaseModel):

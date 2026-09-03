@@ -1,12 +1,12 @@
-"""Native eval-lab ⇄ model-atlas pipeline (ecosystem bridge).
+"""Native eval-lab ⇄ cebu-profiler pipeline (ecosystem bridge).
 
 Lets the two platforms talk data, not just links:
 
 - ingress: read eval-lab's real task corpus (`tasks/**/prompt.md` + domain
-  paths) into an Atlas calibration corpus tagged with capability labels and a
+  paths) into an Cebu Profiler calibration corpus tagged with capability labels and a
   data partition, so REAP saliency runs on the harness's actual tasks.
-- egress: emit measured atlas findings / derivatives as JSON manifests that
-  eval-lab (the `eval-lab atlas` plugin + ModelAssetService) can consume.
+- egress: emit measured profiler findings / derivatives as JSON manifests that
+  eval-lab (the `eval-lab profiler` plugin + ModelAssetService) can consume.
 
 Everything downstream is the same measured F3–F13 runtime; only the corpus
 source is real eval-lab tasks instead of the synthetic generator. Deterministic.
@@ -20,10 +20,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-from model_atlas.atlas.reap import CalibrationSample, run_calibration
-from model_atlas.atlas.runtime import MiniMoE
-from model_atlas.registry.architectures import get_registry
-from model_atlas.schemas.ontology import CapabilityLabel, DataPartition, TrajectoryStage
+from cebu_profiler.profiler.reap import CalibrationSample, run_calibration
+from cebu_profiler.profiler.runtime import MiniMoE
+from cebu_profiler.registry.architectures import get_registry
+from cebu_profiler.schemas.ontology import CapabilityLabel, DataPartition, TrajectoryStage
 
 _DOMAIN_HINTS: dict[str, CapabilityLabel] = {
     "coding": CapabilityLabel.CODE_GENERATION,
@@ -68,11 +68,11 @@ def prompt_corpus(
     *,
     vocab: int,
     seed: int = 0,
-    partition: DataPartition = DataPartition.ATLAS_CALIBRATION,
+    partition: DataPartition = DataPartition.CEBU_CALIBRATION,
     max_samples: int | None = None,
     skip: set[str] | None = None,
 ) -> list[CalibrationSample]:
-    """Ingest eval-lab's task prompts into an Atlas calibration corpus."""
+    """Ingest eval-lab's task prompts into an Cebu Profiler calibration corpus."""
     root = Path(eval_lab_root)
     prompts = [
         p for p in root.rglob("prompt.md") if not p.is_dir() and not p.name.startswith("exists_")
@@ -105,9 +105,9 @@ def pipeline_summary(
     seed: int = 0,
     arch_name: str = "k3-mini",
     vocab: int | None = None,
-    partition: DataPartition = DataPartition.ATLAS_CALIBRATION,
+    partition: DataPartition = DataPartition.CEBU_CALIBRATION,
 ) -> dict[str, Any]:
-    """Run Atlas REAP saliency over eval-lab's real tasks and summarize per label."""
+    """Run Cebu Profiler REAP saliency over eval-lab's real tasks and summarize per label."""
     model: MiniMoE = build_mini_moe_for(arch_name, seed)
     vocab = vocab or model.arch.vocabulary_size or 1000
     corpus = prompt_corpus(eval_lab_root, vocab=vocab, seed=seed, partition=partition)
@@ -117,7 +117,7 @@ def pipeline_summary(
     labels_seen = sorted({lab.value for s in corpus for lab in s.labels if lab})
     per_label: dict[str, list[dict[str, Any]]] = {}
     for lab in labels_seen:
-        from model_atlas.schemas.ontology import CapabilityLabel
+        from cebu_profiler.schemas.ontology import CapabilityLabel
 
         try:
             enum_lab = CapabilityLabel(lab)
@@ -144,12 +144,12 @@ def build_mini_moe_for(arch_name: str, seed: int) -> MiniMoE:
 
 
 def build_mini_moe_impl(arch: Any, seed: int) -> MiniMoE:
-    from model_atlas.atlas.runtime import build_mini_moe
+    from cebu_profiler.profiler.runtime import build_mini_moe
 
     return build_mini_moe(arch, seed=seed)
 
 
 def write_manifest(payload: dict[str, Any], out_path: str) -> str:
-    """Write a JSON manifest (atlas findings) for eval-lab to consume."""
+    """Write a JSON manifest (profiler findings) for eval-lab to consume."""
     Path(out_path).write_text(json.dumps(payload, indent=2, sort_keys=True))
     return out_path
