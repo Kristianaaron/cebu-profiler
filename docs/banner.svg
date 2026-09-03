@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1160" height="640" viewBox="0 0 1160 640" font-family="ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif">
+  <defs>
+    <linearGradient id="bgm" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0b0b0d"/><stop offset="1" stop-color="#141417"/>
+    </linearGradient>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#525252"/>
+    </marker>
+  </defs>
+  <rect width="1160" height="640" rx="16" fill="url(#bgm)"/>
+  <text x="48" y="58" fill="#fafafa" font-size="30" font-weight="700">Cebu Profiler</text>
+  <text x="48" y="86" fill="#a1a1a1" font-size="15">Shrink a huge model. Prove it still works. Fail closed.</text>
+  <rect x="48" y="104" width="1064" height="2" fill="#fafafa" opacity="0.9">
+    <animate attributeName="width" values="0;1064" dur="0.9s" begin="0.1s" calcMode="spline" keySplines="0.2 0.7 0.2 1" keyTimes="0;1" fill="freeze"/>
+  </rect>
+
+  <!-- Row 1: pipeline stages (staggered fade/slide-in) -->
+  <g>
+    <animate attributeName="opacity" values="0;1" begin="0.15s" dur="0.6s" fill="freeze"/>
+    <animateTransform attributeName="transform" type="translate" values="0 10;0 0" begin="0.15s" dur="0.6s" calcMode="spline" keySplines="0.25 0.1 0.25 1" keyTimes="0;1" fill="freeze"/>
+    <rect x="48" y="150" width="240" height="110" rx="12" fill="#161619" stroke="#303030"/>
+    <circle cx="76" cy="180" r="11" fill="#fafafa"/><text x="76" y="184.5" fill="#0b0b0d" font-size="12" font-weight="800" text-anchor="middle">1</text>
+    <text x="96" y="185" fill="#ededf0" font-size="16" font-weight="700">Profile</text>
+    <text x="66" y="212" fill="#8e8e8e" font-size="12.5">Census every tensor and layer.</text>
+    <text x="66" y="230" fill="#8e8e8e" font-size="12.5">What is this model made of,</text>
+    <text x="66" y="248" fill="#8e8e8e" font-size="12.5">and what does it prove?</text>
+  </g>
+  <g>
+    <animate attributeName="opacity" values="0;1" begin="0.35s" dur="0.6s" fill="freeze"/>
+    <animateTransform attributeName="transform" type="translate" values="0 10;0 0" begin="0.35s" dur="0.6s" calcMode="spline" keySplines="0.25 0.1 0.25 1" keyTimes="0;1" fill="freeze"/>
+    <rect x="328" y="150" width="240" height="110" rx="12" fill="#161619" stroke="#303030"/>
+    <circle cx="356" cy="180" r="11" fill="#fafafa"/><text x="356" y="184.5" fill="#0b0b0d" font-size="12" font-weight="800" text-anchor="middle">2</text>
+    <text x="376" y="185" fill="#ededf0" font-size="16" font-weight="700">Recommend</text>
+    <text x="346" y="212" fill="#8e8e8e" font-size="12.5">Pick the method the evidence</text>
+    <text x="346" y="230" fill="#8e8e8e" font-size="12.5">supports — quantize or prune.</text>
+    <text x="346" y="248" fill="#8e8e8e" font-size="12.5">No evidence, no method.</text>
+  </g>
+  <g>
+    <animate attributeName="opacity" values="0;1" begin="0.55s" dur="0.6s" fill="freeze"/>
+    <animateTransform attributeName="transform" type="translate" values="0 10;0 0" begin="0.55s" dur="0.6s" calcMode="spline" keySplines="0.25 0.1 0.25 1" keyTimes="0;1" fill="freeze"/>
+    <rect x="608" y="150" width="240" height="110" rx="12" fill="#161619" stroke="#303030"/>
+    <circle cx="636" cy="180" r="11" fill="#fafafa"/><text x="636" y="184.5" fill="#0b0b0d" font-size="12" font-weight="800" text-anchor="middle">3</text>
+    <text x="656" y="185" fill="#ededf0" font-size="16" font-weight="700">Compress</text>
+    <text x="626" y="212" fill="#8e8e8e" font-size="12.5">GGUF-mixed quantization, or</text>
+    <text x="626" y="230" fill="#8e8e8e" font-size="12.5">saliency-ranked 16-group expert</text>
+    <text x="626" y="248" fill="#8e8e8e" font-size="12.5">width-slice. Aligned, repairable.</text>
+  </g>
+  <g>
+    <animate attributeName="opacity" values="0;1" begin="0.75s" dur="0.6s" fill="freeze"/>
+    <animateTransform attributeName="transform" type="translate" values="0 10;0 0" begin="0.75s" dur="0.6s" calcMode="spline" keySplines="0.25 0.1 0.25 1" keyTimes="0;1" fill="freeze"/>
+    <rect x="888" y="150" width="224" height="110" rx="12" fill="#161619" stroke="#303030"/>
+    <circle cx="916" cy="180" r="11" fill="#fafafa"/><text x="916" y="184.5" fill="#0b0b0d" font-size="12" font-weight="800" text-anchor="middle">4</text>
+    <text x="936" y="185" fill="#ededf0" font-size="16" font-weight="700">Verify &amp; hand off</text>
+    <text x="906" y="212" fill="#8e8e8e" font-size="12.5">Structure checks, teacher KLD/CKA</text>
+    <text x="906" y="230" fill="#8e8e8e" font-size="12.5">gate, then a hash-verified</text>
+    <text x="906" y="248" fill="#8e8e8e" font-size="12.5">run bundle for serving.</text>
+  </g>
+
+  <line x1="288" y1="205" x2="326" y2="205" stroke="#4a4a4a" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="568" y1="205" x2="606" y2="205" stroke="#4a4a4a" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="848" y1="205" x2="886" y2="205" stroke="#4a4a4a" stroke-width="2" marker-end="url(#arr)"/>
+  <circle cx="288" cy="205" r="2.5" fill="#e4e4e7">
+    <animateMotion path="M288 205 L326 205" dur="1.3s" begin="0.9s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="568" cy="205" r="2.5" fill="#e4e4e7">
+    <animateMotion path="M568 205 L606 205" dur="1.3s" begin="1.4s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="848" cy="205" r="2.5" fill="#e4e4e7">
+    <animateMotion path="M848 205 L886 205" dur="1.3s" begin="1.9s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- Fail-closed band (marching-ants border) -->
+  <rect x="48" y="300" width="1064" height="92" rx="12" fill="#121215" stroke="#6b6b6b" stroke-dasharray="6 4">
+    <animate attributeName="stroke-dashoffset" values="0;-20" dur="1.2s" repeatCount="indefinite"/>
+  </rect>
+  <text x="76" y="334" fill="#fafafa" font-size="15" font-weight="700">✕  Fail-closed at every step</text>
+  <text x="76" y="356" fill="#8e8e8e" font-size="12.5">Missing evidence, malformed maps, or a gate rejection stops the pipeline — nothing is guessed,</text>
+  <text x="76" y="374" fill="#8e8e8e" font-size="12.5">nothing is silently estimated, nothing publishes unless it passes. Estimated is never called measured.</text>
+
+  <!-- gate row -->
+  <g>
+    <rect x="48" y="428" width="512" height="160" rx="12" fill="#161619" stroke="#303030"/>
+    <text x="76" y="462" fill="#ededf0" font-size="15" font-weight="700">Quality gate — compare against the original</text>
+    <text x="76" y="486" fill="#8e8e8e" font-size="12.5">Run the compressed model and the full teacher on the same prompts.</text>
+    <text x="76" y="504" fill="#8e8e8e" font-size="12.5">KLD: how far the whole word-choice distribution drifts.</text>
+    <text x="76" y="522" fill="#8e8e8e" font-size="12.5">CKA: whether each layer still represents things the same way.</text>
+    <text x="76" y="540" fill="#8e8e8e" font-size="12.5">Drift past budget → exit 2, rejected decision recorded, nothing published.</text>
+    <g>
+      <animate attributeName="opacity" values="1;0.6;1" dur="2.4s" repeatCount="indefinite"/>
+      <rect x="76" y="556" width="130" height="20" rx="10" fill="#fafafa"/>
+      <text x="141" y="570" fill="#0b0b0d" font-size="11" text-anchor="middle" font-weight="700">PASS → publish</text>
+    </g>
+    <rect x="216" y="556" width="130" height="20" rx="10" fill="#1c1c1f" stroke="#3f3f3f"/>
+    <text x="281" y="570" fill="#a1a1a1" font-size="11" text-anchor="middle" font-weight="700">REJECT → exit 2</text>
+  </g>
+  <g>
+    <rect x="600" y="428" width="512" height="160" rx="12" fill="#161619" stroke="#303030"/>
+    <text x="628" y="462" fill="#ededf0" font-size="15" font-weight="700">Two ways to shrink (pick by evidence)</text>
+    <text x="628" y="488" fill="#ededf0" font-size="13" font-weight="600">Quantize</text>
+    <text x="700" y="488" fill="#8e8e8e" font-size="12.5">same shape, smaller numbers — 4-bit groups</text>
+    <text x="628" y="514" fill="#ededf0" font-size="13" font-weight="600">Width-slice</text>
+    <text x="700" y="514" fill="#8e8e8e" font-size="12.5">delete the least-useful 16-channel expert groups,</text>
+    <text x="700" y="532" fill="#8e8e8e" font-size="12.5">ranked by saliency, layout stays NVFP4-coherent</text>
+    <text x="628" y="560" fill="#8e8e8e" font-size="12">Experts carry most of a MoE&apos;s weight — attention &amp; shared layers are protected.</text>
+  </g>
+</svg>
