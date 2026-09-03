@@ -167,12 +167,15 @@ def build_run_manifest(
     *,
     run_dir: str | None = None,
     extra_limitations: list[dict[str, str]] | None = None,
+    methods_used: list[str] | None = None,
 ) -> dict[str, Any]:
     """Compose the run_manifest.json content for this run.
 
     When `run_dir` is given, embeds the machine-checkable evidence-coverage
     gate and the limitations ledger (both fail-closed; coverage failures become
-    warnings on the run, not silent passes).
+    warnings on the run, not silent passes). When `methods_used` is given, the
+    method-provenance block is embedded and every id must resolve in the
+    provenance registry — a manifest can never ship with uncited lineage.
     """
     from cebu_profiler.evaluation.coverage import (
         check_coverage,
@@ -206,4 +209,9 @@ def build_run_manifest(
             manifest["limitations"].update(
                 {k: v for k, v in extra.items() if k not in manifest["limitations"]}
             )
+    if methods_used:
+        from cebu_profiler.evaluation.provenance import provenance_manifest
+
+        # Fail closed: any unknown method id raises here, before the manifest ships.
+        manifest["method_provenance"] = provenance_manifest(methods_used)
     return manifest

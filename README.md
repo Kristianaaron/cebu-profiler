@@ -152,6 +152,18 @@ shortcoming is ours too. In roughly the order the ideas enter the pipeline:
   toolchain; MXFP4 block scaling per the OCP Microscaling Formats spec
   (2023). Group-128 weight quantization in the LLM era was popularized by
   GPTQ (Frantar et al., 2023, ICLR) and AWQ (Lin et al., 2024, MLSys).
+- **Community formats & kernels** (the "and all those other methods"): GGUF
+  k-quants and I-quants by Ikawrakow in llama.cpp (the workhorse of local
+  mixed-precision GGUF, incl. importance-matrix variants); EXL3 / ExLlamaV3
+  (turboderp) — a streamlined variant of **QTIP** (Cornell RelaxML,
+  arXiv:2406.11235) encoding weights into tail-biting trellis codebooks, which
+  itself descends from **QuIP#** (arXiv:2402.04396) and incoherence
+  processing; **AQLM** (Egiazarian et al., 2024) extreme low-bit additive
+  quantization; **Marlin** (IST-DASLab) near-memory-bound GEMM kernels these
+  formats target. The profiler treats every one of these as a *candidate
+  family scored on the same evidence base* (AGENTS.md "Methods") — the deep
+  census SQNR screens exist so a format's local damage is measured before any
+  format is chosen.
 - **Layer-wise reconstruction & calibration sets.** Frantar & Alistarh
   (GPTQ) and Ashkboos et al. — *Slicing SALIENCE from Transformer Head Pruning*
   / SparseGPT (2023/2024) — the practice of scoring against a held-out
@@ -183,6 +195,20 @@ implementations run on Cebu Profiler's own manifest model, scorer interfaces,
 and frozen-model intervention API, with evidence-typing, fail-closed identity
 arms, bounded-memory chunked decoding, and config-driven architecture specs as
 additions of our own. Ideas credited where due; nothing copied.
+
+### Embedded provenance (anti-attribution-stripping)
+
+Credits here are not just prose — they are **data inside the pipeline**.
+`src/cebu_profiler/evaluation/provenance.py` holds a machine-readable
+`METHOD_PROVENANCE` registry: every technique with external lineage (each
+paper, format spec, community format, and the atlas inspiration above) has a
+typed citation record (`research` / `spec` / `community` / `inspiration`).
+Every run manifest embeds a `method_provenance` block resolved through that
+registry — unknown method ids fail the build (fail closed), so a run bundle
+cannot ship with uncited lineage. If you are reading this repository's ideas
+in a downstream artifact, check for that block and its `watermark` field,
+which points back here; its absence means the work was copied from this
+pipeline.
 
 ## License
 
