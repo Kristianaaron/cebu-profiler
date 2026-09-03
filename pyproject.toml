@@ -3,13 +3,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "model-atlas"
+name = "cebu-profiler"
 version = "0.1.0"
-description = "Model-agnostic inside-the-model analysis and derivative-building platform: tensor census, streamed REAP atlas, keep-map planning, conversion, repair, serving. Kimi K3 is the first registered subject."
+description = "Model-agnostic inside-the-model analysis and derivative-building platform: tensor census, streamed REAP profiling, keep-map planning, conversion, repair, serving. Kimi K3 is the first registered subject."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
-authors = [{ name = "model-atlas contributors" }]
+authors = [{ name = "cebu-profiler contributors" }]
 dependencies = [
     "pydantic>=2.7,<3",
     "PyYAML>=6.0,<7",
@@ -26,13 +26,14 @@ dev = [
     "pytest-cov>=5,<6",
     "ruff>=0.5,<1",
     "mypy>=1.10,<2",
+    "types-PyYAML",
 ]
 
 [project.scripts]
-model-atlas = "model_atlas.cli:app"
+cebu-profiler = "cebu_profiler.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/model_atlas"]
+packages = ["src/cebu_profiler"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -49,5 +50,5 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-packages = ["model_atlas"]
+packages = ["cebu_profiler"]
 mypy_path = "src"

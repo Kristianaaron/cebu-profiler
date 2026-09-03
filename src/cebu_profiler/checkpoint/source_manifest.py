@@ -7,7 +7,6 @@ every tensor with shape/dtype/byte-range/shard, plus optional per-shard hashes.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 from pathlib import Path
@@ -15,7 +14,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from model_atlas.checkpoint.safetensors import read_safetensors_header
+from cebu_profiler.checkpoint.hashing import shard_hashes  # noqa: F401  (re-export)
+from cebu_profiler.checkpoint.safetensors import read_safetensors_header
 
 
 class TensorEntry(BaseModel):
@@ -97,11 +97,5 @@ def load_manifest(checkpoint_dir: str) -> CheckpointManifest:
     )
 
 
-def shard_hashes(checkpoint_dir: str) -> dict[str, str]:
-    """sha256 of each safetensors shard (whole-file). Small for fixtures."""
-    root = Path(checkpoint_dir)
-    return {
-        p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-        for p in root.glob("*.safetensors")
-        if not p.name.startswith("._")
-    }
+# sha256 hashing lives in checkpoint.hashing (streamed, constant memory);
+# re-exported here for backwards compatibility with existing imports.

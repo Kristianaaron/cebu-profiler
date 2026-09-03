@@ -1,17 +1,17 @@
 """Checkpoint census: structural discovery of a source checkpoint."""
 
-from model_atlas.checkpoint.classifier import (
+from cebu_profiler.checkpoint.classifier import (
     Classification,
     classify_tensor,
     is_unclassified,
 )
-from model_atlas.checkpoint.source_manifest import (
+from cebu_profiler.checkpoint.hashing import shard_hashes
+from cebu_profiler.checkpoint.source_manifest import (
     CheckpointManifest,
     TensorEntry,
     load_manifest,
-    shard_hashes,
 )
-from model_atlas.checkpoint.structural_graph import (
+from cebu_profiler.checkpoint.structural_graph import (
     GraphEdge,
     GraphNode,
     StructuralGraph,
