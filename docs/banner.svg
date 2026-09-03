@@ -41,9 +41,9 @@
     <rect x="608" y="150" width="240" height="110" rx="12" fill="#161619" stroke="#303030"/>
     <circle cx="636" cy="180" r="11" fill="#fafafa"/><text x="636" y="184.5" fill="#0b0b0d" font-size="12" font-weight="800" text-anchor="middle">3</text>
     <text x="656" y="185" fill="#ededf0" font-size="16" font-weight="700">Compress</text>
-    <text x="626" y="212" fill="#8e8e8e" font-size="12.5">GGUF-mixed quantization, or</text>
-    <text x="626" y="230" fill="#8e8e8e" font-size="12.5">saliency-ranked 16-group expert</text>
-    <text x="626" y="248" fill="#8e8e8e" font-size="12.5">width-slice. Aligned, repairable.</text>
+    <text x="626" y="212" fill="#8e8e8e" font-size="12.5">Saliency-ranked 16-group expert</text>
+    <text x="626" y="230" fill="#8e8e8e" font-size="12.5">width-slice, NVFP4-coherent,</text>
+    <text x="626" y="248" fill="#8e8e8e" font-size="12.5">router-consistent. Repairable.</text>
   </g>
   <g>
     <animate attributeName="opacity" values="0;1" begin="0.75s" dur="0.6s" fill="freeze"/>
@@ -53,7 +53,7 @@
     <text x="936" y="185" fill="#ededf0" font-size="16" font-weight="700">Verify &amp; hand off</text>
     <text x="906" y="212" fill="#8e8e8e" font-size="12.5">Structure checks, teacher KLD/CKA</text>
     <text x="906" y="230" fill="#8e8e8e" font-size="12.5">gate, then a hash-verified</text>
-    <text x="906" y="248" fill="#8e8e8e" font-size="12.5">run bundle for serving.</text>
+    <text x="906" y="248" fill="#8e8e8e" font-size="12.5">bundle served by vLLM / SGLang.</text>
   </g>
 
   <line x1="288" y1="205" x2="326" y2="205" stroke="#4a4a4a" stroke-width="2" marker-end="url(#arr)"/>

@@ -10,7 +10,7 @@ MoE checkpoint and turns that evidence into a smaller, evidence-driven
 derivative: tensor census → streamed REAP profiling → keep-map planning →
 checkpoint conversion → repair/distillation → serving.
 
-Three properties define the pipeline:
+Four properties define the pipeline:
 
 - **Evidence first.** Nothing is pruned, quantized, or reshaped on a hunch —
   every intervention cites measured saliency, contribution, or causal evidence.
@@ -21,18 +21,22 @@ Three properties define the pipeline:
   104B active, 896 routed experts/layer top-16, Stable LatentMoE, MXFP4
   experts, ~1.56 TB). The core is driven by a configurable `ArchitectureSpec`;
   other large models register as additional architectures.
+- **Serving-ready for vLLM & SGLang.** Derivatives are laid out for direct
+  vLLM / SGLang serving — NVFP4-coherent expert groups, router-consistent —
+  not GGUF exports. Runtime load/forward validation is an explicit gate,
+  never assumed.
 
 ## How it works
 
 1. **Profile** — census every tensor and layer; establish ownership so no
    tensor is unclassified and source identity is preserved.
 2. **Recommend** — pick the compression method the evidence supports.
-3. **Compress** — GGUF-mixed quantization, or saliency-ranked 16-channel
-   expert width-slicing with router indices and correction biases reordered
-   exactly in step.
+3. **Compress** — saliency-ranked 16-channel expert width-slicing with router
+   indices and correction biases reordered exactly in step (NVFP4-coherent
+   layout), or quantization where the evidence calls for it.
 4. **Verify & hand off** — structural checks, a teacher KLD/CKA quality gate
-   against the original model on the same prompts, then a hash-verified run
-   bundle for serving.
+   against the original model on the same prompts, runtime load/forward
+   validation under vLLM / SGLang, then a hash-verified run bundle.
 
 ## Intent (one clear purpose per app)
 
