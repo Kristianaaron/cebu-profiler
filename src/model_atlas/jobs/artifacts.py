@@ -21,6 +21,7 @@ import os
 from pathlib import Path, PurePosixPath
 
 from model_atlas.jobs.schema import OutputRef
+from model_atlas.ops.atomicio import atomic_write_text as atomic_write_text_shared
 from model_atlas.recipe.compiler import canonical_json, sha256_hex
 
 _IO_CHUNK = 1 << 20
@@ -219,18 +220,12 @@ class StageStager:
 
 
 def atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
-    _fsync_dir(path.parent)
+    # shared crash-safe implementation (ops.atomicio)
+    atomic_write_text_shared(path, text)
 
 
 def atomic_write_json(path: Path, obj: object) -> None:
     atomic_write_text(path, canonical_json(obj) + "\n")
-
-
-def _fsync_dir(path: Path) -> None:
     try:
         fd = os.open(path, os.O_RDONLY)
         try:

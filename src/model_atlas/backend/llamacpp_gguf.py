@@ -19,11 +19,12 @@ from model_atlas.backend.contract import (
     BackendUnavailable,
     ParameterSpec,
 )
+from model_atlas.backend.enforce import cgroup_scope_argv, clamp_threads
 from model_atlas.recipe.schema import RecipeStatus
 
 BACKEND_ID = "llamacpp_gguf_mixed"
 PINNED_COMMIT = "4df29be4f4c3673f428170fda944a5b19f743bb8"
-EXPECTED_CONVERTER_SHA256 = "e38975e1c68d98ac1664dfd530616eb35c72294382a4dd873d4746b23f27779f"
+EXPECTED_CONVERTER_SHA256 = "1024e7af8398989d5298df225fc2af12fa2c1c0f00ad176aefdc53dc19f6533c"
 EXPECTED_CPU_QUANTIZER_SHA256 = "536a0cd9cafe3172d638ca6eb29402661d05c2d8954631ef2f6f0fac6fb78e48"
 EXPECTED_PYTHON_SHA256 = "a7d56a8a764faf7bbf5c164055a48fd072be52287bdeb523a9e07b2042f4e7e1"
 DEFAULT_TOOLCHAIN_ROOT = Path("/home/kristianaaron/tmp/atlas-toolchains/llama.cpp")
@@ -417,17 +418,24 @@ class LlamaCppGgufMixedAdapter(BackendAdapter):
             if final.exists():
                 final.unlink()
             if not (intermediate.is_file() and self._gguf_ok(scratch)):
-                converter_argv = [
-                    str(self.python_executable),
-                    probe.converter,
-                    str(source),
-                    "--outfile",
-                    str(intermediate),
-                    "--outtype",
-                    "auto",
-                ]
+                converter_argv, conv_mode = cgroup_scope_argv(
+                    [
+                        str(self.python_executable),
+                        probe.converter,
+                        str(source),
+                        "--use-temp-file",
+                        "--outfile",
+                        str(intermediate),
+                        "--outtype",
+                        "auto",
+                    ],
+                    label="gguf-converter",
+                )
                 self._run_checked(
-                    self.runner, converter_argv, cwd=self.toolchain_root, label="GGUF converter"
+                    self.runner,
+                    converter_argv,
+                    cwd=self.toolchain_root,
+                    label=f"GGUF converter [{conv_mode}]",
                 )
                 if not intermediate.is_file() or not self._gguf_ok(scratch):
                     raise BackendUnavailable("converter did not produce a structurally valid GGUF")
@@ -436,7 +444,9 @@ class LlamaCppGgufMixedAdapter(BackendAdapter):
             candidate = candidate_dir / "model.gguf"
             if candidate.exists():
                 candidate.unlink()
-            quantizer_argv = [
+            threads = clamp_threads(threads)
+            quantizer_argv, quant_mode = cgroup_scope_argv(
+                [
                 probe.quantizer,
                 "--allow-requantize",
                 "--tensor-type-file",
@@ -449,9 +459,14 @@ class LlamaCppGgufMixedAdapter(BackendAdapter):
                 str(candidate),
                 "Q4_K",
                 str(threads),
-            ]
+                ],
+                label="gguf-quantizer",
+            )
             self._run_checked(
-                self.runner, quantizer_argv, cwd=self.toolchain_root, label="GGUF quantizer"
+                self.runner,
+                quantizer_argv,
+                cwd=self.toolchain_root,
+                label=f"GGUF quantizer [{quant_mode}]",
             )
             if not candidate.is_file() or not self._gguf_ok(candidate_dir):
                 raise BackendUnavailable("quantizer did not produce a structurally valid GGUF")

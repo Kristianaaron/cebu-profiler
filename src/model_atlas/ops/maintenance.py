@@ -24,56 +24,17 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from model_atlas.ops.atomicio import publish_json_exclusive
 from model_atlas.canary_constants import HEAD_TRANSIENT_UNIT, WORKER_TRANSIENT_UNIT
 from model_atlas.ops.maintenance_watch import extract_shard_progress
+
+
+_publish_json_exclusive = publish_json_exclusive
 
 
 def _now() -> datetime:
     return datetime.now(UTC)
 
-
-def _publish_json_exclusive(path: Path, encoded: bytes) -> None:
-    if not path.is_absolute() or path.name in {"", ".", ".."}:
-        raise MaintenanceFailure("maintenance receipt path is invalid")
-    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
-    parent = os.open("/", flags)
-    temporary = f".{path.name}.{secrets.token_hex(12)}.tmp"
-    descriptor = -1
-    try:
-        for component in path.parent.parts[1:]:
-            following = os.open(component, flags, dir_fd=parent)
-            os.close(parent)
-            parent = following
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-            dir_fd=parent,
-        )
-        view = memoryview(encoded)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise MaintenanceFailure("maintenance receipt write failed")
-            view = view[written:]
-        os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = -1
-        os.link(temporary, path.name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
-        os.fsync(parent)
-        os.unlink(temporary, dir_fd=parent)
-        os.fsync(parent)
-    except BaseException:
-        try:
-            os.unlink(temporary, dir_fd=parent)
-            os.fsync(parent)
-        except OSError:
-            pass
-        raise
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        os.close(parent)
 
 
 class CommandResult(BaseModel):

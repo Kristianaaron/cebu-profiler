@@ -43,14 +43,20 @@ def score_grouped_surrogate(
             gate = exp["gate"]
             up = exp["up"]
             down = exp["down"]
+            # hoist the ||down[:,c]||^2 column terms out of the per-channel loop
+            down_col_sq = [0.0] * len(gate)
+            for row in down:
+                for c in range(len(row)):
+                    v = row[c]
+                    down_col_sq[c] += v * v
             for c in range(len(gate)):
                 s = final.get((layer, e, c))
                 if s is None:
                     continue
                 w2 = (
-                    sum(gate[c][q] ** 2 for q in range(len(gate[c])))
-                    + sum(up[c][q] ** 2 for q in range(len(up[c])))
-                    + sum(down[q][c] ** 2 for q in range(len(down)))
+                    sum(v * v for v in gate[c])
+                    + sum(v * v for v in up[c])
+                    + down_col_sq[c]
                 )
                 out[(layer, e, c)] = (s.mean_abs ** 2) * w2
     return out, False

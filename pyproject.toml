@@ -11,6 +11,7 @@ requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 authors = [{ name = "model-atlas contributors" }]
 dependencies = [
+    "numpy>=1.26,<3",
     "pydantic>=2.7,<3",
     "PyYAML>=6.0,<7",
     "typer>=0.12,<1",

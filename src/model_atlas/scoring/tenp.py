@@ -25,8 +25,17 @@ if TYPE_CHECKING:
     from model_atlas.atlas.runtime import MiniMoE
 
 
-def _col_norm(down: list[list[float]], c: int) -> float:
-    return math.sqrt(sum(row[c] * row[c] for row in down))
+def _col_norms(down: list[list[float]]) -> list[float]:
+    """All ||down[:,c]|| in one pass over rows (was O(C) walks per channel)."""
+    hidden_out = len(down)
+    width = len(down[0]) if down else 0
+    acc = [0.0] * width
+    for r in range(hidden_out):
+        row = down[r]
+        for c in range(width):
+            v = row[c]
+            acc[c] += v * v
+    return [math.sqrt(a) for a in acc]
 
 
 def tenp_rank(
@@ -41,13 +50,14 @@ def tenp_rank(
     for layer, layer_w in enumerate(model.layers):
         for e, exp in enumerate(layer_w.experts):
             down = exp["down"]
+            col_norms = _col_norms(down)
             w = weights.get((layer, e), 1.0)
             for c in range(len(down[0])):
                 # structured channel: activation magnitude x output-projection col
                 s = final.get((layer, e, c))
                 if s is None:
                     continue
-                out[(layer, e, c)] = s.mean_abs * _col_norm(down, c) * w
+                out[(layer, e, c)] = s.mean_abs * col_norms[c] * w
     return out
 
 

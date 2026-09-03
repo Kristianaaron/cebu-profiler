@@ -67,6 +67,9 @@ def test_main_restores_signal_handlers_when_coordinator_is_interrupted(
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
+        def preflight(self, **_kwargs: object) -> dict[str, object]:
+            return {"ok": True, "blockers": []}
+
         def run(self, _payload: object, **_kwargs: object) -> MaintenanceReceipt:
             raise MaintenanceInterrupted(15)
 
@@ -88,6 +91,9 @@ def test_main_installs_traps_around_fake_coordinator_only(
     class _Coordinator:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             calls.append("init")
+
+        def preflight(self, **_kwargs: object) -> dict[str, object]:
+            return {"ok": True, "blockers": []}
 
         def run(self, payload: object, **kwargs: object) -> MaintenanceReceipt:
             calls.append("run")
@@ -174,6 +180,9 @@ def test_direct_canary_rejects_minted_lease_when_live_drain_probe_finds_service(
     class _Coordinator:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             events.append("init")
+
+        def preflight(self, **_kwargs: object) -> dict[str, object]:
+            return {"ok": True, "blockers": []}
 
         def verify_drained(self) -> None:
             events.append("verify")
@@ -282,6 +291,9 @@ def test_compression_result_mode_derives_exact_verified_artifact(
     class _Coordinator:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
+
+        def preflight(self, **_kwargs: object) -> dict[str, object]:
+            return {"ok": True, "blockers": []}
 
         def run(self, payload: object, **_kwargs: object) -> MaintenanceReceipt:
             assert isinstance(payload, tuple)

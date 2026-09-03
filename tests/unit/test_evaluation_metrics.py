@@ -1,5 +1,6 @@
 import math
 import random
+import subprocess
 import sys
 
 import pytest
@@ -388,8 +389,14 @@ def test_cka_wide_hidden_states_use_exact_observation_gram() -> None:
 
 
 def test_eager_package_import_brings_no_numpy() -> None:
-    # The evaluation package must import in the project venv with no NumPy
-    # on the path (dependency-free pure kernels).
-    import model_atlas.evaluation  # noqa: F401
-
-    assert "numpy" not in sys.modules
+    # The evaluation package must be importable without pulling NumPy onto the
+    # path (dependency-free pure kernels). Checked in a fresh interpreter so
+    # the assertion measures what THIS package imports -- other engine tests
+    # may legitimately load numpy earlier in the shared pytest process.
+    proc = subprocess.run(
+        [sys.executable, "-c", "import sys, model_atlas.evaluation; assert 'numpy' not in sys.modules"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
