@@ -13,6 +13,7 @@ from cebu_profiler.analysis import (
 )
 from cebu_profiler.candidates import CandidateGraph, CandidateNode, CandidateStage
 from cebu_profiler.census.census import build_manifest
+from cebu_profiler.checkpoint.remote import load_manifest_from_hf
 from cebu_profiler.checkpoint.source_manifest import load_manifest
 from cebu_profiler.checkpoint.structural_graph import build_structural_graph
 from cebu_profiler.dashboard import write_dashboard
@@ -28,10 +29,13 @@ from cebu_profiler.kernels import (
 from cebu_profiler.planning.memory_planner import GIB, assess
 from cebu_profiler.planning.realbytes import account_manifest, plan_candidates, report
 from cebu_profiler.profiler.export import export_run
+from cebu_profiler.profiler.layerwise import profile_checkpoint
 from cebu_profiler.profiler.reap import make_synthetic_corpus, run_calibration
 from cebu_profiler.profiler.runtime import build_mini_moe
 from cebu_profiler.profiler.v3_pipeline import run_v3_pipeline
 from cebu_profiler.registry.architectures import get_registry
+from cebu_profiler.registry.config_driven import spec_from_config, verify_spec_against_manifest
+from cebu_profiler.schemas.architecture import LayerKind
 
 app = typer.Typer(no_args_is_help=True, help="Model-agnostic Cebu Profiler platform CLI.")
 
@@ -100,9 +104,25 @@ def dashboard(
         "--kernel-receipt",
         help="Runtime-kernel receipt or catalog; repeat to import several",
     ),
+    checkpoint_manifest: str | None = typer.Option(  # noqa: B008
+        None,
+        "--checkpoint-manifest",
+        help="checkpoint_manifest.json of a real profiled model (adds Model identity to the GUI)",
+    ),
+    quant_plan: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--quant-plan",
+        help="quant_plan.json operating point(s) to display; repeat for several",
+    ),
 ) -> None:
     """Render the Cebu Lab interactive dashboard from measured data."""
-    path = write_dashboard(out, seed=seed, kernel_receipts=kernel_receipt)
+    path = write_dashboard(
+        out,
+        seed=seed,
+        kernel_receipts=kernel_receipt,
+        checkpoint_manifest=checkpoint_manifest,
+        quant_plan_paths=quant_plan,
+    )
     print(f"wrote interactive dashboard: {path}")
 
 
@@ -199,17 +219,47 @@ def list_architectures() -> None:
 
 @app.command()
 def inspect(
-    checkpoint_dir: str,
+    checkpoint_dir: str | None = typer.Argument(  # noqa: B008
+        None, help="Local checkpoint directory, or omit when using --hf"
+    ),
+    hf_repo: str | None = typer.Option(
+        None,
+        "--hf",
+        help="Hugging Face repo id (header-only range fetch, no tensor bodies)",
+    ),
+    revision: str = typer.Option("main", "--revision"),
+    out: str | None = typer.Option(
+        None, "--out", help="Directory to write measured inspect artifacts"
+    ),
     write_graph: bool = typer.Option(
         False,
         "--write-graph",
-        help="Write checkpoint_manifest.json + structural_model_graph.json into the checkpoint dir",
+        help="Write checkpoint_manifest.json + structural_model_graph.json",
+    ),
+    envelopes: str | None = typer.Option(
+        None,
+        "--envelopes",
+        help="If set, also print real-bytes candidates at these GiB envelopes",
+    ),
+    keep_fracs: str = typer.Option(
+        "1.0,0.9,0.8,0.7,0.6,0.5",
+        "--keep-fracs",
+        help="Expert-retention fractions considered when --envelopes is set",
     ),
 ) -> None:
-    """Census a real checkpoint directory (headers only) into a structural graph."""
-    manifest = load_manifest(checkpoint_dir)
+    """Census a checkpoint (local shards or HF headers) into a structural graph."""
+    if hf_repo:
+        manifest = load_manifest_from_hf(hf_repo, revision=revision, progress=print)
+        source_label = manifest.checkpoint_dir
+    elif checkpoint_dir:
+        manifest = load_manifest(checkpoint_dir)
+        source_label = checkpoint_dir
+    else:
+        print("inspect: pass a checkpoint directory or --hf <repo>")
+        raise typer.Exit(1)
+
     graph = build_structural_graph(manifest)
-    print(f"checkpoint: {checkpoint_dir}")
+    print(f"checkpoint: {source_label}")
     print(f"  shards: {len(manifest.shards)}")
     print(f"  tensors: {manifest.tensor_count}")
     print(f"  total bytes: {manifest.total_bytes}")
@@ -217,13 +267,88 @@ def inspect(
     print(f"  valid: {graph.valid}")
     for u in graph.unclassified:
         print(f"  UNCLASSIFIED: {u}")
-    if write_graph and graph.valid:
-        root = Path(checkpoint_dir)
-        (root / "checkpoint_manifest.json").write_text(manifest.model_dump_json(indent=2))
-        (root / "structural_model_graph.json").write_text(graph.model_dump_json(indent=2))
-        print("  wrote checkpoint_manifest.json + structural_model_graph.json")
+
+    if manifest.config:
+        spec = spec_from_config(manifest.config, manifest=manifest)
+        notes = verify_spec_against_manifest(spec, manifest)
+        print(
+            f"  spec {spec.name}: layers={spec.num_text_layers} "
+            f"dense={spec.layers_by_kind.get(LayerKind.DENSE, 0)} "
+            f"moe={spec.layers_by_kind.get(LayerKind.MOE, 0)} "
+            f"experts={spec.moe.num_routed_experts} top_k={spec.moe.top_k} "
+            f"hidden={spec.hidden_dim}"
+        )
+        for note in notes:
+            print(f"  DRIFT: {note}")
+
+    dest: Path | None = Path(out) if out else None
+    if dest is None and write_graph and checkpoint_dir:
+        dest = Path(checkpoint_dir)
+    if dest is not None:
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "checkpoint_manifest.json").write_text(
+            manifest.model_dump_json(indent=2) + "\n", encoding="utf-8"
+        )
+        (dest / "structural_model_graph.json").write_text(
+            graph.model_dump_json(indent=2) + "\n", encoding="utf-8"
+        )
+        print(f"  wrote artifacts under {dest}")
+
+    if envelopes:
+        acc = account_manifest(manifest)
+        envs = tuple(float(x) for x in envelopes.split(","))
+        fracs = tuple(float(x) for x in keep_fracs.split(","))
+        print(report(plan_candidates(acc, envelopes=envs, keep_fracs=fracs), acc))
+
     if not graph.valid:
         raise typer.Exit(1)
+
+
+@app.command("profile")
+def profile(
+    checkpoint: str = typer.Argument(
+        ..., help="Inspect-run directory (checkpoint_manifest.json) or shard dir"
+    ),
+    layers: str = typer.Option(
+        "1",
+        "--layers",
+        help="Layer spec: '1', '1-3', 'moe', or 'all'. Streams one layer at a time.",
+    ),
+    samples: int = typer.Option(2, "--samples"),
+    seq_len: int = typer.Option(4, "--seq-len"),
+    seed: int = typer.Option(0, "--seed"),
+    hf_repo: str | None = typer.Option(None, "--hf"),
+    revision: str = typer.Option("main", "--revision"),
+    cache_dir: str | None = typer.Option(
+        None, "--cache-dir", help="On-disk cache for streamed tensor bodies"
+    ),
+    out: str | None = typer.Option(None, "--out", help="Write REAP JSON here"),
+) -> None:
+    """Layerwise REAP on a real checkpoint: load one layer, score experts, free it."""
+    payload = profile_checkpoint(
+        checkpoint,
+        layers=layers,
+        samples=samples,
+        seq_len=seq_len,
+        seed=seed,
+        hf_repo=hf_repo,
+        revision=revision,
+        cache_dir=cache_dir,
+        out=out,
+        progress=print,
+    )
+    print(f"trajectory: {payload['trajectory']}  evidence: {payload['evidence']}")
+    print(
+        f"layers {payload['layers']}  tokens={payload['n_tokens']}  "
+        f"experts={payload['experts_scored']}"
+    )
+    for row in payload["top"][:12]:
+        print(
+            f"  L{row['layer']}E{row['expert']}: reap={row['reap']:.5f} "
+            f"route_freq={row['route_freq']:.3f} norm={row['output_norm']:.4f}"
+        )
+    if out:
+        print(f"wrote {out}")
 
 
 @app.command()
@@ -282,12 +407,18 @@ def real_candidates(
     envelopes: str = typer.Option(
         "190,210,225", "--envelopes", help="Comma-separated GiB envelopes"
     ),
+    keep_fracs: str = typer.Option(
+        "1.0,0.9,0.8,0.7,0.6,0.5",
+        "--keep-fracs",
+        help="Comma-separated expert-retention fractions to search",
+    ),
 ) -> None:
     """Plan real-bytes derivative candidates at the given resident envelopes."""
     manifest = load_manifest(checkpoint_dir)
     acc = account_manifest(manifest)
     envs = tuple(float(x) for x in envelopes.split(","))
-    print(report(plan_candidates(acc, envelopes=envs), acc))
+    fracs = tuple(float(x) for x in keep_fracs.split(","))
+    print(report(plan_candidates(acc, envelopes=envs, keep_fracs=fracs), acc))
 
 
 @app.command()
@@ -448,6 +579,36 @@ def v3_corpus(
     print(f"  clusters: {', '.join(c.cluster_id for c in rep.clusters)}")
     print(f"  insufficient-evidence cluster-cells: {len(rep.insufficient_clusters)}")
     print(f"  per-cluster rows: {len(rep.cluster_expert_coverage)}")
+
+
+@app.command("quant-rd")
+def quant_rd(
+    manifest: str = typer.Argument(..., help="checkpoint_manifest.json from inspect --write-graph"),
+    checkpoint: str = typer.Argument(..., help="checkpoint dir (local shards) for tensor bodies"),
+    out: str = typer.Option(..., "--out", help="output quant_rd_report.json path"),
+    seed: int = typer.Option(0, "--seed"),
+    max_tensors: int = typer.Option(400, "--max-tensors"),
+    cache_dir: str = typer.Option(None, "--cache-dir"),
+) -> None:
+    """Sampled rate-distortion screen (measured) over a real BF16 checkpoint."""
+    from cebu_profiler.scoring.quant_cli import run_quant_rd
+
+    path = run_quant_rd(manifest, checkpoint, out, seed=seed, max_tensors=max_tensors, cache_dir=cache_dir)
+    typer.echo(f"wrote {path}")
+
+
+@app.command("quant-plan")
+def quant_plan(
+    rd_report: str = typer.Argument(..., help="quant_rd_report.json from quant-rd"),
+    out: str = typer.Option(..., "--out", help="output quant_plan.json path"),
+    fidelity: float = typer.Option(200.0, "--fidelity-gib"),
+    knee: float = typer.Option(188.0, "--knee-gib"),
+) -> None:
+    """GEMQ-style global allocation of the Fidelity + Knee operating points."""
+    from cebu_profiler.scoring.quant_cli import run_quant_plan
+
+    path = run_quant_plan(rd_report, out, fidelity_gib=fidelity, knee_gib=knee)
+    typer.echo(f"wrote {path}")
 
 
 def main() -> None:

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
+import re
 from typing import Any
 
 from cebu_profiler.builder import build_derivative
@@ -219,9 +221,85 @@ def _real_bytes_payload() -> dict[str, Any]:
     return out
 
 
+def build_model_identity(
+    checkpoint_manifest_path: str | None = None,
+    quant_plan_paths: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """Measured model identity + operating points for the GUI Model panel.
+
+    Everything here comes from files the profiling run actually wrote:
+    the checkpoint manifest (census) and quant-plan allocations. No synthetics.
+    """
+    if not checkpoint_manifest_path:
+        return None
+    try:
+        raw = json.loads(Path(checkpoint_manifest_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+    config = raw.get("config", {}) or {}
+    arch_names = config.get("architectures") or []
+    model_name = str(raw.get("checkpoint_dir") or raw.get("source") or arch_names[0] if arch_names else "unknown")
+    # humanize hf://tencent/Hy4-preview@main -> tencent/Hy4-preview@main
+    model_name = model_name.removeprefix("hf://")
+
+    tensors = raw.get("tensors") or []
+    total_bytes = raw.get("total_bytes") or sum(t.get("byte_size", 0) for t in tensors)
+    n_tensors = raw.get("tensor_count") or len(tensors)
+
+    identity: dict[str, Any] = {
+        "model": model_name,
+        "architecture": arch_names[0] if arch_names else config.get("model_type", "unknown"),
+        "layers": config.get("num_hidden_layers"),
+        "experts": config.get("n_routed_experts") or config.get("num_routed_experts"),
+        "top_k": config.get("num_experts_per_tok"),
+        "hidden": config.get("hidden_size"),
+        "vocab": config.get("vocab_size"),
+        "dtype": config.get("dtype") or config.get("torch_dtype"),
+        "checkpoint": model_name,
+        "total_gib": round(total_bytes / (1024**3), 2) if total_bytes else None,
+        "tensors": n_tensors,
+        "manifest": checkpoint_manifest_path,
+        "plans": [],
+    }
+    m = re.search(r"^models--(.+?)--(.+?)$", model_name)
+    if m:
+        identity["model"] = f"{m.group(1).replace('--', '/')}/{m.group(2)}"
+
+    for qp in quant_plan_paths or []:
+        try:
+            plan_raw = json.loads(Path(qp).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for point, pdata in plan_raw.items():
+            fams = pdata.get("families", {})
+            exp_fam = fams.get("experts", {})
+            identity["plans"].append(
+                {
+                    "name": point,
+                    "budget_gib": pdata.get("budget_gib"),
+                    "total_gib": pdata.get("total_target_gib"),
+                    "bf16_gib": pdata.get("total_bf16_gib"),
+                    "expert_mean_bpw": exp_fam.get("mean_bpw"),
+                    "families": [
+                        {
+                            "family": f,
+                            "target_gib": v.get("target_gib"),
+                            "mean_bpw": v.get("mean_bpw"),
+                            "tensors": v.get("tensors"),
+                        }
+                        for f, v in sorted(fams.items(), key=lambda kv: -(kv[1].get("target_gib") or 0))
+                    ],
+                }
+            )
+    return identity
+
+
 def build_dashboard_data(
     seed: int = SEED,
     kernel_receipts: list[str] | None = None,
+    checkpoint_manifest: str | None = None,
+    quant_plan_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run the measured pipeline and return JSON-serializable dashboard data."""
     model = build_mini_moe(ARCH, seed=seed)
@@ -421,8 +499,9 @@ def build_dashboard_data(
     kernel_evidence_payload = summarize_catalog(load_catalog(kernel_receipts or []))
 
     return {
+        "model_identity": build_model_identity(checkpoint_manifest, quant_plan_paths),
         "meta": {
-            "arch": ARCH.name,
+            "arch": (build_model_identity(checkpoint_manifest, quant_plan_paths) or {}).get("model", ARCH.name),
             "layers": ARCH.num_text_layers,
             "experts": ARCH.moe.num_routed_experts,
             "top_k": ARCH.moe.top_k,
@@ -912,7 +991,10 @@ def render_dashboard(data: dict[str, Any]) -> str:
     nav: list[dict[str, Any]] = [
         {
             "section": "Overview",
-            "tabs": [{"id": "summary", "title": "Summary"}],
+            "tabs": [
+                {"id": "model", "title": "Model"},
+                {"id": "summary", "title": "Summary"},
+            ],
         },
         {
             "section": "Profiling",
@@ -1157,7 +1239,11 @@ def render_dashboard(data: dict[str, Any]) -> str:
 <nav class="side">{tab_html}</nav>
 <div class="col">
 <main class="main">
+ <div class="panel" id="panel-model">
+   <div id="model-identity">Model identity loads below.</div>
+ </div>
  <div class="panel" id="panel-summary">
+   <div id="model-banner"></div>
    <p>End-to-end parent→derivative Cebu Profiler over a genuine synthetic mini-MoE. Everything below is computed by the same measured code paths as the test suite. This is the <strong>Cebu Profile Platform</strong>: use <em>Profiling</em> to understand the model, <em>Quantization &amp; Fit</em> to shrink/score it, and the <strong>Eval Harness</strong> link (bottom of the nav) for independent benchmarking.</p>
  </div>
  <div class="panel" id="panel-capability">
@@ -1299,6 +1385,40 @@ def render_dashboard(data: dict[str, Any]) -> str:
 </div>
 <script>
  const DATA = {payload};
+
+(function renderModelIdentity() {{
+  var mi = DATA.model_identity;
+  var banner = document.getElementById('model-banner');
+  var host = document.getElementById('model-identity');
+  var label = mi ? mi.model : (DATA.meta && DATA.meta.arch) || 'unknown';
+  if (banner) {{
+    banner.innerHTML = '<div style="display:flex;align-items:center;gap:10px;margin:0 0 10px">' +
+      '<span style="font-family:JetBrains Mono,ui-monospace,monospace;font-size:16px;color:#fff;font-weight:600">' + label + '</span>' +
+      '<span class="note" style="font-size:11px">profiled checkpoint &middot; ' + ((mi&&mi.tensors)||'?') + ' tensors &middot; ' + ((mi&&mi.total_gib)||'?') + ' GiB BF16 census</span></div>';
+  }}
+  if (!host) return;
+  if (!mi) {{ host.innerHTML = '<p class="note">No checkpoint manifest passed to the dashboard — add --checkpoint-manifest + --quant-plan to see real model data here.</p>'; return; }}
+  var rows = [['architecture', mi.architecture], ['checkpoint', mi.checkpoint],
+              ['layers', mi.layers], ['routed experts', mi.experts], ['top-k', mi.top_k],
+              ['hidden dim', mi.hidden], ['vocab', mi.vocab], ['dtype', mi.dtype],
+              ['census size', mi.total_gib + ' GiB (' + mi.tensors + ' tensors)']];
+  var html = '<h3>Model</h3><table><tbody>' + rows.map(function(r){{
+    return '<tr><td style="color:#979797;padding:4px 14px 4px 0;font-size:12px">'+r[0]+'</td><td style="font-family:JetBrains Mono,ui-monospace,monospace;font-size:13px;color:#dcdcdc">'+(r[1]??'-')+'</td></tr>';
+  }}).join('') + '</tbody></table>';
+  if (mi.plans && mi.plans.length) {{
+    mi.plans.forEach(function(p) {{
+      html += '<h3>Operating point: ' + p.name + ' — target ' + p.budget_gib + ' GiB &rarr; allocated ' + p.total_gib + ' GiB (from ' + p.bf16_gib + ' GiB BF16)</h3>';
+      html += '<table><thead><tr><th>family</th><th>target GiB</th><th>mean bpw</th><th>tensors</th></tr></thead><tbody>';
+      p.families.forEach(function(f) {{
+        html += '<tr><td>'+f.family+'</td><td>'+(f.target_gib??'-')+'</td><td>'+(f.mean_bpw??'-')+'</td><td>'+(f.tensors??'-')+'</td></tr>';
+      }});
+      html += '</tbody></table>';
+    }});
+  }} else {{
+    html += '<p class="note">No quant-plan operating points loaded (pass --quant-plan).</p>';
+  }}
+  host.innerHTML = html;
+}})();
  function el(t, rows){{ if(!rows||!rows.length){{return "<tr><td class='note'>no data</td></tr>";}}
    return rows.map(r=>{{let tds = Object.entries(r).map(([k,v]) => {{let s = Array.isArray(v)?v.map(x=>`<span class='chip'>${{x}}</span>`).join(''):(typeof v==='boolean'?(v?'<span class=green>yes</span>':'<span class=red>no</span>'):v);
      return `<td>${{s}}</td>`}}).join(''); return `<tr>${{tds}}</tr>`;}}).join("");}}
@@ -1737,8 +1857,15 @@ def write_dashboard(
     path: str,
     seed: int = SEED,
     kernel_receipts: list[str] | None = None,
+    checkpoint_manifest: str | None = None,
+    quant_plan_paths: list[str] | None = None,
 ) -> str:
-    data = build_dashboard_data(seed=seed, kernel_receipts=kernel_receipts)
+    data = build_dashboard_data(
+        seed=seed,
+        kernel_receipts=kernel_receipts,
+        checkpoint_manifest=checkpoint_manifest,
+        quant_plan_paths=quant_plan_paths,
+    )
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(render_dashboard(data))
     return path
